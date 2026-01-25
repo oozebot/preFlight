@@ -1,0 +1,19 @@
+///|/ Copyright (c) preFlight 2025+ oozeBot, LLC
+///|/
+///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
+///|/
+#import <Cocoa/Cocoa.h>
+
+class wxEvtHandler;
+
+@interface RetinaHelperImpl : NSObject
+{
+	NSView *view;
+	wxEvtHandler* handler;
+}
+
+-(id)initWithView:(NSView *)view handler:(wxEvtHandler *)handler;
+-(void)setViewWantsBestResolutionOpenGLSurface:(BOOL)value;
+-(BOOL)getViewWantsBestResolutionOpenGLSurface;
+-(float)getBackingScaleFactor;
+@end

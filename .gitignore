@@ -1,0 +1,5 @@
+# Build output
+/build/
+/build_debug/
+deps/build/
+deps/destdir/

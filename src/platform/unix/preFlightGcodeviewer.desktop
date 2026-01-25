@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=preFlight GCode viewer
+Exec=preflight --gcodeviewer %F
+Icon=preFlight-gcodeviewer
+Terminal=false
+Type=Application
+MimeType=text/x.gcode;
+Categories=Graphics;3DGraphics;
+Keywords=3D;Printing;Slicer;

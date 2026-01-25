@@ -1,0 +1,414 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN" "http://www.w3.org/TR/html401/loose.dtd">
+<html>
+<!-- Created on July, 19 2025 by texi2html 1.78a -->
+<!--
+Written by: Lionel Cons <Lionel.Cons@cern.ch> (original author)
+            Karl Berry  <karl@freefriends.org>
+            Olaf Bachmann <obachman@mathematik.uni-kl.de>
+            and many others.
+Maintained by: Many creative people.
+Send bugs and suggestions to <texi2html-bug@nongnu.org>
+
+-->
+<head>
+<title>GNU gettext utilities: 12. The Translator's View</title>
+
+<meta name="description" content="GNU gettext utilities: 12. The Translator's View">
+<meta name="keywords" content="GNU gettext utilities: 12. The Translator's View">
+<meta name="resource-type" content="document">
+<meta name="distribution" content="global">
+<meta name="Generator" content="texi2html 1.78a">
+<meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+<style type="text/css">
+<!--
+a.summary-letter {text-decoration: none}
+pre.display {font-family: serif}
+pre.format {font-family: serif}
+pre.menu-comment {font-family: serif}
+pre.menu-preformatted {font-family: serif}
+pre.smalldisplay {font-family: serif; font-size: smaller}
+pre.smallexample {font-size: smaller}
+pre.smallformat {font-family: serif; font-size: smaller}
+pre.smalllisp {font-size: smaller}
+span.roman {font-family:serif; font-weight:normal;}
+span.sansserif {font-family:sans-serif; font-weight:normal;}
+ul.toc {list-style: none}
+-->
+</style>
+
+
+</head>
+
+<body lang="en" bgcolor="#FFFFFF" text="#000000" link="#0000FF" vlink="#800080" alink="#FF0000">
+
+<table cellpadding="1" cellspacing="1" border="0">
+<tr><td valign="middle" align="left">[<a href="gettext_11.html#SEC219" title="Beginning of this chapter or previous chapter"> &lt;&lt; </a>]</td>
+<td valign="middle" align="left">[<a href="gettext_13.html#SEC245" title="Next chapter"> &gt;&gt; </a>]</td>
+<td valign="middle" align="left"> &nbsp; </td>
+<td valign="middle" align="left"> &nbsp; </td>
+<td valign="middle" align="left"> &nbsp; </td>
+<td valign="middle" align="left"> &nbsp; </td>
+<td valign="middle" align="left"> &nbsp; </td>
+<td valign="middle" align="left">[<a href="gettext_toc.html#SEC_Top" title="Cover (top) of document">Top</a>]</td>
+<td valign="middle" align="left">[<a href="gettext_toc.html#SEC_Contents" title="Table of contents">Contents</a>]</td>
+<td valign="middle" align="left">[<a href="gettext_21.html#SEC428" title="Index">Index</a>]</td>
+<td valign="middle" align="left">[<a href="gettext_abt.html#SEC_About" title="About (help)"> ? </a>]</td>
+</tr></table>
+
+<hr size="2">
+<a name="Translators"></a>
+<a name="SEC239"></a>
+<h1 class="chapter"> <a href="gettext_toc.html#TOC233">12. The Translator's View</a> </h1>
+
+
+
+<a name="Organization"></a>
+<a name="SEC240"></a>
+<h2 class="section"> <a href="gettext_toc.html#TOC234">12.1 Organization</a> </h2>
+
+<p>For some software packages, each translator works on her own
+and communicates directly with the developers of the package.
+For some other software packages, on the other hand,
+translators are organized
+into <em>translation projects</em> and <em>translation teams</em>.
+</p>
+<p>A <em>translation project</em> applies to a group of software packages
+and shares procedures and methodologies regarding the translation.
+</p>
+<p>There are currently three major translation projects:
+</p>
+<ul>
+<li>
+The &ldquo;Translation Project&rdquo;, which is used
+by all kinds of Free Software packages, but in particular by GNU packages.
+It has its home at <a href="https://translationproject.org/">https://translationproject.org/</a>.
+
+</li><li>
+The &ldquo;KDE Localization Project&rdquo;, which is used by KDE packages.
+It is at <a href="https://l10n.kde.org/">https://l10n.kde.org/</a>.
+
+</li><li>
+The &ldquo;GNOME Localization Project&rdquo;, which is used by GNOME packages.
+It is at <a href="https://l10n.gnome.org/">https://l10n.gnome.org/</a>.
+</li></ul>
+
+<p>A <em>translation team</em> is a group of translators for a single language,
+in the scope of a translation project.
+</p>
+
+<a name="Responsibilities"></a>
+<a name="SEC241"></a>
+<h2 class="section"> <a href="gettext_toc.html#TOC235">12.2 Responsibilities in the Translation Project</a> </h2>
+
+<p>The following rules and habits apply to the Translation Project.
+</p>
+<p>The translator's responsibilities are:
+</p><ul>
+<li>
+She submits a translations disclaimer to the Free Software Foundation
+(once only, and
+only when she wants to translate a package that requires a disclaimer).
+
+<p>A disclaimer is a legal document
+that allows the software package to distribute her translation work.
+It is not as strong as a copyright assignment.
+Merely, it says that the signer
+will never make use of the copyright on her translations:
+will never forbid copying them,
+and will never ask for some kind of compensation.
+This guarantees that the FSF (and everyone else)
+will always be allowed to freely distribute these translations.
+The FSF wishes to have this guarantee in a legally binding manner,
+to be on the safe side.
+</p>
+<p>There are two ways to submit the disclaimer:
+Either online through
+<a href="https://crm.fsf.org/civicrm/profile/create?gid=91&amp;reset=1">this form</a>
+on the FSF's web site,
+or by printing, signing, and submitting
+the file &lsquo;<tt>disclaim-translations.txt</tt>&rsquo; found in the GNU gettext distribution.
+</p>
+</li><li>
+Agree with the other translators of the same team
+who is &ldquo;in charge&rdquo; for the translations of a particular package.
+</li></ul>
+
+<p>The Translation Project has a coordinator.
+He can be reached at &lsquo;<samp>coordinator@translationproject.org</samp>&rsquo;.
+His responsibilities are:
+</p><ul>
+<li>
+He maintains the web site <a href="https://translationproject.org/">https://translationproject.org/</a>.
+</li><li>
+When he receives a release or prerelease announcement
+from one of the software package maintainers,
+he extracts the POT file(s)
+and sends notifications to all translation teams about it.
+</li></ul>
+
+<p>The responsibilities of the package maintainers are:
+</p><ul>
+<li>
+To incorporate the translations in the software package before a release.
+</li><li>
+To forward bug reports about the translations
+to the respective translation team.
+A developer or maintainer should never apply a translation fix himself,
+because that would cause conflicts with the translation team.
+</li></ul>
+
+
+
+<a name="Dialects"></a>
+<a name="SEC242"></a>
+<h2 class="section"> <a href="gettext_toc.html#TOC236">12.3 Language dialects</a> </h2>
+
+<p>For many languages, a translation into the main dialect is intelligible
+by all speakers of the language.
+Speakers of another dialect can have a separate translation if they wish so.
+In fact, since the fallback mechanism implemented in GNU libc and GNU libintl
+applies on a per-message basis,
+the message catalog for the dialect needs only to contain
+the translations that differ from those in the main language.
+</p>
+<p>For example,
+French speakers in Canada (that is, users in the locale <code>fr_CA</code>)
+can use and do accept translations
+produced by French speakers in France (typical file name: <code>fr.po</code>).
+Nevertheless, the translation system with PO files
+enables them to produce special message catalogs (file name: <code>fr_CA.po</code>)
+that will take priority over <code>fr.po</code> for users in that locale.
+Similarly for users in Austria,
+where message catalogs <code>de_AT.po</code> take priority
+over the catalogs named <code>de.po</code> that reflect German as spoken in Germany.
+</p>
+<p>The situation is different for Chinese, though:
+Since users in the People's Republic of China and in Singapore
+want translations with Simplified Chinese characters,
+whereas Chinese users in other territories
+(such as Taiwan, Hong Kong, and Macao)
+want translations with Traditional Chinese characters,
+no translator should ever submit a file named <code>zh.po</code>.
+Instead, there will typically be two separate translation teams:
+a team that produces translations with Simplified Chinese characters
+(file name <code>zh_CN.po</code>)
+and a team that produces translations with Traditional Chinese characters
+(file name <code>zh_TW.po</code>).
+</p>
+
+<a name="Translating-plural-forms"></a>
+<a name="SEC243"></a>
+<h2 class="section"> <a href="gettext_toc.html#TOC237">12.4 Translating plural forms</a> </h2>
+
+<p>Suppose you are translating a PO file, and it contains an entry like this:
+</p>
+<table><tr><td>&nbsp;</td><td><pre class="smallexample">#, c-format
+msgid &quot;One file removed&quot;
+msgid_plural &quot;%d files removed&quot;
+msgstr[0] &quot;&quot;
+msgstr[1] &quot;&quot;
+</pre></td></tr></table>
+
+<p>What does this mean? How do you fill it in?
+</p>
+<p>Such an entry denotes a message with plural forms, that is, a message where
+the text depends on a cardinal number.  The general form of the message,
+in English, is the <code>msgid_plural</code> line.  The <code>msgid</code> line is the
+English singular form, that is, the form for when the number is equal to 1.
+More details about plural forms are explained in <a href="gettext_11.html#SEC229">Additional functions for plural forms</a>.
+</p>
+<p>The first thing you need to look at is the <code>Plural-Forms</code> line in the
+header entry of the PO file.  It contains the number of plural forms and a
+formula.  If the PO file does not yet have such a line, you have to add it.
+It only depends on the language into which you are translating.  You can
+get this info by using the <code>msginit</code> command (see <a href="gettext_6.html#SEC60">Creating a New PO File</a>) &ndash;
+it contains a database of known plural formulas &ndash; or by asking other
+members of your translation team.
+</p>
+<p>Suppose the line looks as follows:
+</p>
+<table><tr><td>&nbsp;</td><td><pre class="smallexample">&quot;Plural-Forms: nplurals=3; plural=n%10==1 &amp;&amp; n%100!=11 ? 0 : n%10&gt;=2 &amp;&amp; n&quot;
+&quot;%10&lt;=4 &amp;&amp; (n%100&lt;10 || n%100&gt;=20) ? 1 : 2;\n&quot;
+</pre></td></tr></table>
+
+<p>It's logically one line; recall that the PO file formatting is allowed to
+break long lines so that each physical line fits in 80 monospaced columns.
+</p>
+<p>The value of <code>nplurals</code> here tells you that there are three plural
+forms.  The first thing you need to do is to ensure that the entry contains
+an <code>msgstr</code> line for each of the forms:
+</p>
+<table><tr><td>&nbsp;</td><td><pre class="smallexample">#, c-format
+msgid &quot;One file removed&quot;
+msgid_plural &quot;%d files removed&quot;
+msgstr[0] &quot;&quot;
+msgstr[1] &quot;&quot;
+msgstr[2] &quot;&quot;
+</pre></td></tr></table>
+
+<p>Then translate the <code>msgid_plural</code> line and fill it in into each
+<code>msgstr</code> line:
+</p>
+<table><tr><td>&nbsp;</td><td><pre class="smallexample">#, c-format
+msgid &quot;One file removed&quot;
+msgid_plural &quot;%d files removed&quot;
+msgstr[0] &quot;%d slika uklonjenih&quot;
+msgstr[1] &quot;%d slika uklonjenih&quot;
+msgstr[2] &quot;%d slika uklonjenih&quot;
+</pre></td></tr></table>
+
+<p>Now you can refine the translation so that it matches the plural form.
+According to the formula above, <code>msgstr[0]</code> is used when the number
+ends in 1 but does not end in 11; <code>msgstr[1]</code> is used when the number
+ends in 2, 3, 4, but not in 12, 13, 14; and <code>msgstr[2]</code> is used in
+all other cases.  With this knowledge, you can refine the translations:
+</p>
+<table><tr><td>&nbsp;</td><td><pre class="smallexample">#, c-format
+msgid &quot;One file removed&quot;
+msgid_plural &quot;%d files removed&quot;
+msgstr[0] &quot;%d slika je uklonjena&quot;
+msgstr[1] &quot;%d datoteke uklonjenih&quot;
+msgstr[2] &quot;%d slika uklonjenih&quot;
+</pre></td></tr></table>
+
+<p>You noticed that in the English singular form (<code>msgid</code>) the number
+placeholder could be omitted and replaced by the numeral word &ldquo;one&rdquo;.
+Can you do this in your translation as well?
+</p>
+<table><tr><td>&nbsp;</td><td><pre class="smallexample">msgstr[0] &quot;jednom datotekom je uklonjen&quot;
+</pre></td></tr></table>
+
+<p>Well, it depends on whether <code>msgstr[0]</code> applies only to the number 1,
+or to other numbers as well.  If, according to the plural formula,
+<code>msgstr[0]</code> applies only to <code>n == 1</code>, then you can use the
+specialized translation without the number placeholder.  In our case,
+however, <code>msgstr[0]</code> also applies to the numbers 21, 31, 41, etc.,
+and therefore you cannot omit the placeholder.
+</p>
+
+<a name="Prioritizing-messages"></a>
+<a name="SEC244"></a>
+<h2 class="section"> <a href="gettext_toc.html#TOC238">12.5 Prioritizing messages: How to determine which messages to translate first</a> </h2>
+
+<p>A translator sometimes has only a limited amount of time per week to
+spend on a package, and some packages have quite large message catalogs
+(over 1000 messages).  Therefore she wishes to translate the messages
+first that are the most visible to the user, or that occur most frequently.
+This section describes how to determine these &quot;most urgent&quot; messages.
+It also applies to determine the &quot;next most urgent&quot; messages after the
+message catalog has already been partially translated.
+</p>
+<p>In a first step, she uses the programs like a user would do.  While she
+does this, the GNU <code>gettext</code> library logs into a file the not yet
+translated messages for which a translation was requested from the program.
+</p>
+<p>In a second step, she uses the PO mode to translate precisely this set
+of messages.
+</p>
+<a name="IDX1133"></a>
+<p>Here are more details.  The GNU <code>libintl</code> library (but not the
+corresponding functions in GNU <code>libc</code>) supports an environment variable
+<code>GETTEXT_LOG_UNTRANSLATED</code>.  The GNU <code>libintl</code> library will
+log into this file the messages for which <code>gettext()</code> and related
+functions couldn't find the translation.  If the file doesn't exist, it
+will be created as needed.  On systems with GNU <code>libc</code> a shared library
+&lsquo;<samp>preloadable_libintl.so</samp>&rsquo; is provided that can be used with the ELF
+&lsquo;<samp>LD_PRELOAD</samp>&rsquo; mechanism.
+</p>
+<p>So, in the first step, the translator uses these commands on systems with
+GNU <code>libc</code>:
+</p>
+<table><tr><td>&nbsp;</td><td><pre class="smallexample">$ LD_PRELOAD=/usr/local/lib/preloadable_libintl.so
+$ export LD_PRELOAD
+$ GETTEXT_LOG_UNTRANSLATED=$HOME/gettextlogused
+$ export GETTEXT_LOG_UNTRANSLATED
+</pre></td></tr></table>
+
+<p>and these commands on other systems:
+</p>
+<table><tr><td>&nbsp;</td><td><pre class="smallexample">$ GETTEXT_LOG_UNTRANSLATED=$HOME/gettextlogused
+$ export GETTEXT_LOG_UNTRANSLATED
+</pre></td></tr></table>
+
+<p>Then she uses and peruses the programs.  (It is a good and recommended
+practice to use the programs for which you provide translations: it
+gives you the needed context.)  When done, she removes the environment
+variables:
+</p>
+<table><tr><td>&nbsp;</td><td><pre class="smallexample">$ unset LD_PRELOAD
+$ unset GETTEXT_LOG_UNTRANSLATED
+</pre></td></tr></table>
+
+<p>The second step starts with removing duplicates:
+</p>
+<table><tr><td>&nbsp;</td><td><pre class="smallexample">$ msguniq $HOME/gettextlogused &gt; missing.po
+</pre></td></tr></table>
+
+<p>The result is a PO file, but needs some preprocessing before a PO file editor
+can be used with it.  First, it is a multi-domain PO file, containing
+messages from many translation domains.  Second, it lacks all translator
+comments and source references.  Here is how to get a list of the affected
+translation domains:
+</p>
+<table><tr><td>&nbsp;</td><td><pre class="smallexample">$ sed -n -e 's,^domain &quot;\(.*\)&quot;$,\1,p' &lt; missing.po | sort | uniq
+</pre></td></tr></table>
+
+<p>Then the translator can handle the domains one by one.  For simplicity,
+let's use environment variables to denote the language, domain and source
+package.
+</p>
+<table><tr><td>&nbsp;</td><td><pre class="smallexample">$ lang=nl             # your language
+$ domain=coreutils    # the name of the domain to be handled
+$ package=/usr/src/gnu/coreutils-4.5.4   # the package where it comes from
+</pre></td></tr></table>
+
+<p>She takes the latest copy of &lsquo;<tt>$lang.po</tt>&rsquo; from the Translation Project,
+or from the package (in most cases, &lsquo;<tt>$package/po/$lang.po</tt>&rsquo;), or
+creates a fresh one if she's the first translator (see <a href="gettext_6.html#SEC60">Creating a New PO File</a>).
+She then uses the following commands to mark the not urgent messages as
+&quot;obsolete&quot;.  (This doesn't mean that these messages - translated and
+untranslated ones - will go away.  It simply means that the PO file editor
+will ignore them in the following editing session.)
+</p>
+<table><tr><td>&nbsp;</td><td><pre class="smallexample">$ msggrep --domain=$domain missing.po | grep -v '^domain' \
+  &gt; $domain-missing.po
+$ msgattrib --set-obsolete --ignore-file $domain-missing.po $domain.$lang.po \
+  &gt; $domain.$lang-urgent.po
+</pre></td></tr></table>
+
+<p>Then she translates &lsquo;<tt>$domain.$lang-urgent.po</tt>&rsquo; by use of a PO file editor
+(see section <a href="gettext_8.html#SEC78">Editing PO Files</a>).
+(FIXME: I don't know whether <code>Lokalize</code> and <code>gtranslator</code> also
+preserve obsolete messages, as they should.)
+Finally she restores the not urgent messages (with their earlier
+translations, for those which were already translated) through this command:
+</p>
+<table><tr><td>&nbsp;</td><td><pre class="smallexample">$ msgmerge --no-fuzzy-matching $domain.$lang-urgent.po $package/po/$domain.pot \
+  &gt; $domain.$lang.po
+</pre></td></tr></table>
+
+<p>Then she can submit &lsquo;<tt>$domain.$lang.po</tt>&rsquo; and proceed to the next domain.
+</p>
+
+<table cellpadding="1" cellspacing="1" border="0">
+<tr><td valign="middle" align="left">[<a href="#SEC239" title="Beginning of this chapter or previous chapter"> &lt;&lt; </a>]</td>
+<td valign="middle" align="left">[<a href="gettext_13.html#SEC245" title="Next chapter"> &gt;&gt; </a>]</td>
+<td valign="middle" align="left"> &nbsp; </td>
+<td valign="middle" align="left"> &nbsp; </td>
+<td valign="middle" align="left"> &nbsp; </td>
+<td valign="middle" align="left"> &nbsp; </td>
+<td valign="middle" align="left"> &nbsp; </td>
+<td valign="middle" align="left">[<a href="gettext_toc.html#SEC_Top" title="Cover (top) of document">Top</a>]</td>
+<td valign="middle" align="left">[<a href="gettext_toc.html#SEC_Contents" title="Table of contents">Contents</a>]</td>
+<td valign="middle" align="left">[<a href="gettext_21.html#SEC428" title="Index">Index</a>]</td>
+<td valign="middle" align="left">[<a href="gettext_abt.html#SEC_About" title="About (help)"> ? </a>]</td>
+</tr></table>
+<p>
+ <font size="-1">
+  This document was generated by <em>Bruno Haible</em> on <em>July, 19 2025</em> using <a href="https://www.nongnu.org/texi2html/"><em>texi2html 1.78a</em></a>.
+ </font>
+ <br>
+
+</p>
+</body>
+</html>

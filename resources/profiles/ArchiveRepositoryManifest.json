@@ -1,0 +1,17 @@
+[{
+	"name": "oozeBot",
+	"description": "oozeBot Elevate line of printers",
+	"visibility": "",
+	"id": "ozb",
+	"url": "http://ooze.bot/preFlight/profiles/ozb/",
+	"index_url": "http://ooze.bot/preFlight/profiles/ozb/vendor_indices.zip",
+	"selected": 1
+}, {
+	"name": "Other",
+	"description": "Printers by other vendors",
+	"visibility": "",
+	"id": "other",
+	"url": "http://ooze.bot/preFlight/profiles/other/",
+	"index_url": "http://ooze.bot/preFlight/profiles/other/vendor_indices.zip",
+	"selected": 1
+}]

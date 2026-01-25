@@ -1,0 +1,11 @@
+add_cmake_project(NLopt
+  URL "https://github.com/stevengj/nlopt/archive/v2.10.0.tar.gz"
+  URL_HASH SHA256=506f83a9e778ad4f204446e99509cb2bdf5539de8beccc260a014bd560237be1
+  CMAKE_ARGS
+    -DNLOPT_PYTHON:BOOL=OFF
+    -DNLOPT_OCTAVE:BOOL=OFF
+    -DNLOPT_MATLAB:BOOL=OFF
+    -DNLOPT_GUILE:BOOL=OFF
+    -DNLOPT_SWIG:BOOL=OFF
+    -DNLOPT_TESTS:BOOL=OFF
+)

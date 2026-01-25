@@ -1,0 +1,1130 @@
+///|/ Copyright (c) preFlight 2025+ oozeBot, LLC
+///|/ Copyright (c) 2022 Ultimaker B.V. - CuraEngine
+///|/
+///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
+///|/
+
+#include <algorithm> //For std::partition_copy and std::min_element.
+#include <limits>
+#include <memory>
+#include <cassert>
+#include <cinttypes>
+#include <cmath>
+
+#include "WallToolPaths.hpp"
+#include "SkeletalTrapezoidation.hpp"
+#include "utils/linearAlg2D.hpp"
+#include "utils/SparseLineGrid.hpp"
+#include "libslic3r/Geometry.hpp"
+#include "utils/PolylineStitcher.hpp"
+#include "libslic3r/ClipperUtils.hpp"
+#include "libslic3r/Athena/BeadingStrategy/BeadingStrategy.hpp"
+#include "libslic3r/Athena/BeadingStrategy/BeadingStrategyFactory.hpp"
+#include "libslic3r/Athena/utils/ExtrusionJunction.hpp"
+#include "libslic3r/Athena/utils/ExtrusionLine.hpp"
+#include "libslic3r/Athena/utils/PolygonsPointIndex.hpp"
+#include "libslic3r/Flow.hpp"
+#include "libslic3r/Line.hpp"
+#include "libslic3r/Polygon.hpp"
+#include "libslic3r/PrintConfig.hpp"
+
+//#define ATHENA_STITCH_PATCH_DEBUG
+
+namespace Slic3r::Athena
+{
+
+WallToolPaths::WallToolPaths(const Polygons &outline, const coord_t bead_width_0, const coord_t bead_width_x,
+                             const size_t inset_count, const coord_t wall_0_inset, const coordf_t layer_height,
+                             const PrintObjectConfig &print_object_config, const PrintConfig &print_config,
+                             int layer_id, double min_bead_width_factor)
+    : outline(outline)
+    , bead_width_0(bead_width_0)
+    , bead_width_x(bead_width_x)
+    , inset_count(inset_count)
+    , wall_0_inset(wall_0_inset)
+    , layer_height(layer_height)
+    , print_thin_walls(Slic3r::Athena::fill_outline_gaps)
+    , min_feature_size(scaled<coord_t>(print_object_config.min_feature_size.value))
+    // Athena uses perimeter compression based on actual perimeter widths, not the Arachne min_bead_width setting
+    , min_bead_width(std::min(bead_width_0, bead_width_x)) // Use smaller of external/internal as base
+    , small_area_length(static_cast<double>(bead_width_0) / 2.)
+    , wall_transition_filter_deviation(scaled<coord_t>(print_object_config.wall_transition_filter_deviation.value))
+    , wall_transition_length(scaled<coord_t>(print_object_config.wall_transition_length.value))
+    , toolpaths_generated(false)
+    , print_object_config(print_object_config)
+    , fixed_width_external(0)
+    , fixed_width_internal(0)
+    , spacing_override_external(0)
+    , spacing_override_internal(0)
+    , spacing_override_innermost(0)
+    , debug_layer_id(layer_id)
+{
+    assert(!print_config.nozzle_diameter.empty());
+    this->min_nozzle_diameter = float(
+        *std::min_element(print_config.nozzle_diameter.values.begin(), print_config.nozzle_diameter.values.end()));
+
+    if (const auto &min_feature_size_opt = print_object_config.min_feature_size; min_feature_size_opt.percent)
+        this->min_feature_size = scaled<coord_t>(min_feature_size_opt.value * 0.01 * this->min_nozzle_diameter);
+
+    // Athena's perimeter compression uses the configured perimeter widths as the base:
+    // - Off (factor=1.0): min = 100% of perimeter width (no compression)
+    // - Moderate (factor=0.66): min = 66% of perimeter width
+    // - Aggressive (factor=0.33): min = 33% of perimeter width
+    // Floor: nozzle_diameter/3 (33%) ensures printability
+    {
+        coord_t floor = scaled<coord_t>(this->min_nozzle_diameter / 3.0);
+        // Use the smaller of external/internal perimeter widths as base
+        coord_t base_width = std::min(bead_width_0, bead_width_x);
+
+        if (min_bead_width_factor < 1.0 && min_bead_width_factor > 0.0)
+        {
+            // Compression enabled: apply factor to perimeter width
+            coord_t target_min_bead = coord_t(double(base_width) * min_bead_width_factor);
+            this->min_bead_width = std::max(target_min_bead, floor);
+            // Also reduce min_feature_size proportionally so skeleton extends into tighter areas
+            coord_t target_min_feature = coord_t(double(this->min_feature_size) * min_bead_width_factor);
+            this->min_feature_size = std::max(target_min_feature, floor);
+        }
+        else
+        {
+            // Compression disabled: use full perimeter width as minimum
+            this->min_bead_width = base_width;
+        }
+    }
+
+    if (const auto &wall_transition_filter_deviation_opt = print_object_config.wall_transition_filter_deviation;
+        wall_transition_filter_deviation_opt.percent)
+        this->wall_transition_filter_deviation = scaled<coord_t>(wall_transition_filter_deviation_opt.value * 0.01 *
+                                                                 this->min_nozzle_diameter);
+
+    if (const auto &wall_transition_length_opt = print_object_config.wall_transition_length;
+        wall_transition_length_opt.percent)
+        this->wall_transition_length = scaled<coord_t>(wall_transition_length_opt.value * 0.01 *
+                                                       this->min_nozzle_diameter);
+}
+
+WallToolPaths::WallToolPaths(const Polygons &outline, const coord_t bead_width_0, const coord_t bead_width_x,
+                             const size_t inset_count, const coord_t wall_0_inset, const coordf_t layer_height,
+                             const PrintObjectConfig &print_object_config, const PrintConfig &print_config,
+                             coord_t fixed_width_0, coord_t fixed_width_x, coord_t spacing_0, coord_t spacing_x,
+                             coord_t spacing_innermost, int layer_id, double min_bead_width_factor)
+    : outline(outline)
+    , bead_width_0(bead_width_0)
+    , bead_width_x(bead_width_x)
+    , inset_count(inset_count)
+    , wall_0_inset(wall_0_inset)
+    , layer_height(layer_height)
+    , print_thin_walls(Slic3r::Athena::fill_outline_gaps)
+    , min_feature_size(scaled<coord_t>(print_object_config.min_feature_size.value))
+    // Athena uses perimeter compression based on actual perimeter widths, not the Arachne min_bead_width setting
+    , min_bead_width(std::min(bead_width_0, bead_width_x)) // Use smaller of external/internal as base
+    , small_area_length(static_cast<double>(bead_width_0) / 2.)
+    , wall_transition_filter_deviation(scaled<coord_t>(print_object_config.wall_transition_filter_deviation.value))
+    , wall_transition_length(scaled<coord_t>(print_object_config.wall_transition_length.value))
+    , toolpaths_generated(false)
+    , print_object_config(print_object_config)
+    , fixed_width_external(fixed_width_0)
+    , fixed_width_internal(fixed_width_x)
+    , spacing_override_external(spacing_0)
+    , spacing_override_internal(spacing_x)
+    , spacing_override_innermost(spacing_innermost)
+    , debug_layer_id(layer_id)
+{
+    assert(!print_config.nozzle_diameter.empty());
+    this->min_nozzle_diameter = float(
+        *std::min_element(print_config.nozzle_diameter.values.begin(), print_config.nozzle_diameter.values.end()));
+
+    if (const auto &min_feature_size_opt = print_object_config.min_feature_size; min_feature_size_opt.percent)
+        this->min_feature_size = scaled<coord_t>(min_feature_size_opt.value * 0.01 * this->min_nozzle_diameter);
+
+    // Athena's perimeter compression uses the configured perimeter widths as the base:
+    // - Off (factor=1.0): min = 100% of perimeter width (no compression)
+    // - Moderate (factor=0.66): min = 66% of perimeter width
+    // - Aggressive (factor=0.33): min = 33% of perimeter width
+    // Floor: nozzle_diameter/3 (33%) ensures printability
+    {
+        coord_t floor = scaled<coord_t>(this->min_nozzle_diameter / 3.0);
+        // Use the smaller of external/internal perimeter widths as base
+        coord_t base_width = std::min(bead_width_0, bead_width_x);
+
+        if (min_bead_width_factor < 1.0 && min_bead_width_factor > 0.0)
+        {
+            // Compression enabled: apply factor to perimeter width
+            coord_t target_min_bead = coord_t(double(base_width) * min_bead_width_factor);
+            this->min_bead_width = std::max(target_min_bead, floor);
+            // Also reduce min_feature_size proportionally so skeleton extends into tighter areas
+            coord_t target_min_feature = coord_t(double(this->min_feature_size) * min_bead_width_factor);
+            this->min_feature_size = std::max(target_min_feature, floor);
+        }
+        else
+        {
+            // Compression disabled: use full perimeter width as minimum
+            this->min_bead_width = base_width;
+        }
+    }
+
+    if (const auto &wall_transition_filter_deviation_opt = print_object_config.wall_transition_filter_deviation;
+        wall_transition_filter_deviation_opt.percent)
+        this->wall_transition_filter_deviation = scaled<coord_t>(wall_transition_filter_deviation_opt.value * 0.01 *
+                                                                 this->min_nozzle_diameter);
+
+    if (const auto &wall_transition_length_opt = print_object_config.wall_transition_length;
+        wall_transition_length_opt.percent)
+        this->wall_transition_length = scaled<coord_t>(wall_transition_length_opt.value * 0.01 *
+                                                       this->min_nozzle_diameter);
+}
+
+void simplify(Polygon &thiss, const int64_t smallest_line_segment_squared, const int64_t allowed_error_distance_squared)
+{
+    if (thiss.size() < 3)
+    {
+        thiss.points.clear();
+        return;
+    }
+    if (thiss.size() == 3)
+        return;
+
+    Polygon new_path;
+    Point previous = thiss.points.back();
+    Point previous_previous = thiss.points.at(thiss.points.size() - 2);
+    Point current = thiss.points.at(0);
+
+    /* When removing a vertex, we check the height of the triangle of the area
+     being removed from the original polygon by the simplification. However,
+     when consecutively removing multiple vertices the height of the previously
+     removed vertices w.r.t. the shortcut path changes.
+     In order to not recompute the new height value of previously removed
+     vertices we compute the height of a representative triangle, which covers
+     the same amount of area as the area being cut off. We use the Shoelace
+     formula to accumulate the area under the removed segments. This works by
+     computing the area in a 'fan' where each of the blades of the fan go from
+     the origin to one of the segments. While removing vertices the area in
+     this fan accumulates. By subtracting the area of the blade connected to
+     the short-cutting segment we obtain the total area of the cutoff region.
+     From this area we compute the height of the representative triangle using
+     the standard formula for a triangle area: A = .5*b*h
+     */
+    int64_t accumulated_area_removed =
+        int64_t(previous.x()) * int64_t(current.y()) -
+        int64_t(previous.y()) *
+            int64_t(current.x()); // Twice the Shoelace formula for area of polygon per line segment.
+
+    for (size_t point_idx = 0; point_idx < thiss.points.size(); point_idx++)
+    {
+        current = thiss.points.at(point_idx % thiss.points.size());
+
+        //Check if the accumulated area doesn't exceed the maximum.
+        Point next;
+        if (point_idx + 1 < thiss.points.size())
+        {
+            next = thiss.points.at(point_idx + 1);
+        }
+        else if (point_idx + 1 == thiss.points.size() && new_path.size() > 1)
+        {                       // don't spill over if the [next] vertex will then be equal to [previous]
+            next = new_path[0]; //Spill over to new polygon for checking removed area.
+        }
+        else
+        {
+            next = thiss.points.at((point_idx + 1) % thiss.points.size());
+        }
+        const int64_t removed_area_next =
+            int64_t(current.x()) * int64_t(next.y()) -
+            int64_t(current.y()) *
+                int64_t(next.x()); // Twice the Shoelace formula for area of polygon per line segment.
+        const int64_t negative_area_closing =
+            int64_t(next.x()) * int64_t(previous.y()) -
+            int64_t(next.y()) * int64_t(previous.x()); // area between the origin and the short-cutting segment
+        accumulated_area_removed += removed_area_next;
+
+        const int64_t length2 = (current - previous).cast<int64_t>().squaredNorm();
+        if (length2 < scaled<int64_t>(25.))
+        {
+            // We're allowed to always delete segments of less than 5 micron.
+            continue;
+        }
+
+        const int64_t area_removed_so_far = accumulated_area_removed +
+                                            negative_area_closing; // close the shortcut area polygon
+        const int64_t base_length_2 = (next - previous).cast<int64_t>().squaredNorm();
+
+        if (base_length_2 == 0) //Two line segments form a line back and forth with no area.
+            continue;           //Remove the vertex.
+        //We want to check if the height of the triangle formed by previous, current and next vertices is less than allowed_error_distance_squared.
+        //1/2 L = A           [actual area is half of the computed shoelace value] // Shoelace formula is .5*(...) , but we simplify the computation and take out the .5
+        //A = 1/2 * b * h     [triangle area formula]
+        //L = b * h           [apply above two and take out the 1/2]
+        //h = L / b           [divide by b]
+        //h^2 = (L / b)^2     [square it]
+        //h^2 = L^2 / b^2     [factor the divisor]
+        const int64_t height_2 = double(area_removed_so_far) * double(area_removed_so_far) / double(base_length_2);
+        if ((height_2 <= Slic3r::sqr(scaled<coord_t>(0.005)) //Almost exactly colinear (barring rounding errors).
+             &&
+             Line::distance_to_infinite(current, previous, next) <=
+                 scaled<double>(
+                     0.005))) // make sure that height_2 is not small because of cancellation of positive and negative areas
+            continue;
+
+        if (length2 < smallest_line_segment_squared &&
+            height_2 <= allowed_error_distance_squared) // removing the vertex doesn't introduce too much error.)
+        {
+            const int64_t next_length2 = (current - next).cast<int64_t>().squaredNorm();
+            if (next_length2 > 4 * smallest_line_segment_squared)
+            {
+                // Special case; The next line is long. If we were to remove this, it could happen that we get quite noticeable artifacts.
+                // We should instead move this point to a location where both edges are kept and then remove the previous point that we wanted to keep.
+                // By taking the intersection of these two lines, we get a point that preserves the direction (so it makes the corner a bit more pointy).
+                // We just need to be sure that the intersection point does not introduce an artifact itself.
+                Point intersection_point;
+                bool has_intersection =
+                    Line(previous_previous, previous).intersection_infinite(Line(current, next), &intersection_point);
+                if (!has_intersection ||
+                    Line::distance_to_infinite_squared(intersection_point, previous, current) >
+                        double(allowed_error_distance_squared) ||
+                    (intersection_point - previous).cast<int64_t>().squaredNorm() >
+                        smallest_line_segment_squared // The intersection point is way too far from the 'previous'
+                    || (intersection_point - next).cast<int64_t>().squaredNorm() >
+                           smallest_line_segment_squared) // and 'next' points, so it shouldn't replace 'current'
+                {
+                    // We can't find a better spot for it, but the size of the line is more than 5 micron.
+                    // So the only thing we can do here is leave it in...
+                }
+                else
+                {
+                    // New point seems like a valid one.
+                    current = intersection_point;
+                    // If there was a previous point added, remove it.
+                    if (!new_path.empty())
+                    {
+                        new_path.points.pop_back();
+                        previous = previous_previous;
+                    }
+                }
+            }
+            else
+            {
+                continue; //Remove the vertex.
+            }
+        }
+        //Don't remove the vertex.
+        accumulated_area_removed =
+            removed_area_next; // so that in the next iteration it's the area between the origin, [previous] and [current]
+        previous_previous = previous;
+        previous = current; //Note that "previous" is only updated if we don't remove the vertex.
+        new_path.points.push_back(current);
+    }
+
+    thiss = new_path;
+}
+
+/*!
+     * Removes vertices of the polygons to make sure that they are not too high
+     * resolution.
+     *
+     * This removes points which are connected to line segments that are shorter
+     * than the `smallest_line_segment`, unless that would introduce a deviation
+     * in the contour of more than `allowed_error_distance`.
+     *
+     * Criteria:
+     * 1. Never remove a vertex if either of the connceted segments is larger than \p smallest_line_segment
+     * 2. Never remove a vertex if the distance between that vertex and the final resulting polygon would be higher than \p allowed_error_distance
+     * 3. The direction of segments longer than \p smallest_line_segment always
+     * remains unaltered (but their end points may change if it is connected to
+     * a small segment)
+     *
+     * Simplify uses a heuristic and doesn't neccesarily remove all removable
+     * vertices under the above criteria, but simplify may never violate these
+     * criteria. Unless the segments or the distance is smaller than the
+     * rounding error of 5 micron.
+     *
+     * Vertices which introduce an error of less than 5 microns are removed
+     * anyway, even if the segments are longer than the smallest line segment.
+     * This makes sure that (practically) colinear line segments are joined into
+     * a single line segment.
+     * \param smallest_line_segment Maximal length of removed line segments.
+     * \param allowed_error_distance If removing a vertex introduces a deviation
+     * from the original path that is more than this distance, the vertex may
+     * not be removed.
+ */
+void simplify(Polygons &thiss, const int64_t smallest_line_segment = scaled<coord_t>(0.01),
+              const int64_t allowed_error_distance = scaled<coord_t>(0.005))
+{
+    // Original code performed erase() inside loop with p-- workaround, causing O(n²) complexity.
+    // This fix uses erase-remove idiom to batch deletions into single O(n) operation.
+    //
+    // Performance impact: Changes O(n²) to O(n), 5-20× speedup for many polygons.
+    const int64_t allowed_error_distance_squared = int64_t(allowed_error_distance) * int64_t(allowed_error_distance);
+    const int64_t smallest_line_segment_squared = int64_t(smallest_line_segment) * int64_t(smallest_line_segment);
+
+    // Simplify all polygons first
+    for (Polygon &poly : thiss)
+    {
+        simplify(poly, smallest_line_segment_squared, allowed_error_distance_squared);
+    }
+
+    // Remove degenerate polygons (< 3 points) using erase-remove idiom
+    thiss.erase(std::remove_if(thiss.begin(), thiss.end(), [](const Polygon &p) { return p.size() < 3; }), thiss.end());
+}
+
+typedef SparseLineGrid<PolygonsPointIndex, PolygonsPointIndexSegmentLocator> LocToLineGrid;
+std::unique_ptr<LocToLineGrid> createLocToLineGrid(const Polygons &polygons, int square_size)
+{
+    unsigned int n_points = 0;
+    for (const auto &poly : polygons)
+        n_points += poly.size();
+
+    auto ret = std::make_unique<LocToLineGrid>(square_size, n_points);
+
+    for (unsigned int poly_idx = 0; poly_idx < polygons.size(); poly_idx++)
+        for (unsigned int point_idx = 0; point_idx < polygons[poly_idx].size(); point_idx++)
+            ret->insert(PolygonsPointIndex(&polygons, poly_idx, point_idx));
+    return ret;
+}
+
+/* Note: Also tries to solve for near-self intersections, when epsilon >= 1
+ */
+void fixSelfIntersections(const coord_t epsilon, Polygons &thiss)
+{
+    if (epsilon < 1)
+    {
+        // In Clipper1, SimplifyPolygons(paths, pftEvenOdd) performed a union operation
+        // In Clipper2, we need to explicitly do the union with EvenOdd fill rule
+        thiss = union_(thiss, Clipper2Lib::FillRule::NonZero);
+        return;
+    }
+
+    const int64_t half_epsilon = (epsilon + 1) / 2;
+
+    // Points too close to line segments should be moved a little away from those line segments, but less than epsilon,
+    //   so at least half-epsilon distance between points can still be guaranteed.
+    constexpr coord_t grid_size = scaled<coord_t>(2.);
+    auto query_grid = createLocToLineGrid(thiss, grid_size);
+
+    const auto move_dist = std::max<int64_t>(2L, half_epsilon - 2);
+    const int64_t half_epsilon_sqrd = half_epsilon * half_epsilon;
+
+    const size_t n = thiss.size();
+    for (size_t poly_idx = 0; poly_idx < n; poly_idx++)
+    {
+        const size_t pathlen = thiss[poly_idx].size();
+        for (size_t point_idx = 0; point_idx < pathlen; ++point_idx)
+        {
+            Point &pt = thiss[poly_idx][point_idx];
+            for (const auto &line : query_grid->getNearby(pt, epsilon))
+            {
+                const size_t line_next_idx = (line.point_idx + 1) % thiss[line.poly_idx].size();
+                if (poly_idx == line.poly_idx && (point_idx == line.point_idx || point_idx == line_next_idx))
+                    continue;
+
+                const Line segment(thiss[line.poly_idx][line.point_idx], thiss[line.poly_idx][line_next_idx]);
+                Point segment_closest_point;
+                segment.distance_to_squared(pt, &segment_closest_point);
+
+                if (half_epsilon_sqrd >= (pt - segment_closest_point).cast<int64_t>().squaredNorm())
+                {
+                    const Point &other = thiss[poly_idx][(point_idx + 1) % pathlen];
+                    const Vec2i64 vec = (LinearAlg2D::pointIsLeftOfLine(other, segment.a, segment.b) > 0
+                                             ? segment.b - segment.a
+                                             : segment.a - segment.b)
+                                            .cast<int64_t>();
+                    assert(Slic3r::sqr(double(vec.x())) < double(std::numeric_limits<int64_t>::max()));
+                    assert(Slic3r::sqr(double(vec.y())) < double(std::numeric_limits<int64_t>::max()));
+                    const int64_t len = vec.norm();
+                    pt.x() += (-vec.y() * move_dist) / len;
+                    pt.y() += (vec.x() * move_dist) / len;
+                }
+            }
+        }
+    }
+
+    // In Clipper1, SimplifyPolygons(paths, pftEvenOdd) performed a union operation
+    // In Clipper2, we need to explicitly do the union with EvenOdd fill rule
+    thiss = union_(thiss, Clipper2Lib::FillRule::NonZero);
+}
+
+/*!
+     * Removes overlapping consecutive line segments which don't delimit a positive area.
+ */
+void removeDegenerateVerts(Polygons &thiss)
+{
+    // Original code performed erase() inside loop with poly_idx-- workaround, causing O(n²) complexity.
+    // This fix uses erase-remove idiom to batch deletions into single O(n) operation.
+
+    auto isDegenerate = [](const Point &last, const Point &now, const Point &next)
+    {
+        Vec2i64 last_line = (now - last).cast<int64_t>();
+        Vec2i64 next_line = (next - now).cast<int64_t>();
+        return last_line.dot(next_line) == -1 * last_line.norm() * next_line.norm();
+    };
+
+    // Process all polygons first, modifying them in-place
+    for (Polygon &poly : thiss)
+    {
+        Polygon result;
+        bool isChanged = false;
+
+        for (size_t idx = 0; idx < poly.size(); idx++)
+        {
+            const Point &last = (result.size() == 0) ? poly.back() : result.back();
+            if (idx + 1 == poly.size() && result.size() == 0)
+                break;
+
+            const Point &next = (idx + 1 == poly.size()) ? result[0] : poly[idx + 1];
+            if (isDegenerate(last, poly[idx], next))
+            { // lines are in the opposite direction
+                // don't add vert to the result
+                isChanged = true;
+                while (result.size() > 1 && isDegenerate(result[result.size() - 2], result.back(), next))
+                    result.points.pop_back();
+            }
+            else
+            {
+                result.points.emplace_back(poly[idx]);
+            }
+        }
+
+        if (isChanged && result.size() > 2)
+        {
+            poly = result;
+        }
+    }
+
+    // Remove degenerate polygons (< 3 points) using erase-remove idiom
+    thiss.erase(std::remove_if(thiss.begin(), thiss.end(), [](const Polygon &p) { return p.size() < 3; }), thiss.end());
+}
+
+void removeSmallAreas(Polygons &thiss, const double min_area_size, const bool remove_holes)
+{
+    auto to_path = [](const Polygon &poly) -> Clipper2Lib::Path64
+    {
+        Clipper2Lib::Path64 out;
+        for (const Point &pt : poly.points)
+            out.emplace_back(pt.x(), pt.y());
+        return out;
+    };
+
+    auto new_end = thiss.end();
+    if (remove_holes)
+    {
+        for (auto it = thiss.begin(); it < new_end;)
+        {
+            // All polygons smaller than target are removed by replacing them with a polygon from the back of the vector.
+            if (fabs(Clipper2Lib::Area(to_path(*it))) < min_area_size)
+            {
+                --new_end;
+                *it = std::move(*new_end);
+                continue; // Don't increment the iterator such that the polygon just swapped in is checked next.
+            }
+            ++it;
+        }
+    }
+    else
+    {
+        // For each polygon, computes the signed area, move small outlines at the end of the vector and keep pointer on small holes
+        Polygons small_holes;
+        for (auto it = thiss.begin(); it < new_end;)
+        {
+            if (double area = Clipper2Lib::Area(to_path(*it)); fabs(area) < min_area_size)
+            {
+                if (area >= 0)
+                {
+                    --new_end;
+                    if (it < new_end)
+                    {
+                        std::swap(*new_end, *it);
+                        continue;
+                    }
+                    else
+                    { // Don't self-swap the last Path
+                        break;
+                    }
+                }
+                else
+                {
+                    small_holes.push_back(*it);
+                }
+            }
+            ++it;
+        }
+
+        // Removes small holes that have their first point inside one of the removed outlines
+        // Iterating in reverse ensures that unprocessed small holes won't be moved
+        const auto removed_outlines_start = new_end;
+        for (auto hole_it = small_holes.rbegin(); hole_it < small_holes.rend(); hole_it++)
+            for (auto outline_it = removed_outlines_start; outline_it < thiss.end(); outline_it++)
+                if (Polygon(*outline_it).contains(*hole_it->begin()))
+                {
+                    new_end--;
+                    *hole_it = std::move(*new_end);
+                    break;
+                }
+    }
+    thiss.resize(new_end - thiss.begin());
+}
+
+void removeColinearEdges(Polygon &poly, const double max_deviation_angle)
+{
+    // TODO: Can be made more efficient (for example, use pointer-types for process-/skip-indices, so we can swap them without copy).
+    size_t num_removed_in_iteration = 0;
+    do
+    {
+        num_removed_in_iteration = 0;
+        std::vector<bool> process_indices(poly.points.size(), true);
+
+        bool go = true;
+        while (go)
+        {
+            go = false;
+
+            const auto &rpath = poly;
+            const size_t pathlen = rpath.size();
+            if (pathlen <= 3)
+                return;
+
+            std::vector<bool> skip_indices(poly.points.size(), false);
+
+            Polygon new_path;
+            for (size_t point_idx = 0; point_idx < pathlen; ++point_idx)
+            {
+                // Don't iterate directly over process-indices, but do it this way, because there are points _in_ process-indices that should nonetheless
+                // be skipped:
+                if (!process_indices[point_idx])
+                {
+                    new_path.points.push_back(rpath[point_idx]);
+                    continue;
+                }
+
+                // Should skip the last point for this iteration if the old first was removed (which can be seen from the fact that the new first was skipped):
+                if (point_idx == (pathlen - 1) && skip_indices[0])
+                {
+                    skip_indices[new_path.size()] = true;
+                    go = true;
+                    new_path.points.push_back(rpath[point_idx]);
+                    break;
+                }
+
+                const Point &prev = rpath[(point_idx - 1 + pathlen) % pathlen];
+                const Point &pt = rpath[point_idx];
+                const Point &next = rpath[(point_idx + 1) % pathlen];
+
+                float angle = LinearAlg2D::getAngleLeft(prev, pt, next); // [0 : 2 * pi]
+                if (angle >= float(M_PI))
+                {
+                    angle -= float(M_PI);
+                } // map [pi : 2 * pi] to [0 : pi]
+
+                // Check if the angle is within limits for the point to 'make sense', given the maximum deviation.
+                // If the angle indicates near-parallel segments ignore the point 'pt'
+                if (angle > max_deviation_angle && angle < M_PI - max_deviation_angle)
+                {
+                    new_path.points.push_back(pt);
+                }
+                else if (point_idx != (pathlen - 1))
+                {
+                    // Skip the next point, since the current one was removed:
+                    skip_indices[new_path.size()] = true;
+                    go = true;
+                    new_path.points.push_back(next);
+                    ++point_idx;
+                }
+            }
+            poly = new_path;
+            num_removed_in_iteration += pathlen - poly.points.size();
+
+            process_indices.clear();
+            process_indices.insert(process_indices.end(), skip_indices.begin(), skip_indices.end());
+        }
+    } while (num_removed_in_iteration > 0);
+}
+
+void removeColinearEdges(Polygons &thiss, const double max_deviation_angle = 0.0005)
+{
+    // Original code performed erase() inside loop with p-- workaround, causing O(n²) complexity.
+    // This fix uses erase-remove idiom to batch deletions into single O(n) operation.
+
+    // Process colinear edge removal for all polygons first
+    for (Polygon &poly : thiss)
+    {
+        removeColinearEdges(poly, max_deviation_angle);
+    }
+
+    // Remove degenerate polygons (< 3 points) using erase-remove idiom
+    thiss.erase(std::remove_if(thiss.begin(), thiss.end(), [](const Polygon &p) { return p.size() < 3; }), thiss.end());
+}
+
+const std::vector<VariableWidthLines> &WallToolPaths::generate()
+{
+    if (this->inset_count < 1)
+        return toolpaths;
+
+    const coord_t smallest_segment = Slic3r::Athena::meshfix_maximum_resolution;
+    const coord_t allowed_distance = Slic3r::Athena::meshfix_maximum_deviation;
+    const coord_t epsilon_offset = (allowed_distance / 2) - 1;
+    const double transitioning_angle = Geometry::deg2rad(this->print_object_config.wall_transition_angle.value);
+    constexpr coord_t discretization_step_size = scaled<coord_t>(0.8);
+
+    // CRITICAL INSIGHT: In Clipper1, offset(Polygons) treated each polygon INDEPENDENTLY.
+    // It did NOT understand holes - it just offset each shape in the flat array separately.
+    // We must replicate this exact behavior, then convert to ExPolygons afterward.
+    //
+    // Clipper1 code was:
+    //   Polygons prepared_outline = offset(offset(offset(outline, -epsilon_offset), epsilon_offset * 2), -epsilon_offset);
+    //
+    // This meant: Offset each polygon independently (including CW holes as separate shapes),
+    // then the later union_() call would reconstruct the hole structure.
+
+    // Step 1: Apply triple offset to flat Polygons (exactly like Clipper1)
+    // This offsets each polygon independently, treating CW holes as separate shapes
+    Polygons prepared_outline = offset(offset(offset(outline, -epsilon_offset), epsilon_offset * 2), -epsilon_offset);
+
+    // Step 2: Apply simplifications (still on flat Polygons, like Clipper1)
+    simplify(prepared_outline, smallest_segment, allowed_distance);
+    fixSelfIntersections(epsilon_offset, prepared_outline);
+    removeDegenerateVerts(prepared_outline);
+    removeColinearEdges(prepared_outline, 0.005);
+    fixSelfIntersections(epsilon_offset, prepared_outline);
+    removeDegenerateVerts(prepared_outline);
+    removeSmallAreas(prepared_outline, small_area_length * small_area_length, false);
+
+    // Step 3: NOW convert to ExPolygons and apply union (this reconstructs hole structure)
+    // In Clipper1 this was: prepared_outline = union_(prepared_outline);
+    // In Clipper2 we use: union_ex to preserve the hole structure we're about to create
+    ExPolygons prepared_expolygons = ClipperPaths_to_Slic3rExPolygons(prepared_outline, false);
+    prepared_expolygons = union_ex(prepared_expolygons);
+
+    // Step 4: Convert back to flat Polygons for SkeletalTrapezoidation
+    prepared_outline = to_polygons(prepared_expolygons);
+
+    // The Voronoi diagram generator is very sensitive to:
+    // - Polygons with < 3 vertices
+    // - Polygons with zero or near-zero area
+    // - Self-intersecting polygons
+    // These cause "missing Voronoi vertex" errors and infinite loops
+    Polygons filtered_outline;
+    filtered_outline.reserve(prepared_outline.size());
+    const double min_area = 100.0; // Minimum area in scaled units
+
+    for (size_t i = 0; i < prepared_outline.size(); i++)
+    {
+        const Polygon &poly = prepared_outline[i];
+        if (poly.size() < 3)
+        {
+            continue;
+        }
+        double a = poly.area();
+        if (std::abs(a) < min_area)
+        {
+            continue;
+        }
+        filtered_outline.push_back(poly);
+    }
+    prepared_outline = std::move(filtered_outline);
+
+    // Remove exact duplicate points (same coordinates) which can break Voronoi
+    // This doesn't alter geometry, just removes degenerate cases
+    for (Polygon &poly : prepared_outline)
+    {
+        poly.remove_duplicate_points();
+    }
+
+    if (prepared_outline.empty() || area(prepared_outline) <= 0)
+    {
+        assert(toolpaths.empty());
+        return toolpaths;
+    }
+
+    const float external_perimeter_extrusion_width =
+        Flow::rounded_rectangle_extrusion_width_from_spacing(unscale<float>(bead_width_0), float(this->layer_height));
+    const float perimeter_extrusion_width =
+        Flow::rounded_rectangle_extrusion_width_from_spacing(unscale<float>(bead_width_x), float(this->layer_height));
+
+    const double wall_split_middle_threshold =
+        std::clamp(2. * unscaled<double>(this->min_bead_width) / external_perimeter_extrusion_width - 1., 0.01,
+                   0.99); // For an uneven nr. of lines: When to split the middle wall into two.
+    const double wall_add_middle_threshold =
+        std::clamp(unscaled<double>(this->min_bead_width) / perimeter_extrusion_width, 0.01,
+                   0.99); // For an even nr. of lines: When to add a new middle in between the innermost two walls.
+
+    // Athena maintains fixed widths, so distribution only affects spacing.
+    // Value of 1 means only innermost perimeter absorbs spacing variation.
+    const int wall_distribution_count = 1;
+    (void) this->print_object_config.wall_distribution_count; // Suppress unused warning
+    const size_t max_bead_count = (size_t(inset_count) < size_t(std::numeric_limits<coord_t>::max() / 2))
+                                      ? 2 * inset_count
+                                      : std::numeric_limits<coord_t>::max();
+    const auto beading_strat = BeadingStrategyFactory::makeStrategy(
+        bead_width_0,         // ext_perimeter_spacing
+        fixed_width_external, // ext_perimeter_width
+        bead_width_x,         // perimeter_spacing
+        fixed_width_internal, // perimeter_width
+        wall_transition_length, transitioning_angle, print_thin_walls, min_bead_width, min_feature_size,
+        wall_split_middle_threshold, wall_add_middle_threshold, max_bead_count, wall_0_inset, wall_distribution_count,
+        spacing_override_external, // ext_to_first_internal_spacing
+        spacing_override_innermost, coord_t(inset_count),
+        debug_layer_id // For debug output
+    );
+    const coord_t transition_filter_dist = scaled<coord_t>(100.f);
+    const coord_t allowed_filter_deviation = wall_transition_filter_deviation;
+
+    SkeletalTrapezoidation wall_maker(prepared_outline, *beading_strat, beading_strat->getTransitioningAngle(),
+                                      discretization_step_size, transition_filter_dist, allowed_filter_deviation,
+                                      wall_transition_length);
+
+    wall_maker.generateToolpaths(toolpaths);
+
+    stitchToolPaths(toolpaths, this->bead_width_x);
+
+    removeSmallLines(toolpaths);
+
+    separateOutInnerContour();
+
+    simplifyToolPaths(toolpaths);
+
+    removeEmptyToolPaths(toolpaths);
+    assert(std::is_sorted(toolpaths.cbegin(), toolpaths.cend(),
+                          [](const VariableWidthLines &l, const VariableWidthLines &r)
+                          { return l.front().inset_idx < r.front().inset_idx; }) &&
+           "WallToolPaths should be sorted from the outer 0th to inner_walls");
+    toolpaths_generated = true;
+    return toolpaths;
+}
+
+void WallToolPaths::stitchToolPaths(std::vector<VariableWidthLines> &toolpaths, const coord_t bead_width_x)
+{
+    const coord_t stitch_distance =
+        bead_width_x -
+        1; //In 0-width contours, junctions can cause up to 1-line-width gaps. Don't stitch more than 1 line width.
+
+    for (unsigned int wall_idx = 0; wall_idx < toolpaths.size(); wall_idx++)
+    {
+        VariableWidthLines &wall_lines = toolpaths[wall_idx];
+
+        VariableWidthLines stitched_polylines;
+        VariableWidthLines closed_polygons;
+        PolylineStitcher<VariableWidthLines, ExtrusionLine, ExtrusionJunction>::stitch(wall_lines, stitched_polylines,
+                                                                                       closed_polygons,
+                                                                                       stitch_distance);
+#ifdef ATHENA_STITCH_PATCH_DEBUG
+        for (const ExtrusionLine &line : stitched_polylines)
+        {
+            if (!line.is_odd && line.polylineLength() > 3 * stitch_distance && line.size() > 3)
+            {
+                BOOST_LOG_TRIVIAL(error) << "Some even contour lines could not be closed into polygons!";
+                assert(false && "Some even contour lines could not be closed into polygons!");
+                BoundingBox aabb;
+                for (auto line2 : wall_lines)
+                    for (auto j : line2)
+                        aabb.merge(j.p);
+                {
+                    static int iRun = 0;
+                    SVG svg(debug_out_path("contours_before.svg-%d.png", iRun), aabb);
+                    std::array<const char *, 8> colors = {"gray", "black",  "blue", "green",
+                                                          "lime", "purple", "red",  "yellow"};
+                    size_t color_idx = 0;
+                    for (auto &inset : toolpaths)
+                        for (auto &line2 : inset)
+                        {
+                            // svg.writePolyline(line2.toPolygon(), col);
+
+                            Polygon poly = line2.toPolygon();
+                            Point last = poly.front();
+                            for (size_t idx = 1; idx < poly.size(); idx++)
+                            {
+                                Point here = poly[idx];
+                                svg.draw(Line(last, here), colors[color_idx]);
+                                //                                svg.draw_text((last + here) / 2, std::to_string(line2.junctions[idx].region_id).c_str(), "black");
+                                last = here;
+                            }
+                            svg.draw(poly[0], colors[color_idx]);
+                            // svg.nextLayer();
+                            // svg.writePoints(poly, true, 0.1);
+                            // svg.nextLayer();
+                            color_idx = (color_idx + 1) % colors.size();
+                        }
+                }
+                {
+                    static int iRun = 0;
+                    SVG svg(debug_out_path("contours-%d.svg", iRun), aabb);
+                    for (auto &inset : toolpaths)
+                        for (auto &line2 : inset)
+                            svg.draw_outline(line2.toPolygon(), "gray");
+                    for (auto &line2 : stitched_polylines)
+                    {
+                        const char *col = line2.is_odd ? "gray" : "red";
+                        if (!line2.is_odd)
+                            std::cerr << "Non-closed even wall of size: " << line2.size() << " at " << line2.front().p
+                                      << "\n";
+                        if (!line2.is_odd)
+                            svg.draw(line2.front().p);
+                        Polygon poly = line2.toPolygon();
+                        Point last = poly.front();
+                        for (size_t idx = 1; idx < poly.size(); idx++)
+                        {
+                            Point here = poly[idx];
+                            svg.draw(Line(last, here), col);
+                            last = here;
+                        }
+                    }
+                    for (auto line2 : closed_polygons)
+                        svg.draw(line2.toPolygon());
+                }
+            }
+        }
+#endif                                   // ATHENA_STITCH_PATCH_DEBUG
+        wall_lines = stitched_polylines; // replace input toolpaths with stitched polylines
+
+        for (ExtrusionLine &wall_polygon : closed_polygons)
+        {
+            if (wall_polygon.junctions.empty())
+            {
+                continue;
+            }
+
+            // PolylineStitcher, in some cases, produced closed extrusion (polygons),
+            // but the endpoints differ by a small distance. So we reconnect them.
+            // FIXME Lukas H.: Investigate more deeply why it is happening.
+            if (wall_polygon.junctions.front().p != wall_polygon.junctions.back().p &&
+                (wall_polygon.junctions.back().p - wall_polygon.junctions.front().p).cast<double>().norm() <
+                    stitch_distance)
+            {
+                wall_polygon.junctions.emplace_back(wall_polygon.junctions.front());
+            }
+            wall_polygon.is_closed = true;
+            wall_lines.emplace_back(std::move(wall_polygon)); // add stitched polygons to result
+        }
+#ifdef DEBUG
+        for (ExtrusionLine &line : wall_lines)
+        {
+            assert(line.inset_idx == wall_idx);
+        }
+#endif // DEBUG
+    }
+}
+
+template<typename T>
+bool shorterThan(const T &shape, const coord_t check_length)
+{
+    const auto *p0 = &shape.back();
+    int64_t length = 0;
+    for (const auto &p1 : shape)
+    {
+        length += (*p0 - p1).template cast<int64_t>().norm();
+        if (length >= check_length)
+            return false;
+        p0 = &p1;
+    }
+    return true;
+}
+
+void WallToolPaths::removeSmallLines(std::vector<VariableWidthLines> &toolpaths)
+{
+    for (VariableWidthLines &inset : toolpaths)
+    {
+        for (size_t line_idx = 0; line_idx < inset.size(); line_idx++)
+        {
+            ExtrusionLine &line = inset[line_idx];
+            coord_t min_width = std::numeric_limits<coord_t>::max();
+            for (const ExtrusionJunction &j : line)
+                min_width = std::min(min_width, j.w);
+            if (line.is_odd && !line.is_closed && shorterThan(line, min_width / 2))
+            { // remove line
+                line = std::move(inset.back());
+                inset.erase(--inset.end());
+                line_idx--; // reconsider the current position
+            }
+        }
+    }
+}
+
+void WallToolPaths::simplifyToolPaths(std::vector<VariableWidthLines> &toolpaths)
+{
+    for (size_t toolpaths_idx = 0; toolpaths_idx < toolpaths.size(); ++toolpaths_idx)
+    {
+        const int64_t maximum_resolution = Slic3r::Athena::meshfix_maximum_resolution;
+        const int64_t maximum_deviation = Slic3r::Athena::meshfix_maximum_deviation;
+        const int64_t maximum_extrusion_area_deviation =
+            Slic3r::Athena::meshfix_maximum_extrusion_area_deviation; // unit: μm²
+        for (auto &line : toolpaths[toolpaths_idx])
+        {
+            line.simplify(maximum_resolution * maximum_resolution, maximum_deviation * maximum_deviation,
+                          maximum_extrusion_area_deviation);
+        }
+    }
+}
+
+const std::vector<VariableWidthLines> &WallToolPaths::getToolPaths()
+{
+    if (!toolpaths_generated)
+        return generate();
+    return toolpaths;
+}
+
+void WallToolPaths::separateOutInnerContour()
+{
+    //We'll remove all 0-width paths from the original toolpaths and store them separately as polygons.
+    std::vector<VariableWidthLines> actual_toolpaths;
+    actual_toolpaths.reserve(toolpaths.size()); //A bit too much, but the correct order of magnitude.
+    std::vector<VariableWidthLines> contour_paths;
+    contour_paths.reserve(toolpaths.size() / inset_count);
+    inner_contour.clear();
+    for (const VariableWidthLines &inset : toolpaths)
+    {
+        if (inset.empty())
+            continue;
+        bool is_contour = false;
+        for (const ExtrusionLine &line : inset)
+        {
+            for (const ExtrusionJunction &j : line)
+            {
+                if (j.w == 0)
+                    is_contour = true;
+                else
+                    is_contour = false;
+                break;
+            }
+        }
+
+        if (is_contour)
+        {
+#ifdef DEBUG
+            for (const ExtrusionLine &line : inset)
+                for (const ExtrusionJunction &j : line)
+                    assert(j.w == 0);
+#endif // DEBUG
+            for (const ExtrusionLine &line : inset)
+            {
+                if (line.is_odd)
+                    continue;            // odd lines don't contribute to the contour
+                else if (line.is_closed) // sometimes an very small even polygonal wall is not stitched into a polygon
+                    inner_contour.emplace_back(line.toPolygon());
+            }
+        }
+        else
+        {
+            actual_toolpaths.emplace_back(inset);
+        }
+    }
+    if (!actual_toolpaths.empty())
+        toolpaths = std::move(actual_toolpaths); // Filtered out the 0-width paths.
+    else
+        toolpaths.clear();
+
+    //The output walls from the skeletal trapezoidation have no known winding order, especially if they are joined together from polylines.
+    //They can be in any direction, clockwise or counter-clockwise, regardless of whether the shapes are positive or negative.
+    //To get a correct shape, we need to make the outside contour positive and any holes inside negative.
+    //This can be done by applying the even-odd rule to the shape. This rule is not sensitive to the winding order of the polygon.
+    //The even-odd rule would be incorrect if the polygon self-intersects, but that should never be generated by the skeletal trapezoidation.
+    inner_contour = union_(inner_contour, Clipper2Lib::FillRule::NonZero);
+
+    // If we have more bead sets than the user requested perimeters, but no contours,
+    // we need to create a zero-width contour for infill boundary
+    int bead_count = toolpaths.size();
+    int contour_count = inner_contour.empty() ? 0 : 1;
+
+    if (bead_count > static_cast<int>(inset_count) && contour_count == 0 && !toolpaths.empty())
+    {
+        // Find the innermost perimeter that has closed paths
+        int innermost_idx = static_cast<int>(toolpaths.size()) - 1;
+        while (innermost_idx >= 0)
+        {
+            bool has_closed = false;
+            for (const ExtrusionLine &line : toolpaths[innermost_idx])
+            {
+                if (line.is_closed)
+                {
+                    has_closed = true;
+                    break;
+                }
+            }
+            if (has_closed)
+                break;
+            innermost_idx--;
+        }
+
+        if (innermost_idx >= 0)
+        {
+            // Create contour from the innermost perimeter's centerline
+            for (const ExtrusionLine &line : toolpaths[innermost_idx])
+            {
+                if (line.is_closed && !line.junctions.empty())
+                {
+                    // Build the polygon from the perimeter path
+                    Polygon contour_poly;
+                    for (const ExtrusionJunction &junction : line.junctions)
+                    {
+                        contour_poly.points.emplace_back(junction.p);
+                    }
+
+                    // Use the innermost perimeter's centerline directly as the contour
+                    // The infill generation will handle the overlap setting (0%) from there
+                    inner_contour.emplace_back(contour_poly);
+                }
+            }
+        }
+    }
+
+    // If inner_contour exists but is too thin for solid infill, trigger regeneration with +1 bead
+    // This prevents gaps where solid infill algorithms fail on thin/irregular regions
+    // Example: With 4 perimeters, a region may be just barely too wide, creating thin solid infill
+    // that can't fill properly. Adding a 5th perimeter allows Athena's gap fill to work correctly.
+    if (!inner_contour.empty() && inset_count > 0 && !m_thin_contour_regeneration_attempted)
+    {
+        // Calculate threshold: region is "too thin" if it can't fit 2 bead widths
+        // (solid infill needs at least ~2 passes to fill properly)
+        const coord_t thin_threshold = coord_t(bead_width_x * 2.0);
+        const coord_t test_offset = thin_threshold / 2;
+
+        // Quick test: if inner_contour collapses when offset inward, it's too thin for solid infill
+        Polygons eroded = offset(inner_contour, -test_offset);
+
+        if (eroded.empty())
+        {
+            // Inner contour is too thin for solid infill
+            // But check if it's at least half a bead wide (not just a tiny gap that gap fill handles)
+            const coord_t min_sensible_width = bead_width_x / 2;
+            Polygons min_eroded = offset(inner_contour, -min_sensible_width / 2);
+
+            if (!min_eroded.empty())
+            {
+                // Region is between 0.5x and 2.0x bead width - perfect candidate for extra bead
+                // Trigger regeneration with +1 bead count
+                m_thin_contour_regeneration_attempted = true; // Prevent infinite recursion
+
+                // Clear current state
+                toolpaths.clear();
+                inner_contour.clear();
+                toolpaths_generated = false;
+
+                // Increment inset_count and regenerate
+                inset_count++;
+                generate(); // Re-run entire generation with new bead count
+
+                // Note: generate() calls separateOutInnerContour() again
+                // The flag prevents this block from triggering a second time
+                return; // Exit early, new contour is already computed
+            }
+        }
+    }
+}
+
+const Polygons &WallToolPaths::getInnerContour()
+{
+    if (!toolpaths_generated && inset_count > 0)
+    {
+        generate();
+    }
+    else if (inset_count == 0)
+    {
+        return outline;
+    }
+    return inner_contour;
+}
+
+bool WallToolPaths::removeEmptyToolPaths(std::vector<VariableWidthLines> &toolpaths)
+{
+    toolpaths.erase(std::remove_if(toolpaths.begin(), toolpaths.end(),
+                                   [](const VariableWidthLines &lines) { return lines.empty(); }),
+                    toolpaths.end());
+    return toolpaths.empty();
+}
+
+} // namespace Slic3r::Athena
