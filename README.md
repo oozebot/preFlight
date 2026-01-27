@@ -18,6 +18,12 @@ While preFlight is open-source and free for everyone, your support helps us main
 
 [Support the preFlight Mission (via Stripe)](https://donate.stripe.com/eVqfZbgoVf9y1c1aXe63K00)
 
+## Requirements
+
+**Windows only** at this time. Linux and macOS support coming soon.
+
+**Required:** [Microsoft Visual C++ Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe) - Install this first if preFlight won't launch.
+
 ## Why preFlight?
 
 | What You Get | The Difference |
@@ -321,9 +327,10 @@ preFlight is based on [PrusaSlicer](https://github.com/prusa3d/PrusaSlicer) by P
 
 ---
 
-## Issues
+## Support
 
-- [GitHub Issues](https://github.com/oozebot/preFlight/issues)
+- **Email:** [support@ooze.bot](mailto:support@ooze.bot)
+- **GitHub Issues:** [github.com/oozebot/preFlight/issues](https://github.com/oozebot/preFlight/issues)
 
 ---
 
