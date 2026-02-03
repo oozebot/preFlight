@@ -288,6 +288,8 @@ preFlight works with any modern 3D printer accepting RepRap-flavored G-code:
 
 ### Windows
 
+**Requires Visual Studio 2026** (VS 2022 is not supported)
+
 ```bash
 # Build dependencies (first time only)
 build_win.bat -STEPS deps
