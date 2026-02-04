@@ -24,6 +24,15 @@ While preFlight is open-source and free for everyone, your support helps us main
 
 **Required:** [Microsoft Visual C++ Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe) - Install this first if preFlight won't launch.
 
+## Security & Authenticity
+
+To ensure the integrity of your installation and protect yourself, please following these security guidelines:
+
+* **Official Downloads:** Only download preFlight binaries directly from our [GitHub Releases](https://github.com/oozebot/preFlight/releases) page. We do not distribute preFlight through third-party mirror sites.
+* **Verified Signature:** All official Windows binaries are digitally signed by **oozeBot, LLC** using an **Organization Validation (OV) Code Signing Certificate**. 
+* **Verification:** Before running the installer, right-click the file, select **Properties**, and navigate to the **Digital Signatures** tab. Ensure the "Name of signer" is explicitly listed as **oozeBot, LLC**.
+* **Safety First:** If you receive a "Windows protected your PC" (SmartScreen) warning on a file that is *not* signed by oozeBot, LLC, do not proceed with the installation and [report the issue](https://github.com/oozebot/preFlight/issues) immediately.
+
 ## Why preFlight?
 
 | What You Get | The Difference |
