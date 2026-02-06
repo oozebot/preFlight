@@ -59,6 +59,27 @@ void AllowDarkModeForApp();
 // Apply dark mode theme to a DataViewCtrl and its header control
 void SetDarkThemeForDataViewCtrl(HWND hwnd);
 
+// Apply dark mode theme to a TreeCtrl with custom selection colors
+void SetDarkThemeForTreeCtrl(HWND hwnd);
+
+// Note: Common dialogs (Open/Save) on Windows 11 follow the Windows system theme,
+// not the app's SetPreferredAppMode setting. These functions are no-ops but kept
+// for API compatibility in case Windows adds per-dialog theme control in the future.
+void PrepareForCommonDialog();
+void RestoreAfterCommonDialog();
+
+// RAII helper for common dialog theming (currently no-op, see above)
+class CommonDialogScope
+{
+public:
+    CommonDialogScope() { PrepareForCommonDialog(); }
+    ~CommonDialogScope() { RestoreAfterCommonDialog(); }
+
+    // Non-copyable
+    CommonDialogScope(const CommonDialogScope &) = delete;
+    CommonDialogScope &operator=(const CommonDialogScope &) = delete;
+};
+
 } // namespace NppDarkMode
 
 #endif // _WIN32

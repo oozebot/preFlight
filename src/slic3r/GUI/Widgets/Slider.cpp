@@ -12,6 +12,32 @@
 const wxColour Slider::BRAND_COLOR(234, 160, 50);
 const wxColour Slider::BRAND_COLOR_DARK(200, 140, 40);
 
+// DPI scaling helper functions
+static int GetScaledTrackHeight()
+{
+    return (Slic3r::GUI::wxGetApp().em_unit() * 4) / 10; // 4px at 100%
+}
+
+static int GetScaledThumbWidth()
+{
+    return (Slic3r::GUI::wxGetApp().em_unit() * 12) / 10; // 12px at 100%
+}
+
+static int GetScaledThumbHeight()
+{
+    return Slic3r::GUI::wxGetApp().em_unit() * 2; // 20px at 100%
+}
+
+static int GetScaledCornerRadius()
+{
+    return Slic3r::GUI::wxGetApp().em_unit() / 5; // 2px at 100%
+}
+
+static int GetScaledPenWidth()
+{
+    return std::max(1, Slic3r::GUI::wxGetApp().em_unit() / 10); // 1px at 100%, min 1px
+}
+
 wxBEGIN_EVENT_TABLE(Slider, wxPanel) EVT_PAINT(Slider::OnPaint) EVT_LEFT_DOWN(Slider::OnMouse)
     EVT_LEFT_UP(Slider::OnMouse) EVT_MOTION(Slider::OnMouse) EVT_MOUSEWHEEL(Slider::OnMouseWheel)
         EVT_SIZE(Slider::OnSize) wxEND_EVENT_TABLE()
@@ -25,7 +51,8 @@ wxBEGIN_EVENT_TABLE(Slider, wxPanel) EVT_PAINT(Slider::OnPaint) EVT_LEFT_DOWN(Sl
     , m_dragging(false)
 {
     SetBackgroundStyle(wxBG_STYLE_PAINT);
-    SetMinSize(wxSize(100, 20));
+    int em = Slic3r::GUI::wxGetApp().em_unit();
+    SetMinSize(wxSize(em * 10, em * 2)); // 100x20 at 100%
 }
 
 void Slider::SetValue(int value)
@@ -61,9 +88,9 @@ void Slider::OnPaint(wxPaintEvent &event)
     dc.Clear();
 
     const wxSize size = GetClientSize();
-    const int trackHeight = 4;
-    const int thumbWidth = 12;
-    const int thumbHeight = 20;
+    const int trackHeight = GetScaledTrackHeight();
+    const int thumbWidth = GetScaledThumbWidth();
+    const int thumbHeight = GetScaledThumbHeight();
     const int trackY = (size.y - trackHeight) / 2;
 
     // Track color - darker than background for visibility in both themes
@@ -82,8 +109,8 @@ void Slider::OnPaint(wxPaintEvent &event)
     // Draw thumb
     wxRect thumbRect = GetThumbRect();
     dc.SetBrush(wxBrush(BRAND_COLOR));
-    dc.SetPen(wxPen(BRAND_COLOR_DARK, 1));
-    dc.DrawRoundedRectangle(thumbRect, 2);
+    dc.SetPen(wxPen(BRAND_COLOR_DARK, GetScaledPenWidth()));
+    dc.DrawRoundedRectangle(thumbRect, GetScaledCornerRadius());
 }
 
 void Slider::OnMouse(wxMouseEvent &event)
@@ -149,7 +176,7 @@ void Slider::OnSize(wxSizeEvent &event)
 int Slider::ValueFromPosition(int x) const
 {
     const int size = GetClientSize().x;
-    const int thumbWidth = 12;
+    const int thumbWidth = GetScaledThumbWidth();
     const int usableWidth = size - thumbWidth;
 
     if (usableWidth <= 0)
@@ -163,7 +190,7 @@ int Slider::ValueFromPosition(int x) const
 int Slider::PositionFromValue() const
 {
     const int size = GetClientSize().x;
-    const int thumbWidth = 12;
+    const int thumbWidth = GetScaledThumbWidth();
     const int usableWidth = size - thumbWidth;
 
     if (m_max == m_min)
@@ -175,8 +202,8 @@ int Slider::PositionFromValue() const
 
 wxRect Slider::GetThumbRect() const
 {
-    const int thumbWidth = 12;
-    const int thumbHeight = 20;
+    const int thumbWidth = GetScaledThumbWidth();
+    const int thumbHeight = GetScaledThumbHeight();
     const int thumbX = PositionFromValue() - thumbWidth / 2;
     const int thumbY = (GetClientSize().y - thumbHeight) / 2;
 
@@ -189,4 +216,11 @@ void Slider::NotifyValueChanged()
     event.SetEventObject(this);
     event.SetPosition(m_value);
     ProcessWindowEvent(event);
+}
+
+void Slider::msw_rescale()
+{
+    int em = Slic3r::GUI::wxGetApp().em_unit();
+    SetMinSize(wxSize(em * 10, em * 2)); // 100x20 at 100%
+    Refresh();
 }

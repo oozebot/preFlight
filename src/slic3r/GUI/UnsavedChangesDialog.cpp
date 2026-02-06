@@ -919,8 +919,8 @@ void UnsavedChangesDialog::build(Preset::Type type, PresetCollection *dependent_
 {
     this->SetFont(wxGetApp().normal_font());
 
-    int border = 10;
     int em = em_unit();
+    int border = em;
 
     bool add_new_value_column = !new_selected_preset.empty() && dependent_presets &&
                                 dependent_presets->get_edited_preset().type == type &&
@@ -946,14 +946,14 @@ void UnsavedChangesDialog::build(Preset::Type type, PresetCollection *dependent_
     wxFont btn_font = this->GetFont().Scaled(1.4f);
     wxBoxSizer *buttons = new wxBoxSizer(wxHORIZONTAL);
 
-    auto add_btn = [this, buttons, btn_font, dependent_presets](ScalableButton **btn, int &btn_id,
-                                                                const std::string &icon_name, Action close_act,
-                                                                const wxString &label, bool process_enable = true)
+    auto add_btn = [this, buttons, btn_font, dependent_presets, em](ScalableButton **btn, int &btn_id,
+                                                                    const std::string &icon_name, Action close_act,
+                                                                    const wxString &label, bool process_enable = true)
     {
         *btn = new ScalableButton(this, btn_id = NewControlId(), icon_name, label, wxDefaultSize, wxDefaultPosition,
                                   wxBORDER_DEFAULT, 24);
 
-        buttons->Add(*btn, 1, wxLEFT, 5);
+        buttons->Add(*btn, 1, wxLEFT, em / 2);
         (*btn)->SetFont(btn_font);
 
         (*btn)->Bind(wxEVT_BUTTON,
@@ -1008,7 +1008,7 @@ void UnsavedChangesDialog::build(Preset::Type type, PresetCollection *dependent_
 
     ScalableButton *cancel_btn = new ScalableButton(this, wxID_CANCEL, "cross", _L("Cancel"), wxDefaultSize,
                                                     wxDefaultPosition, wxBORDER_DEFAULT, 24);
-    buttons->Add(cancel_btn, 1, wxLEFT | wxRIGHT, 5);
+    buttons->Add(cancel_btn, 1, wxLEFT | wxRIGHT, wxGetApp().em_unit() / 2);
     cancel_btn->SetFont(btn_font);
     cancel_btn->Bind(wxEVT_BUTTON, [this](wxEvent &) { this->EndModal(wxID_CANCEL); });
 
@@ -1589,7 +1589,7 @@ FullCompareDialog::FullCompareDialog(const wxString &option_name, const wxString
     wxGetApp().UpdateDarkUI(this);
     this->SetFont(wxGetApp().normal_font());
 
-    int border = 10;
+    int border = wxGetApp().em_unit();
     bool has_new_value_column = !new_value_header.IsEmpty();
 
     wxStaticBoxSizer *sizer = new wxStaticBoxSizer(wxVERTICAL, this);
@@ -1643,7 +1643,8 @@ FullCompareDialog::FullCompareDialog(const wxString &option_name, const wxString
     auto add_value =
         [grid_sizer, border, this](wxString label, const std::set<wxString> &diff_set, bool is_colored = false)
     {
-        wxTextCtrl *text = new wxTextCtrl(this, wxID_ANY, label, wxDefaultPosition, wxSize(400, 400),
+        // DPI-scaled size (40 * border where border is em_unit)
+        wxTextCtrl *text = new wxTextCtrl(this, wxID_ANY, label, wxDefaultPosition, wxSize(40 * border, 40 * border),
                                           wxTE_MULTILINE | wxTE_READONLY | wxBORDER_DEFAULT | wxTE_RICH);
         wxGetApp().UpdateDarkUI(text);
         text->SetStyle(0, label.Len(),
@@ -1737,9 +1738,9 @@ void DiffPresetDialog::create_presets_sizer()
             cb->Show(new_type == Preset::TYPE_PRINTER);
         };
         add_preset_combobox(&presets_left, &m_preset_bundle_left);
-        sizer->Add(equal_bmp, 0, wxRIGHT | wxLEFT | wxALIGN_CENTER_VERTICAL, 5);
+        sizer->Add(equal_bmp, 0, wxRIGHT | wxLEFT | wxALIGN_CENTER_VERTICAL, wxGetApp().em_unit() / 2);
         add_preset_combobox(&presets_right, &m_preset_bundle_right);
-        m_presets_sizer->Add(sizer, 1, wxTOP, 5);
+        m_presets_sizer->Add(sizer, 1, wxTOP, wxGetApp().em_unit() / 2);
         equal_bmp->Show(new_type == Preset::TYPE_PRINTER);
 
         m_preset_combos.push_back({presets_left, equal_bmp, presets_right});
@@ -1881,7 +1882,7 @@ void DiffPresetDialog::create_buttons()
                       Layout();
                       e.Skip();
                   });
-        m_buttons->Add(btn, 1, wxLEFT, 5);
+        m_buttons->Add(btn, 1, wxLEFT, em_unit() / 2);
         btn->SetFont(font);
     }
 
@@ -1914,9 +1915,9 @@ void DiffPresetDialog::create_edit_sizer()
 
     // Create and fill edit sizer
     m_edit_sizer = new wxBoxSizer(wxHORIZONTAL);
-    m_edit_sizer->Add(m_use_for_transfer, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, 5);
+    m_edit_sizer->Add(m_use_for_transfer, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, em_unit() / 2);
     m_edit_sizer->AddSpacer(em_unit() * 10);
-    m_edit_sizer->Add(m_buttons, 1, wxLEFT, 5);
+    m_edit_sizer->Add(m_buttons, 1, wxLEFT, em_unit() / 2);
     m_edit_sizer->Show(false);
 }
 
@@ -1924,7 +1925,7 @@ void DiffPresetDialog::complete_dialog_creation()
 {
     wxBoxSizer *topSizer = new wxBoxSizer(wxVERTICAL);
 
-    int border = 10;
+    int border = em_unit();
     topSizer->Add(m_top_info_line, 0, wxEXPAND | wxLEFT | wxTOP | wxRIGHT, 2 * border);
     topSizer->Add(m_presets_sizer, 0, wxEXPAND | wxLEFT | wxTOP | wxRIGHT, border);
     topSizer->Add(m_show_all_presets, 0, wxEXPAND | wxALL, border);

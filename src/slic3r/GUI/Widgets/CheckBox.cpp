@@ -3,9 +3,16 @@
 ///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
 ///|/
 #include "CheckBox.hpp"
+#include "UIColors.hpp"
+#include "../GUI_App.hpp"
 
-//#include "../wxExtensions.hpp"
+// DPI scaling helper for bitmap margin (text-to-checkbox spacing)
+static int GetScaledBitmapMargin()
+{
+    return (Slic3r::GUI::wxGetApp().em_unit() * 4) / 10; // 4px at 100%
+}
 
+// Icon size - ScalableBitmap/wxBitmapBundle handles DPI scaling automatically
 const int px_cnt = 16;
 
 CheckBox::CheckBox(wxWindow *parent, const wxString &name)
@@ -23,6 +30,13 @@ CheckBox::CheckBox(wxWindow *parent, const wxString &name)
     Bind(wxEVT_ENTER_WINDOW, &CheckBox::updateBitmap, this);
     Bind(wxEVT_LEAVE_WINDOW, &CheckBox::updateBitmap, this);
 #endif
+
+    // Set initial colors to match parent's background
+    if (wxWindow *p = GetParent())
+        SetBackgroundColour(p->GetBackgroundColour());
+
+    bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
+    SetForegroundColour(is_dark ? UIColors::PanelForegroundDark() : UIColors::PanelForegroundLight());
 
     update();
 }
@@ -52,8 +66,19 @@ void CheckBox::sys_color_changed()
     m_off_disabled.sys_color_changed();
     m_on_focused.sys_color_changed();
     m_off_focused.sys_color_changed();
+
+    // Update colors to match parent's background (inherited from theme)
+    if (wxWindow *parent = GetParent())
+        SetBackgroundColour(parent->GetBackgroundColour());
+
+    bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
+    SetForegroundColour(is_dark ? UIColors::PanelForegroundDark() : UIColors::PanelForegroundLight());
+
     // Update the displayed bitmap
     update();
+
+    // Force repaint
+    Refresh();
 }
 
 void CheckBox::update()
@@ -72,7 +97,7 @@ void CheckBox::update()
 #endif
 
     if (GetBitmapMargins().GetWidth() == 0 && !GetLabelText().IsEmpty())
-        SetBitmapMargins(4, 0);
+        SetBitmapMargins(GetScaledBitmapMargin(), 0);
     update_size();
 }
 
@@ -97,18 +122,8 @@ bool CheckBox::Enable(bool enable)
         updateBitmap(e);
     }
 #endif
-#ifdef __WXMSW__
-    if (result)
-    {
-        // Force background color update - Windows ignores SetBackgroundColour on disabled controls
-        // but we can still set it and it will be used when we refresh
-        if (auto parent = GetParent())
-        {
-            SetBackgroundColour(parent->GetBackgroundColour());
-            Refresh();
-        }
-    }
-#endif
+    // Checkbox background should always match panel - disabled state shown by grayed icon
+    // (no special disabled background needed unlike text inputs)
     return result;
 }
 

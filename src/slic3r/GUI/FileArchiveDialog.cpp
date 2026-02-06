@@ -317,8 +317,8 @@ FileArchiveDialog::FileArchiveDialog(wxWindow *parent_window, mz_zip_archive *ar
     cancel_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent &evt) { this->EndModal(wxID_CANCEL); });
     btn_sizer->Add(cancel_btn, 0, wxRIGHT, em);
 
-    topSizer->Add(m_avc, 1, wxEXPAND | wxALL, 10);
-    topSizer->Add(btn_sizer, 0, wxEXPAND | wxALL, 10);
+    topSizer->Add(m_avc, 1, wxEXPAND | wxALL, em);
+    topSizer->Add(btn_sizer, 0, wxEXPAND | wxALL, em);
     this->SetSizer(topSizer);
     SetMinSize(wxSize(40 * em, 30 * em));
 
@@ -329,14 +329,11 @@ FileArchiveDialog::FileArchiveDialog(wxWindow *parent_window, mz_zip_archive *ar
 void FileArchiveDialog::on_dpi_changed(const wxRect &suggested_rect)
 {
     int em = em_unit();
-    BOOST_LOG_TRIVIAL(error) << "on_dpi_changed";
-    //msw_buttons_rescale(this, em, { wxID_CANCEL, m_save_btn_id, m_move_btn_id, m_continue_btn_id });
-    //for (auto btn : { m_save_btn, m_transfer_btn, m_discard_btn })
-    //    if (btn) btn->msw_rescale();
+    // Note: Button rescaling commented out - member variables were removed from class
+    // msw_buttons_rescale(this, em, { wxID_CANCEL, m_save_btn_id, m_move_btn_id, m_continue_btn_id });
 
     const wxSize &size = wxSize(45 * em, 40 * em);
-    SetSize(size);
-    //m_tree->Rescale(em);
+    SetMinSize(size); // use SetMinSize for proper layout
 
     Fit();
     Refresh();

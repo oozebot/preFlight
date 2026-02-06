@@ -86,7 +86,19 @@ bool BitmapTextRenderer::Render(wxRect rect, wxDC *dc, int state)
     }
 
 #ifdef _WIN32
-    // workaround for Windows DarkMode : Don't respect to the state & wxDATAVIEW_CELL_SELECTED to avoid update of the text color
+    // UNIFIED THEMING: Explicitly set text color based on current theme palette
+    // Windows dark mode APIs are always enabled, but we use light/dark color palettes
+    bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
+    wxColour text_color = is_dark ? wxColour(250, 250, 250) : wxColour(38, 46, 48);
+
+    // For selected items, use appropriate contrast color
+    if (state & wxDATAVIEW_CELL_SELECTED)
+    {
+        // Selected items need good contrast - white for dark selection, dark for light selection
+        text_color = is_dark ? wxColour(255, 255, 255) : wxColour(38, 46, 48);
+    }
+
+    dc->SetTextForeground(text_color);
     RenderText(m_value.GetText(), xoffset, rect, dc, state & wxDATAVIEW_CELL_SELECTED ? 0 : state);
 #else
     {
@@ -123,7 +135,9 @@ wxSize BitmapTextRenderer::GetSize() const
             size.x += m_value.GetBitmap().GetWidth() + 4;
         return size;
     }
-    return wxSize(80, 20);
+    // DPI-scaled fallback size
+    int em = Slic3r::GUI::wxGetApp().em_unit();
+    return wxSize(8 * em, 2 * em);
 }
 
 wxWindow *BitmapTextRenderer::CreateEditorCtrl(wxWindow *parent, wxRect labelRect, const wxVariant &value)
@@ -221,7 +235,14 @@ bool BitmapChoiceRenderer::Render(wxRect rect, wxDC *dc, int state)
     }
 
 #ifdef _WIN32
-    // workaround for Windows DarkMode : Don't respect to the state & wxDATAVIEW_CELL_SELECTED to avoid update of the text color
+    // UNIFIED THEMING: Explicitly set text color based on current theme palette
+    bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
+    wxColour text_color = is_dark ? wxColour(250, 250, 250) : wxColour(38, 46, 48);
+
+    if (state & wxDATAVIEW_CELL_SELECTED)
+        text_color = is_dark ? wxColour(255, 255, 255) : wxColour(38, 46, 48);
+
+    dc->SetTextForeground(text_color);
     RenderText(m_value.GetText(), xoffset, rect, dc, state & wxDATAVIEW_CELL_SELECTED ? 0 : state);
 #else
     RenderText(m_value.GetText(), xoffset, rect, dc, state);

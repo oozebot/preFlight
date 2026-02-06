@@ -31,6 +31,7 @@
 #include "Search.hpp"
 
 #include "TopBarMenus.hpp"
+#include "Widgets/CustomMenuBar.hpp"
 
 class TopBar;
 class wxProgressDialog;
@@ -48,6 +49,7 @@ class MainFrame;
 class ModernTabBar;
 class PreferencesDialog;
 class GalleryDialog;
+class PrinterWebViewPanel;
 
 enum QuickSlice
 {
@@ -93,6 +95,7 @@ class MainFrame : public DPIFrame
     wxString m_qs_last_output_file = wxEmptyString;
     wxString m_last_config = wxEmptyString;
     wxMenuBar *m_menubar{nullptr};
+    CustomMenuBar *m_customMenuBar{nullptr};
     TopBarMenus m_bar_menus;
 
     wxMenuItem *m_menu_item_reslice_now{nullptr};
@@ -130,12 +133,9 @@ class MainFrame : public DPIFrame
     void reload_item_function_cb();
     // MenuBar items changeable in respect to printer technology
     enum MenuItems
-    {                  //   FFF                  SLA
-        miExport = 0,  // Export G-code        Export
-        miSend,        // Send G-code          Send to print
-        miMaterialTab, // Filament Settings    Material Settings
-        miPrinterTab,  // Different bitmap for Printer Settings
-        miLogin,
+    {                 //   FFF                  SLA
+        miExport = 0, // Export G-code        Export
+        miSend,       // Send G-code          Send to print
     };
 
     // vector of a MenuBar items changeable in respect to printer technology
@@ -232,11 +232,13 @@ public:
 
     void add_printer_webview_tab(const wxString &url);
     void remove_printer_webview_tab();
-    bool get_printer_webview_tab_added() const { return false; }
+    bool get_printer_webview_tab_added() const { return m_printer_webview_tab_added; }
     void set_printer_webview_api_key(const std::string &key);
     void set_printer_webview_credentials(const std::string &usr, const std::string &psk);
     bool is_any_webview_selected();
     void reload_selected_webview();
+    void show_printer_webview_content();
+    void hide_printer_webview_content();
 
     void refresh_account_menu(bool avatar = false);
 
@@ -255,6 +257,8 @@ public:
     PreferencesDialog *preferences_dialog{nullptr};
     PrintHostQueueDialog *m_printhost_queue_dlg;
     GalleryDialog *m_gallery_dialog{nullptr};
+    PrinterWebViewPanel *m_printer_webview_panel{nullptr};
+    bool m_printer_webview_tab_added{false};
 
 #ifdef __APPLE__
     std::unique_ptr<wxTaskBarIcon> m_taskbar_icon;

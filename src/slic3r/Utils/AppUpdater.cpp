@@ -407,6 +407,46 @@ void AppUpdater::priv::version_check(const std::string &version_check_url)
             evt->SetString(message);
             GUI::wxGetApp().QueueEvent(evt);
         }
+        return;
+    }
+
+    // Fetch release notes (silently skip on failure)
+    DownloadAppData app_data = get_app_data();
+    if (app_data.version)
+    {
+        std::string notes_url = GUI::wxGetApp().app_config->release_notes_url();
+        if (!notes_url.empty())
+        {
+            std::string notes_error;
+            std::string notes_body;
+            http_get_file(
+                notes_url, 32 * 1024,
+                [](Http::Progress) { return true; },
+                [&](std::string body, std::string &)
+                {
+                    boost::trim(body);
+                    notes_body = std::move(body);
+                    return true;
+                },
+                notes_error);
+            // Only use notes if content looks valid (not a server error page)
+            if (!notes_body.empty() && notes_body.substr(0, 9) != "<!DOCTYPE" && notes_body.substr(0, 5) != "<html")
+            {
+                app_data.release_notes = std::move(notes_body);
+                set_app_data(app_data);
+            }
+        }
+
+        // Send version event to GUI thread
+        std::string version = app_data.version.get().to_string();
+        BOOST_LOG_TRIVIAL(info) << format("Got %1% online version: `%2%`. Sending to GUI thread...", SLIC3R_APP_NAME,
+                                          version);
+        if (wxApp::GetInstance() != nullptr)
+        {
+            wxCommandEvent *evt = new wxCommandEvent(EVT_SLIC3R_VERSION_ONLINE);
+            evt->SetString(GUI::from_u8(version));
+            GUI::wxGetApp().QueueEvent(evt);
+        }
     }
 }
 
@@ -555,18 +595,8 @@ void AppUpdater::priv::parse_version_string(const std::string &body)
     }
     assert(!new_data.url.empty());
     assert(new_data.version);
-    // save
+    // save - event is sent from version_check() after optional notes fetch
     set_app_data(new_data);
-    // send
-    std::string version = new_data.version.get().to_string();
-    BOOST_LOG_TRIVIAL(info) << format("Got %1% online version: `%2%`. Sending to GUI thread...", SLIC3R_APP_NAME,
-                                      version);
-    if (wxApp::GetInstance() != nullptr)
-    {
-        wxCommandEvent *evt = new wxCommandEvent(EVT_SLIC3R_VERSION_ONLINE);
-        evt->SetString(GUI::from_u8(version));
-        GUI::wxGetApp().QueueEvent(evt);
-    }
 }
 
 #if 0  // Legacy version parsing code kept for reference

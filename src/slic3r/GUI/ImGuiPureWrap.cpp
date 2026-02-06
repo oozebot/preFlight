@@ -88,12 +88,32 @@ void set_next_window_size(float x, float y, ImGuiCond cond)
 
 bool begin(const std::string &name, int flags)
 {
-    return ImGui::Begin(name.c_str(), nullptr, (ImGuiWindowFlags) flags);
+    // Push black text color for title bar (better contrast on orange background)
+    bool has_title = !((ImGuiWindowFlags) flags & ImGuiWindowFlags_NoTitleBar);
+    if (has_title)
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
+
+    bool result = ImGui::Begin(name.c_str(), nullptr, (ImGuiWindowFlags) flags);
+
+    if (has_title)
+        ImGui::PopStyleColor();
+
+    return result;
 }
 
 bool begin(const std::string &name, bool *close, int flags)
 {
-    return ImGui::Begin(name.c_str(), close, (ImGuiWindowFlags) flags);
+    // Push black text color for title bar (better contrast on orange background)
+    bool has_title = !((ImGuiWindowFlags) flags & ImGuiWindowFlags_NoTitleBar);
+    if (has_title)
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.0f, 0.0f, 0.0f, 1.0f));
+
+    bool result = ImGui::Begin(name.c_str(), close, (ImGuiWindowFlags) flags);
+
+    if (has_title)
+        ImGui::PopStyleColor();
+
+    return result;
 }
 
 void end()
@@ -210,9 +230,11 @@ void text_wrapped(const std::string &label, float wrap_width)
 
 void tooltip(const char *label, float wrap_width)
 {
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 4.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 4.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {8.0f, 8.0f});
+    // DPI scaling - use ImGui's FontGlobalScale as the scale factor
+    const float scale = std::max(1.0f, ImGui::GetIO().FontGlobalScale);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 4.0f * scale);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 4.0f * scale);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {8.0f * scale, 8.0f * scale});
     ImGui::BeginTooltip();
     ImGui::PushTextWrapPos(wrap_width);
     ImGui::TextUnformatted(label);

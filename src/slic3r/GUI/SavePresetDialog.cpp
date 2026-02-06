@@ -28,7 +28,11 @@ namespace Slic3r
 namespace GUI
 {
 
-constexpr auto BORDER_W = 10;
+// DPI-scaled border width helper
+static int GetScaledBorderW()
+{
+    return wxGetApp().em_unit(); // 10px at 100% DPI
+}
 
 //-----------------------------------------------
 //          SavePresetDialog::Item
@@ -105,7 +109,7 @@ void SavePresetDialog::Item::init_input_name_ctrl(wxBoxSizer *input_name_sizer, 
         wxGetApp().UpdateDarkUI(m_text_ctrl);
         m_text_ctrl->Bind(wxEVT_TEXT, [this](wxCommandEvent &) { update(); });
 
-        input_name_sizer->Add(m_text_ctrl, 1, wxEXPAND, BORDER_W);
+        input_name_sizer->Add(m_text_ctrl, 1, wxEXPAND, GetScaledBorderW());
     }
     else
     {
@@ -129,7 +133,7 @@ void SavePresetDialog::Item::init_input_name_ctrl(wxBoxSizer *input_name_sizer, 
         m_combo->Bind(wxEVT_COMBOBOX, [this](wxCommandEvent &) { update(); });
 #endif //__WXOSX__
 
-        input_name_sizer->Add(m_combo, 1, wxEXPAND, BORDER_W);
+        input_name_sizer->Add(m_combo, 1, wxEXPAND, GetScaledBorderW());
     }
 }
 
@@ -157,15 +161,15 @@ SavePresetDialog::Item::Item(Preset::Type type, const std::string &suffix, wxBox
                                   : nullptr;
 
     wxBoxSizer *input_name_sizer = new wxBoxSizer(wxHORIZONTAL);
-    input_name_sizer->Add(m_valid_bmp, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, BORDER_W);
+    input_name_sizer->Add(m_valid_bmp, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, GetScaledBorderW());
     init_input_name_ctrl(input_name_sizer, get_init_preset_name(suffix));
 
     init_casei_preset_names();
 
     if (label_top)
-        sizer->Add(label_top, 0, wxEXPAND | wxTOP | wxBOTTOM, BORDER_W);
-    sizer->Add(input_name_sizer, 0, wxEXPAND | (label_top ? 0 : wxTOP) | wxBOTTOM, BORDER_W);
-    sizer->Add(m_valid_label, 0, wxEXPAND | wxLEFT, 3 * BORDER_W);
+        sizer->Add(label_top, 0, wxEXPAND | wxTOP | wxBOTTOM, GetScaledBorderW());
+    sizer->Add(input_name_sizer, 0, wxEXPAND | (label_top ? 0 : wxTOP) | wxBOTTOM, GetScaledBorderW());
+    sizer->Add(m_valid_label, 0, wxEXPAND | wxLEFT, 3 * GetScaledBorderW());
 
     if (m_type == Preset::TYPE_PRINTER)
         parent->add_info_for_edit_ph_printer(sizer);
@@ -185,13 +189,13 @@ SavePresetDialog::Item::Item(wxWindow *parent, wxBoxSizer *sizer, const std::str
     m_valid_label->SetFont(wxGetApp().bold_font());
 
     wxBoxSizer *input_name_sizer = new wxBoxSizer(wxHORIZONTAL);
-    input_name_sizer->Add(m_valid_bmp, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, BORDER_W);
+    input_name_sizer->Add(m_valid_bmp, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, GetScaledBorderW());
     init_input_name_ctrl(input_name_sizer, m_preset_name);
 
     init_casei_preset_names();
 
-    sizer->Add(input_name_sizer, 0, wxEXPAND | wxBOTTOM, BORDER_W);
-    sizer->Add(m_valid_label, 0, wxEXPAND | wxLEFT, 3 * BORDER_W);
+    sizer->Add(input_name_sizer, 0, wxEXPAND | wxBOTTOM, GetScaledBorderW());
+    sizer->Add(m_valid_label, 0, wxEXPAND | wxLEFT, 3 * GetScaledBorderW());
 
     update();
 }
@@ -452,7 +456,7 @@ void SavePresetDialog::build(std::vector<Preset::Type> types, std::string suffix
     btnOK->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { accept(); });
     btnOK->Bind(wxEVT_UPDATE_UI, [this](wxUpdateUIEvent &evt) { evt.Enable(enable_ok_btn()); });
 
-    topSizer->Add(m_presets_sizer, 0, wxEXPAND | wxALL, BORDER_W);
+    topSizer->Add(m_presets_sizer, 0, wxEXPAND | wxALL, GetScaledBorderW());
 
     // Add checkbox for Template filament saving
     if (template_filament && types.size() == 1 && *types.begin() == Preset::Type::TYPE_FILAMENT)
@@ -461,10 +465,10 @@ void SavePresetDialog::build(std::vector<Preset::Type> types, std::string suffix
                                                       _L("Save as profile derived from current printer only."));
         wxBoxSizer *check_sizer = new wxBoxSizer(wxVERTICAL);
         check_sizer->Add(m_template_filament_checkbox);
-        topSizer->Add(check_sizer, 0, wxEXPAND | wxALL, BORDER_W);
+        topSizer->Add(check_sizer, 0, wxEXPAND | wxALL, GetScaledBorderW());
     }
 
-    topSizer->Add(btns, 0, wxEXPAND | wxALL, BORDER_W);
+    topSizer->Add(btns, 0, wxEXPAND | wxALL, GetScaledBorderW());
 
     SetSizer(topSizer);
     topSizer->SetSizeHints(this);
@@ -540,12 +544,12 @@ void SavePresetDialog::add_info_for_edit_ph_printer(wxBoxSizer *sizer)
                                                id == 0 ? wxRB_GROUP : 0);
         btn->SetValue(id == int(ChangePreset));
         btn->Bind(wxEVT_RADIOBUTTON, [this, id](wxCommandEvent &) { m_action = (ActionType) id; });
-        stb_sizer->Add(btn, 0, wxEXPAND | wxTOP, 5);
+        stb_sizer->Add(btn, 0, wxEXPAND | wxTOP, wxGetApp().em_unit() / 2);
     }
-    m_radio_sizer->Add(stb_sizer, 1, wxEXPAND | wxTOP, 2 * BORDER_W);
+    m_radio_sizer->Add(stb_sizer, 1, wxEXPAND | wxTOP, 2 * GetScaledBorderW());
 
-    sizer->Add(m_label, 0, wxEXPAND | wxLEFT | wxTOP, 3 * BORDER_W);
-    sizer->Add(m_radio_sizer, 1, wxEXPAND | wxLEFT, 3 * BORDER_W);
+    sizer->Add(m_label, 0, wxEXPAND | wxLEFT | wxTOP, 3 * GetScaledBorderW());
+    sizer->Add(m_radio_sizer, 1, wxEXPAND | wxLEFT, 3 * GetScaledBorderW());
 }
 
 void SavePresetDialog::update_info_for_edit_ph_printer(const std::string &preset_name)
@@ -556,7 +560,9 @@ void SavePresetDialog::update_info_for_edit_ph_printer(const std::string &preset
     m_radio_sizer->ShowItems(show);
     if (!show)
     {
-        this->SetMinSize(wxSize(100, 50));
+        // DPI-scaled minimum size
+        int em = wxGetApp().em_unit();
+        this->SetMinSize(wxSize(10 * em, 5 * em));
         return;
     }
 
@@ -598,8 +604,8 @@ void SavePresetDialog::on_dpi_changed(const wxRect &suggested_rect)
     for (Item *item : m_items)
         item->update_valid_bmp();
 
-    //const wxSize& size = wxSize(45 * em, 35 * em);
-    SetMinSize(/*size*/ wxSize(100, 50));
+    // DPI-scaled minimum size
+    SetMinSize(wxSize(10 * em, 5 * em));
 
     Fit();
     Refresh();

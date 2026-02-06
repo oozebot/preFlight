@@ -391,12 +391,15 @@ void Preset::normalize(DynamicPrintConfig &config)
             first_layer_height->percent = false;
         }
 
-    // Thick bridges cause issues with support interface gap calculations because the first
-    // layer above support uses bridging settings. With thick_bridges enabled, that layer
-    // tries to print at nozzle diameter height instead of layer height, breaking gap math.
-    // This setting is removed from the UI but we force it off for any imported presets.
+    // preFlight: force-disable settings that have been removed from the UI.
+    // These are suppressed in SettingsFactory::get_options() for the per-object menu,
+    // but we also need to force them off when importing presets or 3MF files.
     if (auto *thick_bridges = config.option<ConfigOptionBool>("thick_bridges", false); thick_bridges)
         thick_bridges->value = false;
+    if (auto *thin_walls = config.option<ConfigOptionBool>("thin_walls", false); thin_walls)
+        thin_walls->value = false;
+    if (auto *sync_layers = config.option<ConfigOptionBool>("support_material_synchronize_layers", false); sync_layers)
+        sync_layers->value = false;
 
     handle_legacy_sla(config);
 }

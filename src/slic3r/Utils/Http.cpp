@@ -140,6 +140,7 @@ struct Http::priv
     Http::IPResolveFn ipresolvefn;
     Http::RetryFn retryfn;
     Http::HeadersFn headersfn;
+    ::curl_slist *resolvelist;
 
     priv(const std::string &url);
     ~priv();
@@ -169,6 +170,7 @@ Http::priv::priv(const std::string &url)
     , form(nullptr)
     , form_end(nullptr)
     , headerlist(nullptr)
+    , resolvelist(nullptr)
     , error_buffer(CURL_ERROR_SIZE + 1, '\0')
     , limit(0)
     , cancel(false)
@@ -193,6 +195,7 @@ Http::priv::~priv()
     ::curl_easy_cleanup(curl);
     ::curl_formfree(form);
     ::curl_slist_free_all(headerlist);
+    ::curl_slist_free_all(resolvelist);
 }
 
 bool Http::priv::ca_file_supported(::CURL *curl)
@@ -781,6 +784,18 @@ Http &Http::on_headers(HeadersFn fn)
     if (p)
     {
         p->headersfn = std::move(fn);
+    }
+    return *this;
+}
+
+Http &Http::resolve(const std::string &host, unsigned port, const std::string &ip_address)
+{
+    if (p && !host.empty() && !ip_address.empty())
+    {
+        // Format: "hostname:port:address" - tells curl to use this IP for the given host:port
+        std::string resolve_entry = host + ":" + std::to_string(port) + ":" + ip_address;
+        p->resolvelist = curl_slist_append(p->resolvelist, resolve_entry.c_str());
+        ::curl_easy_setopt(p->curl, CURLOPT_RESOLVE, p->resolvelist);
     }
     return *this;
 }

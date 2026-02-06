@@ -1034,7 +1034,7 @@ void GLGizmosManager::do_render_overlay() const
             }
 
             window_x = button_pos.first;
-            current_y = toolbar_height + 5.0f; // 5px below toolbar bottom
+            current_y = toolbar_height + 5.0f * m_layout.scale; // DPI-scaled offset below toolbar
         }
         else
         {

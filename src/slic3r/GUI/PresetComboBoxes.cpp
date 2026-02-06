@@ -554,6 +554,8 @@ void PresetComboBox::sys_color_changed()
 
 void PresetComboBox::fill_width_height()
 {
+    // These are logical pixel sizes - wxBitmapBundle handles DPI scaling automatically
+    // via mksolid/FromSVG. Do NOT pre-scale with em_unit or these get double-scaled.
     icon_height = 16;
     norm_icon_width = 16;
 
@@ -1205,14 +1207,12 @@ void PlaterPresetComboBox::update()
         }
     }
 
-    if (m_type == Preset::TYPE_PRINTER || m_type == Preset::TYPE_FILAMENT || m_type == Preset::TYPE_SLA_MATERIAL)
+    if (m_type == Preset::TYPE_PRINTER || m_type == Preset::TYPE_SLA_MATERIAL)
     {
         auto bmp = get_bmp("edit_preset_list", wide_icons, "edit_uni");
         assert(bmp);
 
-        if (m_type == Preset::TYPE_FILAMENT)
-            set_label_marker(Append(separator(L("Add/Remove filaments")), *bmp), LABEL_ITEM_WIZARD_FILAMENTS);
-        else if (m_type == Preset::TYPE_SLA_MATERIAL)
+        if (m_type == Preset::TYPE_SLA_MATERIAL)
             set_label_marker(Append(separator(L("Add/Remove materials")), *bmp), LABEL_ITEM_WIZARD_MATERIALS);
         else
             set_label_marker(Append(separator(L("Add/Remove printers")), *bmp), LABEL_ITEM_WIZARD_PRINTERS);
@@ -1233,25 +1233,14 @@ void PlaterPresetComboBox::update()
         SetToolTip(tooltip);
     }
 
-#ifdef __WXMSW__
-    // Use this part of code just on Windows to avoid of some layout issues on Linux
-    // Fix for preset combo box issues
-    // Update control min size after rescale (changed Display DPI under MSW)
-    if (GetMinWidth() != 20 * m_em_unit)
-        SetMinSize(wxSize(20 * m_em_unit, GetSize().GetHeight()));
-#endif //__WXMSW__
+    // Removed 20 em minimum width enforcement for flexible sidebar layout
 }
 
 void PlaterPresetComboBox::msw_rescale()
 {
     PresetComboBox::msw_rescale();
-#ifdef __WXMSW__
-    // Use this part of code just on Windows to avoid of some layout issues on Linux
-    // Fix for preset combo box issues
-    // Update control min size after rescale (changed Display DPI under MSW)
-    if (GetMinWidth() != 20 * m_em_unit)
-        SetMinSize(wxSize(20 * m_em_unit, GetSize().GetHeight()));
-#endif //__WXMSW__
+    // Removed 20 em minimum width enforcement - the new sidebar layout
+    // handles shrinking gracefully with ellipsis labels and flexible sizers
 }
 
 void PlaterPresetComboBox::sys_color_changed()

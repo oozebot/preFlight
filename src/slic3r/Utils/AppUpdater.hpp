@@ -34,6 +34,7 @@ struct DownloadAppData
     size_t size;
     boost::filesystem::path target_path;
     AppUpdaterURLAction action{AppUpdaterURLAction::AUUA_DOWNLOAD};
+    std::string release_notes;
 };
 
 class AppUpdater

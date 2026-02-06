@@ -7,6 +7,7 @@
 #include "I18N.hpp"
 #include "format.hpp"
 #include "BitmapComboBox.hpp"
+#include "Widgets/UIColors.hpp"
 
 #include "GLCanvas3D.hpp"
 #include "OptionsGroup.hpp"
@@ -31,6 +32,8 @@
 #include "slic3r/Utils/FixModelByWin10.hpp"
 
 #include "Widgets/CheckBox.hpp"
+
+#include <functional>
 
 // For special mirroring in manipulation gizmo
 #include "Gizmos/GLGizmosManager.hpp"
@@ -102,6 +105,10 @@ static choice_ctrl *create_word_local_combo(wxWindow *parent)
     if (!wxOSX)
         temp->SetBackgroundStyle(wxBG_STYLE_PAINT);
 
+    // Set colors for current theme
+    temp->SetForegroundColour(UIColors::PanelForeground());
+    temp->SetBackgroundColour(UIColors::ContentBackground());
+
     temp->Append(ObjectManipulation::coordinate_type_str(ECoordinatesType::World));
     temp->Append(ObjectManipulation::coordinate_type_str(ECoordinatesType::Instance));
     temp->Append(ObjectManipulation::coordinate_type_str(ECoordinatesType::Local));
@@ -149,6 +156,9 @@ static void set_font_and_background_style(wxWindow *win, const wxFont &font)
     win->SetFont(font);
     if (!wxOSX)
         win->SetBackgroundStyle(wxBG_STYLE_PAINT);
+
+    // Set background color based on current theme
+    win->SetBackgroundColour(UIColors::ContentBackground());
 }
 
 static const wxString axes_color_text[] = {"#990000", "#009900", "#000099"};
@@ -168,7 +178,7 @@ ObjectManipulation::ObjectManipulation(wxWindow *parent) : OG_Settings(parent, t
 
     const int border = wxOSX ? 0 : 4;
     const int em = wxGetApp().em_unit();
-    m_main_grid_sizer = new wxFlexGridSizer(2, 3, 3); // "Name/label", "String name / Editors"
+    m_main_grid_sizer = new wxFlexGridSizer(2, em / 3, em / 3);
     m_main_grid_sizer->SetFlexibleDirection(wxBOTH);
 
     // Add "Name" label with warning icon
@@ -192,6 +202,7 @@ ObjectManipulation::ObjectManipulation(wxWindow *parent) : OG_Settings(parent, t
 
     auto name_label = new wxStaticText(m_parent, wxID_ANY, _L("Name") + ":");
     set_font_and_background_style(name_label, wxGetApp().normal_font());
+    name_label->SetForegroundColour(UIColors::ContentForeground());
     name_label->SetToolTip(_L("Object name"));
     sizer->Add(name_label);
 
@@ -201,11 +212,12 @@ ObjectManipulation::ObjectManipulation(wxWindow *parent) : OG_Settings(parent, t
     const wxSize name_size = wxSize(20 * em, wxDefaultCoord);
     m_item_name = new wxStaticText(m_parent, wxID_ANY, "", wxDefaultPosition, name_size, wxST_ELLIPSIZE_MIDDLE);
     set_font_and_background_style(m_item_name, wxGetApp().bold_font());
+    m_item_name->SetForegroundColour(UIColors::ContentForeground());
 
     m_main_grid_sizer->Add(m_item_name, 0, wxEXPAND);
 
     // Add labels grid sizer
-    m_labels_grid_sizer = new wxFlexGridSizer(1, 3, 3); // "Name/label", "String name / Editors"
+    m_labels_grid_sizer = new wxFlexGridSizer(1, em / 3, em / 3);
     m_labels_grid_sizer->SetFlexibleDirection(wxBOTH);
 
     // Add world local combobox
@@ -238,6 +250,7 @@ ObjectManipulation::ObjectManipulation(wxWindow *parent) : OG_Settings(parent, t
     {
         *label = new wxStaticText(m_parent, wxID_ANY, _(name) + ":");
         set_font_and_background_style(*label, wxGetApp().normal_font());
+        (*label)->SetForegroundColour(UIColors::ContentForeground());
 
         wxBoxSizer *sizer = new wxBoxSizer(wxHORIZONTAL);
         sizer->SetMinSize(wxSize(-1, height));
@@ -286,7 +299,7 @@ ObjectManipulation::ObjectManipulation(wxWindow *parent) : OG_Settings(parent, t
     m_main_grid_sizer->Add(m_labels_grid_sizer, 0, wxEXPAND);
 
     // Add editors grid sizer
-    wxFlexGridSizer *editors_grid_sizer = new wxFlexGridSizer(5, 3, 3); // "Name/label", "String name / Editors"
+    wxFlexGridSizer *editors_grid_sizer = new wxFlexGridSizer(5, em / 3, em / 3);
     editors_grid_sizer->SetFlexibleDirection(wxBOTH);
 
     // Add Axes labels with icons
@@ -298,6 +311,7 @@ ObjectManipulation::ObjectManipulation(wxWindow *parent) : OG_Settings(parent, t
 
         wxStaticText *axis_name = new wxStaticText(m_parent, wxID_ANY, wxString(label));
         set_font_and_background_style(axis_name, wxGetApp().bold_font());
+        axis_name->SetForegroundColour(UIColors::ContentForeground());
         //if (m_use_colors)
         //    axis_name->SetForegroundColour(wxColour(axes_color_text[axis_idx]));
 
@@ -362,6 +376,7 @@ ObjectManipulation::ObjectManipulation(wxWindow *parent) : OG_Settings(parent, t
     {
         *unit_text = new wxStaticText(parent, wxID_ANY, _(unit));
         set_font_and_background_style(*unit_text, wxGetApp().normal_font());
+        (*unit_text)->SetForegroundColour(UIColors::ContentForeground());
 
         // Unit text should be the same height as labels
         wxBoxSizer *sizer = new wxBoxSizer(wxHORIZONTAL);
@@ -552,6 +567,8 @@ ObjectManipulation::ObjectManipulation(wxWindow *parent) : OG_Settings(parent, t
 
     m_check_inch = CheckBox::GetNewWin(parent, _L("Inches"));
     m_check_inch->SetFont(wxGetApp().normal_font());
+    m_check_inch->SetForegroundColour(UIColors::ContentForeground());
+    m_check_inch->SetBackgroundColour(UIColors::ContentBackground());
 
     CheckBox::SetValue(m_check_inch, m_imperial_units);
     m_check_inch->Bind(wxEVT_CHECKBOX,
@@ -566,6 +583,9 @@ ObjectManipulation::ObjectManipulation(wxWindow *parent) : OG_Settings(parent, t
     m_og->activate();
     m_og->sizer->Clear(true);
     m_og->sizer->Add(m_main_grid_sizer, 1, wxEXPAND | wxALL, border);
+
+    // Apply correct theme colors after all controls are created
+    sys_color_changed();
 }
 
 void ObjectManipulation::Show(const bool show)
@@ -701,18 +721,15 @@ void ObjectManipulation::update_ui_from_settings()
             //            editor->SetForegroundColour(m_use_colors ? wxColour(axes_color_text[axis_id]) : wxGetApp().get_label_clr_default());
             if (m_use_colors)
             {
+                // Axis-colored backgrounds always need dark text for readability
                 editor->SetBackgroundColour(wxColour(axes_color_back[axis_id]));
-                if (wxGetApp().dark_mode())
-                    editor->SetForegroundColour(*wxBLACK);
+                editor->SetForegroundColour(*wxBLACK);
             }
             else
             {
-#ifdef _WIN32
-                wxGetApp().UpdateDarkUI(editor);
-#else
-                editor->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
-                editor->SetForegroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-#endif /* _WIN32 */
+                // Use theme colors
+                editor->SetBackgroundColour(UIColors::InputBackground());
+                editor->SetForegroundColour(UIColors::InputForeground());
             }
             editor->Refresh();
             if (++axis_id == 3)
@@ -960,7 +977,7 @@ void ObjectManipulation::update_reset_buttons_visibility()
                 m_reset_skew_button->Show(m_show_skew);
                 m_skew_label->Show(m_show_skew);
                 // Because of CallAfter we need to layout sidebar after Show/hide of reset buttons one more time
-                Sidebar &panel = wxGetApp().sidebar();
+                auto &panel = wxGetApp().sidebar();
                 if (!panel.IsFrozen())
                 {
                     panel.Freeze();
@@ -1330,12 +1347,77 @@ void ObjectManipulation::msw_rescale()
 
 void ObjectManipulation::sys_color_changed()
 {
+    // Use unified color accessors - no dark_mode() checks needed
+    wxColour bg_color = UIColors::ContentBackground();
+    wxColour label_color = UIColors::ContentForeground();
+
 #ifdef _WIN32
     get_og()->sys_color_changed();
-    wxGetApp().UpdateDarkUI(m_word_local_combo);
-    wxGetApp().UpdateDarkUI(m_check_inch);
+    // Use the ComboBox's proper theme update method instead of UpdateDarkUI
+    m_word_local_combo->SysColorsChanged();
+
+    // Update member variable labels with both foreground and background
+    if (m_move_Label)
+    {
+        m_move_Label->SetForegroundColour(label_color);
+        m_move_Label->SetBackgroundColour(bg_color);
+        m_move_Label->Refresh();
+    }
+    if (m_rotate_Label)
+    {
+        m_rotate_Label->SetForegroundColour(label_color);
+        m_rotate_Label->SetBackgroundColour(bg_color);
+        m_rotate_Label->Refresh();
+    }
+    if (m_scale_Label)
+    {
+        m_scale_Label->SetForegroundColour(label_color);
+        m_scale_Label->SetBackgroundColour(bg_color);
+        m_scale_Label->Refresh();
+    }
+    if (m_position_unit)
+    {
+        m_position_unit->SetForegroundColour(label_color);
+        m_position_unit->SetBackgroundColour(bg_color);
+        m_position_unit->Refresh();
+    }
+    if (m_size_unit)
+    {
+        m_size_unit->SetForegroundColour(label_color);
+        m_size_unit->SetBackgroundColour(bg_color);
+        m_size_unit->Refresh();
+    }
+    if (m_item_name)
+    {
+        m_item_name->SetForegroundColour(label_color);
+        m_item_name->SetBackgroundColour(bg_color);
+        m_item_name->Refresh();
+    }
+    if (m_skew_label)
+    {
+        m_skew_label->SetForegroundColour(label_color);
+        m_skew_label->SetBackgroundColour(bg_color);
+        m_skew_label->Refresh();
+    }
+
+    // Update all child wxStaticText controls (including X, Y, Z axis labels and any others)
+    std::function<void(wxWindow *)> update_static_text_children = [&](wxWindow *window)
+    {
+        if (!window)
+            return;
+        if (wxStaticText *text = dynamic_cast<wxStaticText *>(window))
+        {
+            text->SetForegroundColour(label_color);
+            text->SetBackgroundColour(bg_color);
+            text->Refresh();
+        }
+        for (wxWindow *child : window->GetChildren())
+            update_static_text_children(child);
+    };
+    update_static_text_children(m_parent);
 #endif
 
+    // Update checkbox - SysColorChanged handles both colors and refresh
     CheckBox::SysColorChanged(m_check_inch);
     for (ManipulationEditor *editor : m_editors)
         editor->sys_color_changed(this);
@@ -1346,9 +1428,19 @@ void ObjectManipulation::sys_color_changed()
     m_drop_to_bed_button->sys_color_changed();
     m_lock_bnt->sys_color_changed();
 
+    // Update lock button background explicitly
+    if (m_lock_bnt)
+    {
+        m_lock_bnt->SetBackgroundColour(bg_color);
+        m_lock_bnt->Refresh();
+    }
+
     for (int id = 0; id < 3; ++id)
     {
         m_mirror_buttons[id]->sys_color_changed();
+        // Explicitly set background for transparent buttons to match parent
+        m_mirror_buttons[id]->SetBackgroundColour(bg_color);
+        m_mirror_buttons[id]->Refresh();
     }
 }
 
@@ -1427,16 +1519,10 @@ ManipulationEditor::ManipulationEditor(ObjectManipulation *parent, const std::st
                                    event.Skip();
                                }));
 
-    this->Bind(wxEVT_UPDATE_UI,
-               [parent, this](wxUpdateUIEvent &evt)
-               {
-                   const bool is_gizmo_in_editing_mode =
-                       wxGetApp().plater()->canvas3D()->get_gizmos_manager().is_in_editing_mode();
-                   const bool is_enabled_editing = has_opt_key("scale") || has_opt_key("size")
-                                                       ? parent->is_enabled_size_and_scale()
-                                                       : true;
-                   evt.Enable(!is_gizmo_in_editing_mode && parent->is_enabled() && is_enabled_editing);
-               });
+    // NOTE: Removed wxEVT_UPDATE_UI handler that was causing visual flickering/graying
+    // when dialogs were open. The continuous polling via UPDATE_UI doesn't work well
+    // with our custom ThemedTextCtrl controls. Enable/disable is now handled explicitly
+    // by ObjectManipulation::Enable() when actually needed.
 }
 
 void ManipulationEditor::msw_rescale()
@@ -1446,14 +1532,25 @@ void ManipulationEditor::msw_rescale()
 
 void ManipulationEditor::sys_color_changed(ObjectManipulation *parent)
 {
+    // For axis-colored mode, set custom colors before calling base implementation
     if (parent->use_colors())
-        SetForegroundColour(*wxBLACK);
+    {
+        wxColour bg_color = wxColour(axes_color_back[m_axis]);
+        wxColour fg_color = *wxBLACK;
+        SetBackgroundColour(bg_color);
+        SetForegroundColour(fg_color);
+        if (auto *tc = dynamic_cast<Slic3r::GUI::ThemedTextCtrl *>(GetTextCtrl()))
+            tc->SetThemedColors(bg_color, fg_color);
+        Refresh();
+    }
     else
-#ifdef _WIN32
-        wxGetApp().UpdateDarkUI(this);
-#else
-        SetForegroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
-#endif // _WIN32
+    {
+        // Use the base class implementation which properly handles:
+        // - Windows brush cache invalidation (m_hEditBgBrush)
+        // - ThemedTextCtrl color updates
+        // - Proper RedrawWindow calls
+        SysColorsChanged();
+    }
 }
 
 double ManipulationEditor::get_value()

@@ -8,6 +8,7 @@
 #include "libslic3r/Config.hpp" //ConfigOptionMode
 #include "GUI_Factories.hpp"
 #include "I18N.hpp"
+#include "Widgets/CustomMenu.hpp"
 
 using namespace Slic3r::GUI;
 
@@ -132,7 +133,29 @@ void TopBarMenus::RemoveHideLoginItem()
 void TopBarMenus::Popup(TopBarItemsCtrl *popup_ctrl, wxMenu *menu, wxPoint pos)
 {
     m_popup_ctrl = popup_ctrl;
-    m_popup_ctrl->PopupMenu(menu, pos);
+
+    // Use CustomMenu for consistent theming
+    auto customMenu = CustomMenu::FromWxMenu(menu, m_popup_ctrl);
+    if (customMenu)
+    {
+        // Set dismiss callback to handle menu close (replaces wxEVT_MENU_CLOSE handling)
+        customMenu->SetDismissCallback(
+            [this]()
+            {
+                if (m_popup_ctrl)
+                    m_popup_ctrl->UnselectPopupButtons();
+                m_popup_ctrl = nullptr;
+            });
+        customMenu->KeepAliveUntilDismissed(customMenu);
+        if (!customMenu->GetParent())
+            customMenu->Create(m_popup_ctrl);
+        wxPoint screenPos = m_popup_ctrl->ClientToScreen(pos);
+        customMenu->ShowAt(screenPos, m_popup_ctrl);
+    }
+    else
+    {
+        m_popup_ctrl->PopupMenu(menu, pos);
+    }
 }
 
 void TopBarMenus::BindEvtClose()

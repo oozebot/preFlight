@@ -62,7 +62,8 @@ private:
     static const bool fixed_x = true;
     static const bool splines = true;
     static const bool manual_points_manipulation = false;
-    static const int side = 10; // side of draggable button
+    static const int side = 10;   // side of draggable button (used in header inline methods)
+    static int get_button_side(); // DPI-scaled side of draggable button (10px at 100%)
 
     const int scale_unit;
     int legend_side;

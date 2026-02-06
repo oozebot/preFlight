@@ -29,6 +29,7 @@
 #include "GUI.hpp"
 #include "GLCanvas3D.hpp"
 #include "Theme.hpp"
+#include "Widgets/UIColors.hpp"
 #include "GLToolbar.hpp"
 #include "GUI_Preview.hpp"
 #include "NotificationManager.hpp"
@@ -48,6 +49,7 @@
 #include <glad/gl.h>
 #endif
 #include <boost/log/trivial.hpp>
+#include <boost/algorithm/string/replace.hpp>
 #include <boost/algorithm/string/split.hpp>
 #include <boost/nowide/cstdio.hpp>
 #include <boost/nowide/fstream.hpp>
@@ -175,7 +177,8 @@ int GCodeViewer::SequentialView::ActualSpeedImguiWidget::plot(const char *label,
     const int values_count = static_cast<int>(data.size());
     int idx_hovered = -1;
 
-    const ImVec2 offset(10.0f, 0.0f);
+    const float scale = wxGetApp().imgui()->get_style_scaling();
+    const ImVec2 offset(10.0f * scale, 0.0f);
 
     const float size_y = y_range.second - y_range.first;
     const float size_x = data.back().pos - data.front().pos;
@@ -198,7 +201,7 @@ int GCodeViewer::SequentialView::ActualSpeedImguiWidget::plot(const char *label,
                                              ImVec2(0.1f, y)),
                                       ImLerp(inner_bb.Min, ImVec2(inner_bb.Min.x + offset.x, inner_bb.Max.y),
                                              ImVec2(0.9f, y)),
-                                      ImGuiPSWrap::to_ImU32(color), 3.0f);
+                                      ImGuiPSWrap::to_ImU32(color), 3.0f * scale);
 
             window->DrawList->AddLine(ImLerp(inner_bb.Min + offset, inner_bb.Max, ImVec2(0.0f, y)),
                                       ImLerp(inner_bb.Min + offset, inner_bb.Max, ImVec2(1.0f, y)), grid_main_color);
@@ -235,7 +238,7 @@ int GCodeViewer::SequentialView::ActualSpeedImguiWidget::plot(const char *label,
             }
             window->DrawList->AddLine(ImLerp(inner_bb.Min + offset, inner_bb.Max, tp1),
                                       ImLerp(inner_bb.Min + offset, inner_bb.Max, tp2),
-                                      idx_hovered == n ? col_hovered : col_base, 2.0f);
+                                      idx_hovered == n ? col_hovered : col_base, 2.0f * scale);
         }
     }
 
@@ -993,8 +996,13 @@ void GCodeViewer::SequentialView::GCodeWindow::render(float top, float bottom, s
     static const ImVec4 LINE_NUMBER_COLOR = ImGuiPureWrap::COL_ORANGE_LIGHT;
     static const ImVec4 SELECTION_RECT_COLOR = ImGuiPureWrap::COL_ORANGE_DARK;
     static const ImVec4 COMMAND_COLOR = {0.8f, 0.8f, 0.0f, 1.0f};
-    static const ImVec4 PARAMETERS_COLOR = {1.0f, 1.0f, 1.0f, 1.0f};
-    static const ImVec4 COMMENT_COLOR = {0.7f, 0.7f, 0.7f, 1.0f};
+    // Theme-aware colors for G-code text
+    float params_r, params_g, params_b, params_a;
+    UIColors::LegendTextRGBA(params_r, params_g, params_b, params_a);
+    const ImVec4 PARAMETERS_COLOR = {params_r, params_g, params_b, params_a};
+    float comment_r, comment_g, comment_b, comment_a;
+    UIColors::GCodeCommentRGBA(comment_r, comment_g, comment_b, comment_a);
+    const ImVec4 COMMENT_COLOR = {comment_r, comment_g, comment_b, comment_a};
     static const ImVec4 ELLIPSIS_COLOR = {0.0f, 0.7f, 0.0f, 1.0f};
 
     // FORCE the G-code window to always be visible in preview mode
@@ -1170,10 +1178,15 @@ void GCodeViewer::SequentialView::GCodeWindow::render(float top, float bottom, s
         }
     }
 
-    // line number's column width
-    const float id_width = ImGui::CalcTextSize(std::to_string(*visible_range.max).c_str()).x;
-
     ImGuiWrapper &imgui = *wxGetApp().imgui();
+
+    // Push the legend font early so CalcTextSize uses the correct font metrics
+    ImFont *gcode_legend_font = imgui.get_legend_font();
+    if (gcode_legend_font)
+        ImGui::PushFont(gcode_legend_font);
+
+    // line number's column width (must be after PushFont for correct sizing)
+    const float id_width = ImGui::CalcTextSize(std::to_string(*visible_range.max).c_str()).x;
 
     auto add_item_to_line = [](const std::string &txt, const ImVec4 &color, float spacing, size_t &current_length,
                                const std::string &full_line_text = "")
@@ -1225,13 +1238,12 @@ void GCodeViewer::SequentialView::GCodeWindow::render(float top, float bottom, s
         ImGuiPureWrap::set_next_window_size(0.0f, wnd_height, ImGuiCond_Always);
     }
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-    ImGui::SetNextWindowBgAlpha(0.6f);
+    // Theme-aware window background (matches ruler background in light mode)
+    float gcode_bg_r, gcode_bg_g, gcode_bg_b, gcode_bg_a;
+    UIColors::LegendWindowBackgroundRGBA(gcode_bg_r, gcode_bg_g, gcode_bg_b, gcode_bg_a);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(gcode_bg_r, gcode_bg_g, gcode_bg_b, gcode_bg_a));
     ImGuiPureWrap::begin(std::string("G-code"), ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDecoration |
                                                     ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoFocusOnAppearing);
-
-    // 9pt on Windows gives em_unit = 10, so scale = 10 / current_em_unit normalizes to 9pt
-    const float gcode_font_scale = 10.0f / static_cast<float>(wxGetApp().em_unit());
-    ImGui::SetWindowFontScale(gcode_font_scale);
 
     // Check if mouse is hovering over this window and handle scroll
     if (ImGui::IsWindowHovered())
@@ -1365,6 +1377,9 @@ void GCodeViewer::SequentialView::GCodeWindow::render(float top, float bottom, s
     }
 
     ImGuiPureWrap::end();
+    if (gcode_legend_font)
+        ImGui::PopFont();
+    ImGui::PopStyleColor(); // Window background
     ImGui::PopStyleVar();
 
     // request an extra frame if window's width changed
@@ -1384,13 +1399,10 @@ void GCodeViewer::SequentialView::render(float legend_height, const libvgcode::V
         marker.render();
     marker.render_position_window(viewer);
 
-    // Check if viewer has layers before rendering the G-code window
-    if (viewer != nullptr && viewer->get_layers_count() > 0)
+    // Check if viewer has layers and legend is not collapsed before rendering the G-code window
+    if (viewer != nullptr && viewer->get_layers_count() > 0 && legend_height >= 0.0f)
     {
         float bottom = wxGetApp().plater()->get_current_canvas3D()->get_canvas_size().get_height();
-        // View toolbar is now on the right side, so G-code window can extend to full bottom
-        // if (wxGetApp().is_editor())
-        //     bottom -= wxGetApp().plater()->get_view_toolbar().get_height();
         gcode_window.render(legend_height, bottom, gcode_id, legend_width);
     }
 }
@@ -2756,22 +2768,32 @@ void GCodeViewer::render_legend(float &legend_height)
     if (!is_legend_shown())
         return;
 
+    // Theme-aware text color for legend values
+    float legend_text_r, legend_text_g, legend_text_b, legend_text_a;
+    UIColors::LegendTextRGBA(legend_text_r, legend_text_g, legend_text_b, legend_text_a);
+    const ImVec4 LEGEND_TEXT_COLOR = {legend_text_r, legend_text_g, legend_text_b, legend_text_a};
+
     const Size cnv_size = wxGetApp().plater()->get_current_canvas3D()->get_canvas_size();
 
     ImGuiWrapper &imgui = *wxGetApp().imgui();
 
     ImGuiPureWrap::set_next_window_pos(0.0f, 0.0f, ImGuiCond_Always);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-    ImGui::SetNextWindowBgAlpha(0.6f);
+    // Theme-aware window background (matches ruler background in light mode)
+    float win_bg_r, win_bg_g, win_bg_b, win_bg_a;
+    UIColors::LegendWindowBackgroundRGBA(win_bg_r, win_bg_g, win_bg_b, win_bg_a);
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(win_bg_r, win_bg_g, win_bg_b, win_bg_a));
     const float max_height = 0.75f * static_cast<float>(cnv_size.get_height());
     const float child_height = 0.3333f * max_height;
-    ImGui::SetNextWindowSizeConstraints({0.0f, 0.0f}, {-1.0f, max_height});
+    const float sidebar_width = 45.0f * static_cast<float>(wxGetApp().em_unit());
+    ImGui::SetNextWindowSizeConstraints({sidebar_width, 0.0f}, {sidebar_width, max_height});
+    // Use the natively-rasterized legend font (11pt, crisp rendering)
+    ImFont *legend_font = imgui.get_legend_font();
+    if (legend_font)
+        ImGui::PushFont(legend_font);
     ImGuiPureWrap::begin(std::string("Legend"),
                          ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
-
-    // 9pt on Windows gives em_unit = 10, so scale = 10 / current_em_unit normalizes to 9pt
-    const float legend_font_scale = 10.0f / static_cast<float>(wxGetApp().em_unit());
-    ImGui::SetWindowFontScale(legend_font_scale);
+    const bool legend_collapsed = ImGui::IsWindowCollapsed();
 
     enum class EItemType : unsigned char
     {
@@ -2856,7 +2878,10 @@ void GCodeViewer::render_legend(float &legend_height)
                 {
                     if (!visible)
                         ImGui::PopStyleVar();
-                    ImGui::PushStyleColor(ImGuiCol_PopupBg, ImGuiPureWrap::COL_WINDOW_BACKGROUND);
+                    // Theme-aware tooltip background (matches slider labels)
+                    float tt_r, tt_g, tt_b, tt_a;
+                    UIColors::SliderLabelBackgroundRGBA(tt_r, tt_g, tt_b, tt_a);
+                    ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(tt_r, tt_g, tt_b, tt_a));
                     ImGui::BeginTooltip();
                     ImGuiPureWrap::text(visible ? _u8L("Click to hide") : _u8L("Click to show"));
                     ImGui::EndTooltip();
@@ -3015,6 +3040,24 @@ void GCodeViewer::render_legend(float &legend_height)
         ret[0] = max_width(labels, titles[0], extra_size) + 3.0f * style.ItemSpacing.x;
         for (size_t i = 1; i < titles.size(); i++)
             ret[i] = ret[i - 1] + max_width(times, titles[i]) + style.ItemSpacing.x;
+
+        // Find the last non-empty column
+        int last_col = 4;
+        while (last_col > 0 && titles[last_col].empty())
+            --last_col;
+
+        // Fit columns to the available window width, reserving space for the last column's content
+        const float content_width = ImGui::GetContentRegionAvail().x;
+        const float last_col_width = max_width(times, titles[last_col]) + style.ItemSpacing.x;
+        const float target_width = content_width - last_col_width;
+        if (last_col > 0 && target_width > ret[last_col])
+        {
+            const float extra = target_width - ret[last_col];
+            const float per_col = extra / static_cast<float>(last_col);
+            for (int i = 0; i <= last_col; i++)
+                ret[i] += per_col * static_cast<float>(i);
+        }
+
         return ret;
     };
 
@@ -3126,7 +3169,10 @@ void GCodeViewer::render_legend(float &legend_height)
             assert(static_cast<size_t>(role) < libvgcode::GCODE_EXTRUSION_ROLES_COUNT);
             if (static_cast<size_t>(role) < libvgcode::GCODE_EXTRUSION_ROLES_COUNT)
             {
-                labels.push_back(_u8L(gcode_extrusion_role_to_string(convert(role))));
+                // Abbreviate long labels for the Legend table only (full names remain in ExtrusionRole.cpp)
+                std::string label = _u8L(gcode_extrusion_role_to_string(convert(role)));
+                boost::replace_all(label, "perimeter", "perim");
+                labels.push_back(label);
                 auto [time, percent] = role_time_and_percent(role);
                 times.push_back((time > 0.0f) ? short_time_ui(get_time_dhms(time)) : "");
                 percents.push_back(percent);
@@ -3232,8 +3278,15 @@ void GCodeViewer::render_legend(float &legend_height)
     bool view_type_changed = false;
     int new_view_type_i = curr_view_type_i;
 
-    ImGui::PushStyleColor(ImGuiCol_FrameBg, {0.1f, 0.1f, 0.1f, 0.8f});
-    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered, {0.2f, 0.2f, 0.2f, 0.8f});
+    // Use themed colors for the legend combo box
+    wxColour combo_bg = UIColors::LegendComboBackground();
+    wxColour combo_bg_hovered = UIColors::LegendComboBackgroundHovered();
+    float combo_alpha = UIColors::LegendComboAlpha();
+    ImGui::PushStyleColor(ImGuiCol_FrameBg, ImVec4(combo_bg.Red() / 255.0f, combo_bg.Green() / 255.0f,
+                                                   combo_bg.Blue() / 255.0f, combo_alpha));
+    ImGui::PushStyleColor(ImGuiCol_FrameBgHovered,
+                          ImVec4(combo_bg_hovered.Red() / 255.0f, combo_bg_hovered.Green() / 255.0f,
+                                 combo_bg_hovered.Blue() / 255.0f, combo_alpha));
     std::vector<std::string> view_options;
     std::vector<int> view_options_id;
     const std::vector<float> layers_times = get_layers_times();
@@ -3788,7 +3841,8 @@ void GCodeViewer::render_legend(float &legend_height)
 
         auto trim_text_if_needed = [](const std::string &txt)
         {
-            const float max_length = 250.0f;
+            // DPI-scaled max text length (25 * font_size instead of fixed 250px)
+            const float max_length = ImGui::GetFontSize() * 25.0f;
             const float length = ImGui::CalcTextSize(txt.c_str()).x;
             if (length > max_length)
             {
@@ -3802,12 +3856,10 @@ void GCodeViewer::render_legend(float &legend_height)
         {
             if (!m_settings_ids.printer.empty())
                 add_strings_row_to_table(_u8L("Printer") + ":", ImGuiPureWrap::COL_ORANGE_LIGHT,
-                                         trim_text_if_needed(m_settings_ids.printer),
-                                         ImGuiPSWrap::to_ImVec4(ColorRGBA::WHITE()));
+                                         trim_text_if_needed(m_settings_ids.printer), LEGEND_TEXT_COLOR);
             if (!m_settings_ids.print.empty())
                 add_strings_row_to_table(_u8L("Print settings") + ":", ImGuiPureWrap::COL_ORANGE_LIGHT,
-                                         trim_text_if_needed(m_settings_ids.print),
-                                         ImGuiPSWrap::to_ImVec4(ColorRGBA::WHITE()));
+                                         trim_text_if_needed(m_settings_ids.print), LEGEND_TEXT_COLOR);
             if (!m_settings_ids.filament.empty())
             {
                 const std::vector<uint8_t> &used_extruders_ids = m_viewer.get_used_extruders_ids();
@@ -3820,7 +3872,7 @@ void GCodeViewer::render_legend(float &legend_height)
                         txt += (m_viewer.get_used_extruders_count() == 1) ? ":" : " " + std::to_string(extruder_id + 1);
                         add_strings_row_to_table(txt, ImGuiPureWrap::COL_ORANGE_LIGHT,
                                                  trim_text_if_needed(m_settings_ids.filament[extruder_id]),
-                                                 ImGuiPSWrap::to_ImVec4(ColorRGBA::WHITE()));
+                                                 LEGEND_TEXT_COLOR);
                     }
                 }
             }
@@ -3890,17 +3942,21 @@ void GCodeViewer::render_legend(float &legend_height)
 
         ImGuiPureWrap::title(time_title + ":");
 
-        if (ImGui::BeginTable("Times", 2))
+        if (ImGui::BeginTable("Times", 4))
         {
             const std::vector<float> layers_times = get_layers_times();
+            ImGui::TableNextRow();
             if (!layers_times.empty())
-                add_strings_row_to_table(_u8L("First layer") + ":", ImGuiPureWrap::COL_ORANGE_LIGHT,
-                                         short_time_ui(get_time_dhms(layers_times.front())),
-                                         ImGuiPSWrap::to_ImVec4(ColorRGBA::WHITE()));
-
-            add_strings_row_to_table(_u8L("Total") + ":", ImGuiPureWrap::COL_ORANGE_LIGHT,
-                                     short_time_ui(get_time_dhms(time_mode.time)),
-                                     ImGuiPSWrap::to_ImVec4(ColorRGBA::WHITE()));
+            {
+                ImGui::TableSetColumnIndex(0);
+                ImGuiPureWrap::text_colored(ImGuiPureWrap::COL_ORANGE_LIGHT, (_u8L("First layer") + ":").c_str());
+                ImGui::TableSetColumnIndex(1);
+                ImGuiPureWrap::text_colored(LEGEND_TEXT_COLOR, short_time_ui(get_time_dhms(layers_times.front())).c_str());
+            }
+            ImGui::TableSetColumnIndex(2);
+            ImGuiPureWrap::text_colored(ImGuiPureWrap::COL_ORANGE_LIGHT, (_u8L("Total") + ":").c_str());
+            ImGui::TableSetColumnIndex(3);
+            ImGuiPureWrap::text_colored(LEGEND_TEXT_COLOR, short_time_ui(get_time_dhms(time_mode.time)).c_str());
 
             ImGui::EndTable();
         }
@@ -4027,7 +4083,10 @@ void GCodeViewer::render_legend(float &legend_height)
 
         if (ImGui::IsItemHovered())
         {
-            ImGui::PushStyleColor(ImGuiCol_PopupBg, ImGuiPureWrap::COL_WINDOW_BACKGROUND);
+            // Theme-aware tooltip background (matches slider labels)
+            float tb_r, tb_g, tb_b, tb_a;
+            UIColors::SliderLabelBackgroundRGBA(tb_r, tb_g, tb_b, tb_a);
+            ImGui::PushStyleColor(ImGuiCol_PopupBg, ImVec4(tb_r, tb_g, tb_b, tb_a));
             ImGui::BeginTooltip();
             ImGuiPureWrap::text(name);
             ImGui::EndTooltip();
@@ -4039,6 +4098,21 @@ void GCodeViewer::render_legend(float &legend_height)
     ImGui::Separator();
     ImGui::Spacing();
     ImGui::Spacing();
+
+    // Center the icon row: calculate total width of all toggle buttons.
+    // num_buttons must match the number of toggle_button() calls below.
+    // GCode viewer mode has 11 (no Shells button), editor mode has 12.
+    // When adding/removing toggle buttons, update these counts to keep centering correct.
+    {
+        const float btn_size = 1.5f * icon_size;
+        const int num_buttons = wxGetApp().is_gcode_viewer() ? 11 : 12;
+        const float spacing = ImGui::GetStyle().ItemSpacing.x;
+        const float total_width = num_buttons * btn_size + (num_buttons - 1) * spacing;
+        const float avail_width = ImGui::GetContentRegionAvail().x;
+        if (total_width < avail_width)
+            ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (avail_width - total_width) * 0.5f);
+    }
+
     toggle_button(Preview::OptionType::Travel, _u8L("Travel"),
                   [&imgui](ImGuiWindow &window, const ImVec2 &pos, float size)
                   { imgui.draw_icon(window, pos, size, ImGui::LegendTravel); });
@@ -4098,10 +4172,13 @@ void GCodeViewer::render_legend(float &legend_height)
     }
     m_legend_resizer.dirty = size_dirty;
 
-    legend_height = ImGui::GetWindowHeight();
+    legend_height = legend_collapsed ? -1.0f : ImGui::GetWindowHeight();
     m_legend_width = ImGui::GetWindowWidth();
 
     ImGuiPureWrap::end();
+    if (legend_font)
+        ImGui::PopFont();
+    ImGui::PopStyleColor(); // Window background
     ImGui::PopStyleVar();
 }
 

@@ -9,14 +9,35 @@
 #include <algorithm>
 
 #include "slic3r/GUI/ImGuiPureWrap.hpp"
+#include "slic3r/GUI/Widgets/UIColors.hpp"
 
 namespace DoubleSlider
 {
 
-const ImU32 tooltip_bg_clr = ImGui::ColorConvertFloat4ToU32(ImGuiPureWrap::COL_GREY_LIGHT);
+// Theme-independent colors
 const ImU32 thumb_bg_clr = ImGui::ColorConvertFloat4ToU32(ImGuiPureWrap::COL_ORANGE_LIGHT);
-const ImU32 groove_bg_clr = ImGui::ColorConvertFloat4ToU32(ImGuiPureWrap::COL_WINDOW_BACKGROUND);
-const ImU32 border_clr = IM_COL32(255, 255, 255, 255);
+
+// Theme-aware color helpers (computed at runtime)
+inline ImU32 get_label_bg_clr()
+{
+    float r, g, b, a;
+    UIColors::SliderLabelBackgroundRGBA(r, g, b, a);
+    return ImGui::ColorConvertFloat4ToU32(ImVec4(r, g, b, a));
+}
+
+inline ImU32 get_groove_bg_clr()
+{
+    float r, g, b, a;
+    UIColors::SliderGrooveBackgroundRGBA(r, g, b, a);
+    return ImGui::ColorConvertFloat4ToU32(ImVec4(r, g, b, a));
+}
+
+inline ImU32 get_border_clr()
+{
+    float r, g, b, a;
+    UIColors::SliderBorderRGBA(r, g, b, a);
+    return ImGui::ColorConvertFloat4ToU32(ImVec4(r, g, b, a));
+}
 
 static bool behavior(ImGuiID id, const ImRect &region, const ImS32 v_min, const ImS32 v_max, ImS32 *out_value,
                      ImRect *out_thumb, ImGuiSliderFlags flags = 0, bool change_on_mouse_move = false)
@@ -359,15 +380,15 @@ void ImGuiControl::draw_background(const ImRect &slideable_region)
                                              slideable_region.Max.x, groove_center.y + groove_sz.y)
                                     : ImRect(groove_center.x - groove_sz.x, slideable_region.Min.y,
                                              groove_center.x + groove_sz.x, slideable_region.Max.y);
-    ImVec2 groove_padding = (is_horizontal() ? ImVec2(2.0f, 2.0f) : ImVec2(3.0f, 4.0f)) * m_draw_opts.scale;
+    ImVec2 groove_padding = ImVec2(2.0f, 2.0f) * m_draw_opts.scale;
 
     ImRect bg_rect = groove;
     bg_rect.Expand(groove_padding);
 
-    // draw bg of slider
-    ImGui::RenderFrame(bg_rect.Min, bg_rect.Max, border_clr, false, 0.5 * bg_rect.GetWidth());
-    // draw bg of scroll
-    ImGui::RenderFrame(groove.Min, groove.Max, groove_bg_clr, false, 0.5 * groove.GetWidth());
+    // draw bg of slider (border) - theme-aware
+    ImGui::RenderFrame(bg_rect.Min, bg_rect.Max, get_border_clr(), false, 0.5 * bg_rect.GetWidth());
+    // draw bg of scroll (groove) - theme-aware
+    ImGui::RenderFrame(groove.Min, groove.Max, get_groove_bg_clr(), false, 0.5 * groove.GetWidth());
 }
 
 void ImGuiControl::draw_label(std::string label, const ImRect &thumb, bool is_mirrored /*= false*/,
@@ -440,8 +461,10 @@ void ImGuiControl::draw_label(std::string label, const ImRect &thumb, bool is_mi
         pos_3 = is_horizontal() ? pos_1 - ImVec2(0.f, triangle_offset_y) : pos_1 + ImVec2(triangle_offset_x, 0.f);
     }
 
-    ImGui::RenderFrame(text_rect.Min, text_rect.Max, tooltip_bg_clr, true, rounding);
-    ImGui::GetCurrentWindow()->DrawList->AddTriangleFilled(pos_1, pos_2, pos_3, tooltip_bg_clr);
+    // Theme-aware label background
+    const ImU32 label_bg = get_label_bg_clr();
+    ImGui::RenderFrame(text_rect.Min, text_rect.Max, label_bg, true, rounding);
+    ImGui::GetCurrentWindow()->DrawList->AddTriangleFilled(pos_1, pos_2, pos_3, label_bg);
     ImGui::RenderText(text_start + text_padding, label.c_str());
 };
 
@@ -454,15 +477,17 @@ void ImGuiControl::draw_thumb(const ImVec2 &center, bool mark /* = false*/)
 
     const float hexagon_angle = is_horizontal() ? 0.f : IM_PI * 0.5f;
 
-    ImGuiPureWrap::draw_hexagon(center, radius, border_clr, hexagon_angle, rounding);
+    // Theme-aware border color for thumb
+    const ImU32 thumb_border = get_border_clr();
+    ImGuiPureWrap::draw_hexagon(center, radius, thumb_border, hexagon_angle, rounding);
     ImGuiPureWrap::draw_hexagon(center, radius - line_width, thumb_bg_clr, hexagon_angle, rounding);
 
     if (mark)
     {
         ImGuiWindow *window = ImGui::GetCurrentWindow();
-        window->DrawList->AddLine(center + ImVec2(-line_offset, 0.0f), center + ImVec2(line_offset, 0.0f), border_clr,
+        window->DrawList->AddLine(center + ImVec2(-line_offset, 0.0f), center + ImVec2(line_offset, 0.0f), thumb_border,
                                   line_width);
-        window->DrawList->AddLine(center + ImVec2(0.0f, -line_offset), center + ImVec2(0.0f, line_offset), border_clr,
+        window->DrawList->AddLine(center + ImVec2(0.0f, -line_offset), center + ImVec2(0.0f, line_offset), thumb_border,
                                   line_width);
     }
 }

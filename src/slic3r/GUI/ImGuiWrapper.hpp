@@ -25,6 +25,7 @@ struct OptionViewParameters;
 class wxString;
 class wxMouseEvent;
 class wxKeyEvent;
+struct ImFont;
 struct ImRect;
 
 struct IMGUI_API ImGuiWindow;
@@ -41,6 +42,8 @@ class ImGuiWrapper
     const ImWchar *m_glyph_ranges{nullptr};
     // Chinese, Japanese, Korean
     float m_font_size{18.0};
+    float m_legend_font_size{18.3f};
+    ImFont *m_legend_font{nullptr};
     unsigned m_font_texture{0};
     float m_style_scaling{1.0};
     unsigned m_mouse_buttons{0};
@@ -74,6 +77,7 @@ public:
 
     float get_font_size() const { return m_font_size; }
     float get_style_scaling() const { return m_style_scaling; }
+    ImFont *get_legend_font() const { return m_legend_font; }
     const ImWchar *get_glyph_ranges() const { return m_glyph_ranges; } // language specific
 
     void new_frame();
@@ -142,6 +146,12 @@ public:
     void reset_requires_extra_frame() { m_requires_extra_frame = false; }
 
     ImFontAtlasCustomRect *GetTextureCustomRect(const wchar_t &tex_id);
+
+    // Call this when theme changes to refresh ImGui colors
+    void refresh_style() { init_style(); }
+
+    // Call this when theme changes to rebuild font atlas with new icon colors
+    void invalidate_font() { destroy_font(); }
 
 private:
     void init_font(bool compress);

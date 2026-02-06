@@ -56,7 +56,7 @@ ExtruderSequenceDialog::ExtruderSequenceDialog(const DoubleSlider::ExtrudersSequ
     wxGetApp().UpdateDarkUI(intervals_box);
     auto intervals_box_sizer = new wxStaticBoxSizer(intervals_box, wxVERTICAL);
 
-    m_intervals_grid_sizer = new wxFlexGridSizer(3, 5, em);
+    m_intervals_grid_sizer = new wxFlexGridSizer(3, em / 2, em);
 
     auto editor_sz = wxSize(4 * em, wxDefaultCoord);
 
@@ -198,7 +198,7 @@ ExtruderSequenceDialog::ExtruderSequenceDialog(const DoubleSlider::ExtrudersSequ
 
     auto extruders_box_sizer = new wxStaticBoxSizer(extruders_box, wxVERTICAL);
 
-    m_extruders_grid_sizer = new wxFlexGridSizer(3, 5, em);
+    m_extruders_grid_sizer = new wxFlexGridSizer(3, em / 2, em);
 
     apply_extruder_sequence();
 
@@ -299,8 +299,9 @@ void ExtruderSequenceDialog::on_dpi_changed(const wxRect &suggested_rect)
 
     msw_buttons_rescale(this, em, {wxID_OK, wxID_CANCEL});
 
-    // wxSize size = get_size();
-    // SetMinSize(size);
+    // Re-enabled SetMinSize for proper DPI handling
+    wxSize size = GetSize();
+    SetMinSize(size);
 
     Fit();
     Refresh();

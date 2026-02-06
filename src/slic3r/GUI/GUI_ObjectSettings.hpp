@@ -13,6 +13,7 @@
 #include "wxExtensions.hpp"
 
 class wxBoxSizer;
+class ScrollablePanel;
 
 namespace Slic3r
 {
@@ -45,6 +46,8 @@ public:
 
 class ObjectSettings : public OG_Settings
 {
+    // Scrollable panel for settings list (shows scrollbar when content exceeds max height)
+    ScrollablePanel *m_scroll_panel{nullptr};
     // sizer for extra Object/Part's settings
     wxBoxSizer *m_settings_list_sizer{nullptr};
     // option groups for settings

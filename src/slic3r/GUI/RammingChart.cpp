@@ -13,6 +13,12 @@
 
 wxDEFINE_EVENT(EVT_WIPE_TOWER_CHART_CHANGED, wxCommandEvent);
 
+// DPI-scaled button side (10px at 100% DPI)
+int Chart::get_button_side()
+{
+    return Slic3r::GUI::wxGetApp().em_unit(); // em_unit() returns 10 at 100% DPI
+}
+
 void Chart::draw()
 {
     wxAutoBufferedPaintDC dc(this); // unbuffered DC caused flickering on win
@@ -72,8 +78,8 @@ void Chart::draw()
     dc.SetPen(wxPen(wxColor(0, 0, 0), 1));
 #endif
     for (auto &button : m_buttons)
-        //dc.DrawRectangle(math_to_screen(button.get_pos())-wxPoint(side/2.,side/2.), wxSize(side,side));
-        dc.DrawCircle(math_to_screen(button.get_pos()), side / 2.);
+        //dc.DrawRectangle(math_to_screen(button.get_pos())-wxPoint(get_button_side()/2.,get_button_side()/2.), wxSize(get_button_side(),get_button_side()));
+        dc.DrawCircle(math_to_screen(button.get_pos()), get_button_side() / 2.);
     //dc.DrawRectangle(math_to_screen(button.get_pos()-wxPoint2DDouble(0.125,0))-wxPoint(0,5),wxSize(50,10));
 
     // draw x-axis:
@@ -85,7 +91,8 @@ void Chart::draw()
         int y = m_rect.GetBottom();
         if (x - last_mark < legend_side)
             continue;
-        dc.DrawLine(x, y + 3, x, y - 3);
+        const int tick_len = std::max(1, scale_unit / 3); // DPI-scaled tick marks (~3px at 100%)
+        dc.DrawLine(x, y + tick_len, x, y - tick_len);
         dc.DrawText(wxString().Format(wxT("%.1f"), math_x), wxPoint(x - scale_unit, y + 0.5 * scale_unit));
         last_mark = x;
     }
@@ -98,7 +105,8 @@ void Chart::draw()
         int x = m_rect.GetLeft();
         if (last_mark - y < legend_side)
             continue;
-        dc.DrawLine(x - 3, y, x + 3, y);
+        const int tick_len_y = std::max(1, scale_unit / 3); // DPI-scaled tick marks (~3px at 100%)
+        dc.DrawLine(x - tick_len_y, y, x + tick_len_y, y);
         dc.DrawText(wxString() << math_y, wxPoint(x - 2 * scale_unit, y - 0.5 * scale_unit));
         last_mark = y;
     }
@@ -146,7 +154,7 @@ void Chart::mouse_moved(wxMouseEvent &event)
         return;
     wxPoint pos = event.GetPosition();
     wxRect rect = m_rect;
-    rect.Deflate(side / 2.);
+    rect.Deflate(get_button_side() / 2.);
     if (!(rect.Contains(pos)))
     { // the mouse left chart area
         mouse_left_window(event);

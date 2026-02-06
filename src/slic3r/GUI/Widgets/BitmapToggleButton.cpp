@@ -3,6 +3,7 @@
 ///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
 ///|/
 #include "BitmapToggleButton.hpp"
+#include "../GUI_App.hpp"
 
 #include <wx/settings.h>
 #include <wx/button.h>
@@ -11,6 +12,12 @@
 #include <wx/setup.h>
 
 #include "wx/window.h"
+
+// DPI scaling helper
+static int GetScaledLabelPadding()
+{
+    return Slic3r::GUI::wxGetApp().em_unit() * 2; // 20px at 100%
+}
 
 BitmapToggleButton::BitmapToggleButton(wxWindow *parent, const wxString &label, wxWindowID id)
 {
@@ -21,7 +28,7 @@ BitmapToggleButton::BitmapToggleButton(wxWindow *parent, const wxString &label, 
     {
 #ifdef __WXGTK3__
         wxSize label_size = parent->GetTextExtent(label);
-        wxSize def_size = wxSize(label_size.GetX() + 20, label_size.GetY());
+        wxSize def_size = wxSize(label_size.GetX() + GetScaledLabelPadding(), label_size.GetY());
 #else
         wxSize def_size = wxDefaultSize;
 #endif
@@ -30,9 +37,10 @@ BitmapToggleButton::BitmapToggleButton(wxWindow *parent, const wxString &label, 
     }
 
 #ifdef __WXMSW__
+    // Make button background transparent so it inherits parent's warm background
+    SetBackgroundStyle(wxBG_STYLE_TRANSPARENT);
     if (parent)
     {
-        SetBackgroundColour(parent->GetBackgroundColour());
         SetForegroundColour(parent->GetForegroundColour());
     }
 #elif __WXGTK3__

@@ -5,19 +5,58 @@
 #include "SwitchButton.hpp"
 
 #include "../wxExtensions.hpp"
+#include "../GUI_App.hpp"
 #include "../../Utils/MacDarkMode.hpp"
 
 #include <wx/dcgraph.h>
 #include <wx/dcmemory.h>
 #include <wx/dcclient.h>
 
+// DPI scaling helpers for toggle icon
+static int GetScaledToggleWidth()
+{
+    return (Slic3r::GUI::wxGetApp().em_unit() * 28) / 10; // 28px at 100%
+}
+
+static int GetScaledToggleHeight()
+{
+    return (Slic3r::GUI::wxGetApp().em_unit() * 16) / 10; // 16px at 100%
+}
+
+// DPI scaling helpers for labeled switch (used on all platforms)
+static int GetScaledThumbPaddingX()
+{
+    return (Slic3r::GUI::wxGetApp().em_unit() * 12) / 10; // 12px at 100%
+}
+
+static int GetScaledThumbPaddingY()
+{
+    return (Slic3r::GUI::wxGetApp().em_unit() * 6) / 10; // 6px at 100%
+}
+
+static int GetScaledTrackSpacing()
+{
+    return Slic3r::GUI::wxGetApp().em_unit(); // 10px at 100%
+}
+
+static int GetScaledTrackPadding()
+{
+    return (Slic3r::GUI::wxGetApp().em_unit() * 2) / 10; // 2px at 100%
+}
+
+static int GetScaledInset()
+{
+    return std::max(1, Slic3r::GUI::wxGetApp().em_unit() / 10); // 1px at 100%, min 1px
+}
+
 SwitchButton::SwitchButton(wxWindow *parent, const wxString &name, wxWindowID id)
     : BitmapToggleButton(parent, name, id)
-    , m_on(this, "toggle_on", 28, 16)
-    , m_off(this, "toggle_off", 28, 16)
+    , m_on(this, "toggle_on", GetScaledToggleWidth(), GetScaledToggleHeight())
+    , m_off(this, "toggle_off", GetScaledToggleWidth(), GetScaledToggleHeight())
     , text_color(std::pair{*wxWHITE, (int) StateColor::Checked}, std::pair{0x6B6B6B, (int) StateColor::Normal})
     , track_color(0xD9D9D9)
-    , thumb_color(std::pair{0x00AE42, (int) StateColor::Checked}, std::pair{0xD9D9D9, (int) StateColor::Normal})
+    , thumb_color(std::pair{0xEAA032, (int) StateColor::Checked},
+                  std::pair{0xD9D9D9, (int) StateColor::Normal}) // preFlight brand orange
 {
     Rescale();
 }
@@ -55,11 +94,15 @@ void SwitchButton::Rescale()
 {
     if (!labels[0].IsEmpty())
     {
+        // Get DPI-scaled padding values (works on all platforms)
+        int thumbPadX = GetScaledThumbPaddingX();
+        int thumbPadY = GetScaledThumbPaddingY();
+        int trackSpacing = GetScaledTrackSpacing();
+        int trackPad = GetScaledTrackPadding();
+        int inset = GetScaledInset();
+
 #ifdef __WXOSX__
         auto scale = Slic3r::GUI::mac_max_scaling_factor();
-        int BS = (int) scale;
-#else
-        constexpr int BS = 1;
 #endif
         wxSize thumbSize;
         wxSize trackSize;
@@ -79,10 +122,10 @@ void SwitchButton::Rescale()
                 thumbSize.x = size.x;
             else
                 size.x = thumbSize.x;
-            thumbSize.x += BS * 12;
-            thumbSize.y += BS * 6;
-            trackSize.x = thumbSize.x + size.x + BS * 10;
-            trackSize.y = thumbSize.y + BS * 2;
+            thumbSize.x += thumbPadX;
+            thumbSize.y += thumbPadY;
+            trackSize.x = thumbSize.x + size.x + trackSpacing;
+            trackSize.y = thumbSize.y + trackPad;
             auto maxWidth = GetMaxWidth();
 #ifdef __WXOSX__
             maxWidth *= scale;
@@ -113,14 +156,16 @@ void SwitchButton::Rescale()
                 dc2.DrawRoundedRectangle(wxRect({0, 0}, trackSize), trackSize.y / 2);
                 dc2.SetBrush(wxBrush(thumb_color.colorForStates(StateColor::Checked | StateColor::Enabled)));
                 dc2.SetPen(wxPen(thumb_color.colorForStates(StateColor::Checked | StateColor::Enabled)));
-                dc2.DrawRoundedRectangle(wxRect({i == 0 ? BS : (trackSize.x - thumbSize.x - BS), BS}, thumbSize),
+                dc2.DrawRoundedRectangle(wxRect({i == 0 ? inset : (trackSize.x - thumbSize.x - inset), inset},
+                                                thumbSize),
                                          thumbSize.y / 2);
             }
             memdc.SetTextForeground(text_color.colorForStates(state ^ StateColor::Checked));
-            memdc.DrawText(labels[0], {BS + (thumbSize.x - textSize[0].x) / 2, BS + (thumbSize.y - textSize[0].y) / 2});
+            memdc.DrawText(labels[0],
+                           {inset + (thumbSize.x - textSize[0].x) / 2, inset + (thumbSize.y - textSize[0].y) / 2});
             memdc.SetTextForeground(text_color.colorForStates(state));
-            memdc.DrawText(labels[1], {trackSize.x - thumbSize.x - BS + (thumbSize.x - textSize[1].x) / 2,
-                                       BS + (thumbSize.y - textSize[1].y) / 2});
+            memdc.DrawText(labels[1], {trackSize.x - thumbSize.x - inset + (thumbSize.x - textSize[1].x) / 2,
+                                       inset + (thumbSize.y - textSize[1].y) / 2});
             memdc.SelectObject(wxNullBitmap);
 #ifdef __WXOSX__
             bmp = wxBitmap(bmp.ConvertToImage(), -1, scale);

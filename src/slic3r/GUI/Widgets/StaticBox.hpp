@@ -37,6 +37,8 @@ public:
 
     static wxColor GetParentBackgroundColor(wxWindow *parent);
 
+    void msw_rescale();
+
 protected:
     void paintEvent(wxPaintEvent &evt);
 

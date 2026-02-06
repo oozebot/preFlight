@@ -5,6 +5,7 @@
 ///|/
 #include "NotificationManager.hpp"
 
+#include "GUI_Preview.hpp"
 #include "HintNotification.hpp"
 #include "GUI.hpp"
 #include "ImGuiPureWrap.hpp"
@@ -26,8 +27,9 @@
 
 #include <wx/glcanvas.h>
 
-static constexpr float GAP_WIDTH = 10.0f;
-static constexpr float SPACE_RIGHT_PANEL = 10.0f;
+// Base values - multiply by get_style_scaling() when using
+static constexpr float GAP_WIDTH_BASE = 10.0f;
+static constexpr float SPACE_RIGHT_PANEL_BASE = 10.0f;
 static constexpr float FADING_OUT_DURATION = 2.0f;
 // Time in Miliseconds after next render when fading out is requested
 static constexpr int FADING_OUT_TIMEOUT = 100;
@@ -166,7 +168,7 @@ void NotificationManager::PopNotification::render(GLCanvas3D &canvas, float init
 
     if (m_state == EState::Hidden)
     {
-        m_top_y = initial_y - GAP_WIDTH;
+        m_top_y = initial_y - GAP_WIDTH_BASE * wxGetApp().imgui()->get_style_scaling();
         return;
     }
 
@@ -178,7 +180,8 @@ void NotificationManager::PopNotification::render(GLCanvas3D &canvas, float init
 
     Size cnv_size = canvas.get_canvas_size();
     ImVec2 mouse_pos = ImGui::GetMousePos();
-    float right_gap = SPACE_RIGHT_PANEL + (move_from_overlay ? overlay_width + m_line_height * 5 : 0);
+    float right_gap = SPACE_RIGHT_PANEL_BASE * wxGetApp().imgui()->get_style_scaling() +
+                      (move_from_overlay ? overlay_width + m_line_height * 5 : 0);
     bool fading_pop = false;
 
     if (m_line_height != ImGui::CalcTextSize("A").y)
@@ -189,10 +192,11 @@ void NotificationManager::PopNotification::render(GLCanvas3D &canvas, float init
     // top y of window
     m_top_y = initial_y + m_window_height;
 
-    // Position at bottom center with 10px offset from bottom
+    // Position at bottom center with scaled offset from bottom
     // X: center of canvas (0.5f width)
-    // Y: canvas height - 10 pixels - accumulated height of notifications (stacks upward)
-    const float bottom_margin = 10.0f;
+    // Y: canvas height - scaled margin - accumulated height of notifications (stacks upward)
+    // DPI-scaled bottom margin using ImGui font size
+    const float bottom_margin = ImGui::GetFontSize();
     ImVec2 win_pos(0.5f * (float) cnv_size.get_width(),
                    (float) cnv_size.get_height() - bottom_margin - initial_y - m_window_height);
 
@@ -3525,7 +3529,13 @@ void NotificationManager::render_notifications(GLCanvas3D &canvas, float overlay
 {
     sort_notifications();
 
+    // Start notifications above the moves slider when in preview mode
     float last_y = 0.0f;
+    if (m_in_preview)
+    {
+        if (Preview *preview = dynamic_cast<Preview *>(canvas.get_wxglcanvas_parent()))
+            last_y = preview->get_moves_slider_height();
+    }
 
     for (const auto &notification : m_pop_notifications)
     {
@@ -3533,7 +3543,7 @@ void NotificationManager::render_notifications(GLCanvas3D &canvas, float overlay
         {
             notification->render(canvas, last_y, m_move_from_overlay && !m_in_preview, overlay_width);
             if (notification->get_state() != PopNotification::EState::Finished)
-                last_y = notification->get_top() + GAP_WIDTH;
+                last_y = notification->get_top() + GAP_WIDTH_BASE * wxGetApp().imgui()->get_style_scaling();
         }
     }
     m_last_render = GLCanvas3D::timestamp_now();

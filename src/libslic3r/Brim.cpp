@@ -543,8 +543,10 @@ static Polygons top_level_outer_brim_islands(const ConstPrintObjectPtrs &top_lev
 
 struct BrimAreas
 {
-    ExPolygons clippable;         // Areas that will be clipped by no_brim_area
-    ExPolygons overlap_protected; // Areas with positive overlap that bypass clipping
+    ExPolygons clippable;         // Painted mouse ear areas that will be clipped by no_brim_area
+    ExPolygons overlap_protected; // Painted mouse ear areas with positive overlap that bypass clipping
+    ExPolygons auto_ears;         // Auto mouse ear areas (btEar) - clipped, with separation from perimeter
+    ExPolygons regular_brim;      // Regular brim ring areas (btOuterOnly, btOuterAndInner)
 };
 
 static BrimAreas top_level_outer_brim_area(const Print &print, const ConstPrintObjectPtrs &top_level_objects_with_brim,
@@ -557,7 +559,9 @@ static BrimAreas top_level_outer_brim_area(const Print &print, const ConstPrintO
     for (const PrintObject *object : top_level_objects_with_brim)
         top_level_objects_idx.insert(object->id().id);
 
-    ExPolygons brim_area;         // Will become result.clippable
+    ExPolygons brim_area;         // Will become result.clippable (painted standard ears)
+    ExPolygons auto_ears_area;    // Will become result.auto_ears (btEar auto ears)
+    ExPolygons regular_brim_area; // Will become result.regular_brim
     ExPolygons overlap_protected; // Will become result.overlap_protected
     ExPolygons no_brim_area;
     for (size_t print_object_idx = 0; print_object_idx < print.objects().size(); ++print_object_idx)
@@ -577,6 +581,8 @@ static BrimAreas top_level_outer_brim_area(const Print &print, const ConstPrintO
         const double flow_width = print.brim_flow().spacing();
 
         ExPolygons brim_area_object;
+        ExPolygons auto_ears_area_object;
+        ExPolygons regular_brim_area_object;
         ExPolygons overlap_protected_object;
         ExPolygons no_brim_area_object;
         for (const ExPolygon &ex_poly : bottom_layers_expolygons[print_object_idx])
@@ -596,16 +602,17 @@ static BrimAreas top_level_outer_brim_area(const Print &print, const ConstPrintO
                 }
                 else if (use_auto_brim_ears)
                 {
-                    // Auto-generate: detect sharp corners
+                    // Auto-generate: detect sharp corners - routed separately for perimeter separation
                     coord_t size_ear = brim_width;
-                    append(brim_area_object, diff_ex(make_brim_ears(outer_brim_expoly, size_ear, ear_detection_length,
-                                                                    brim_ears_max_angle, true),
-                                                     outer_brim_expoly));
+                    append(auto_ears_area_object,
+                           diff_ex(make_brim_ears(outer_brim_expoly, size_ear, ear_detection_length,
+                                                  brim_ears_max_angle, true),
+                                   outer_brim_expoly));
                 }
                 else
                 {
-                    // Regular brim
-                    append(brim_area_object,
+                    // Regular brim - routed separately for original PrusaSlicer loop generation
+                    append(regular_brim_area_object,
                            diff_ex(offset(ex_poly.contour, brim_width + brim_separation, JoinType::Square),
                                    outer_brim_expoly));
                 }
@@ -634,6 +641,8 @@ static BrimAreas top_level_outer_brim_area(const Print &print, const ConstPrintO
         for (const PrintInstance &instance : object->instances())
         {
             append_and_translate(brim_area, brim_area_object, instance);
+            append_and_translate(auto_ears_area, auto_ears_area_object, instance);
+            append_and_translate(regular_brim_area, regular_brim_area_object, instance);
             append_and_translate(overlap_protected, overlap_protected_object, instance);
             append_and_translate(no_brim_area, no_brim_area_object, instance);
         }
@@ -645,10 +654,13 @@ static BrimAreas top_level_outer_brim_area(const Print &print, const ConstPrintO
     // This causes severe performance issues in subsequent Clipper2 operations (30+ seconds).
     // Union merges overlapping ears and consolidates fragments into a unified polygon set.
     brim_area = union_ex(brim_area);
+    auto_ears_area = union_ex(auto_ears_area);
     overlap_protected = union_ex(overlap_protected); // Also merge overlap-protected ears
 
-    result.clippable = diff_ex(brim_area, no_brim_area); // Standard clipping for normal areas
-    result.overlap_protected = overlap_protected;        // No clipping for overlap areas
+    result.clippable = diff_ex(brim_area, no_brim_area);            // Painted standard ears with standard clipping
+    result.auto_ears = diff_ex(auto_ears_area, no_brim_area);       // Auto ears with standard clipping
+    result.regular_brim = diff_ex(regular_brim_area, no_brim_area); // Regular brim areas with standard clipping
+    result.overlap_protected = overlap_protected; // Painted ears with positive overlap (bypass clipping)
 
     return result;
 }
@@ -1013,72 +1025,118 @@ ExtrusionEntityCollection make_brim(const Print &print, PrintTryCancel try_cance
     Polygons islands = top_level_outer_brim_islands(top_level_objects_with_brim, scaled_resolution);
     BrimAreas brim_areas = top_level_outer_brim_area(print, top_level_objects_with_brim, bottom_layers_expolygons,
                                                      float(flow.scaled_spacing()));
-    ExPolygons islands_area_ex = brim_areas.clippable;
-    // Overlap protected areas will be added later, after loop generation
+    // Build islands_area from all brim region types
+    ExPolygons islands_area_ex = brim_areas.regular_brim;
+    append(islands_area_ex, brim_areas.auto_ears);
+    append(islands_area_ex, brim_areas.clippable);
+    append(islands_area_ex, brim_areas.overlap_protected);
     islands_area = to_polygons(islands_area_ex);
 
-    // Instead of generating all loops then intersecting, process each brim area completely
     ExtrusionEntityCollection brim;
 
-    // Combine all brim areas (standard and overlap-protected)
-    ExPolygons all_brim_areas = brim_areas.clippable;
-    append(all_brim_areas, brim_areas.overlap_protected);
-
-    // Process each brim area independently with concentric loops
-    for (const ExPolygon &brim_area : all_brim_areas)
+    // --- Regular brims: original PrusaSlicer expand-outward + clip algorithm ---
+    // Loops grow outward from object islands and are clipped to the brim area.
+    Polylines all_loops;
+    if (!brim_areas.regular_brim.empty())
     {
-        try_cancel();
-
-        ExPolygons current = {brim_area};
-
-        // Generate concentric loops for this brim area
-        while (!current.empty())
+        Polygons regular_clip_area = to_polygons(brim_areas.regular_brim);
+        Polygons loops;
+        Polygons regular_islands = islands; // Copy so mouse ears still have original islands
+        size_t num_loops = size_t(floor(max_brim_width(print.objects()) / flow.spacing()));
+        for (size_t i = 0; i < num_loops; ++i)
         {
-            for (const ExPolygon &ex : current)
-            {
-                if (ex.contour.length() > flow.scaled_spacing())
-                { // Skip tiny loops
-                    ExtrusionLoop *loop = new ExtrusionLoop();
-                    loop->paths.emplace_back(
-                        ExtrusionAttributes{ExtrusionRole::Skirt,
-                                            ExtrusionFlow{float(flow.mm3_per_mm()), float(flow.width()),
-                                                          float(print.skirt_first_layer_height())}});
-                    loop->paths.back().polyline = ex.contour.split_at_first_point();
-                    loop->paths.back().polyline.points.push_back(
-                        loop->paths.back().polyline.points.front()); // Close the loop
-                    brim.entities.emplace_back(loop);
+            try_cancel();
+            regular_islands = expand(regular_islands, float(flow.scaled_spacing()), JoinType::Square);
+            for (Polygon &poly : regular_islands)
+                poly.douglas_peucker(scaled_resolution);
+            polygons_append(loops, shrink(regular_islands, 0.5f * float(flow.scaled_spacing())));
+        }
+        loops = union_pt_chained_outside_in(loops);
 
-                    // Also add holes as loops
-                    for (const Polygon &hole : ex.holes)
+        // Clip loops against the regular brim area and convert to polylines
+        std::vector<Polylines> loops_pl_by_levels;
+        {
+            Polylines loops_pl = to_polylines(loops);
+            loops_pl_by_levels.assign(loops_pl.size(), Polylines());
+            tbb::parallel_for(tbb::blocked_range<size_t>(0, loops_pl.size()),
+                              [&loops_pl_by_levels, &loops_pl,
+                               &regular_clip_area](const tbb::blocked_range<size_t> &range)
+                              {
+                                  for (size_t i = range.begin(); i < range.end(); ++i)
+                                  {
+                                      loops_pl_by_levels[i] = chain_polylines(
+                                          intersection_pl({std::move(loops_pl[i])}, regular_clip_area));
+                                  }
+                              });
+        }
+        for (Polylines &polylines : loops_pl_by_levels)
+            append(all_loops, std::move(polylines));
+        loops_pl_by_levels.clear();
+        optimize_polylines_by_reversing(&all_loops);
+    }
+
+    // --- Mouse ears: concentric inward-offset fill ---
+    // Three ear sources: auto_ears (btEar), clippable (painted standard), overlap_protected (painted overlap)
+    // Auto ears get half-spacing inset to prevent overlap with external perimeter.
+    // Advanced painted ears (clippable + overlap_protected) start at raw boundary - completely untouched.
+    ExPolygons all_ear_areas = brim_areas.auto_ears;
+    append(all_ear_areas, brim_areas.clippable);
+    append(all_ear_areas, brim_areas.overlap_protected);
+    if (!all_ear_areas.empty())
+    {
+        const float mbw = max_brim_width(print.objects());
+        const size_t max_loops = mbw > 0 ? size_t(ceil(double(scale_(mbw)) / double(flow.scaled_spacing()))) + 2 : 0;
+        const size_t auto_ears_count = brim_areas.auto_ears.size();
+
+        for (size_t ear_idx = 0; ear_idx < all_ear_areas.size(); ++ear_idx)
+        {
+            const ExPolygon &brim_area = all_ear_areas[ear_idx];
+            try_cancel();
+
+            // Auto ears: inset by half-spacing so the first loop doesn't overlap the external perimeter.
+            // Advanced painted ears (both clippable and overlap_protected): start at raw boundary as designed.
+            ExPolygons current = (ear_idx < auto_ears_count)
+                                     ? offset_ex(ExPolygons{brim_area}, -0.5f * float(flow.scaled_spacing()),
+                                                 JoinType::Square)
+                                     : ExPolygons{brim_area};
+
+            for (size_t loop_idx = 0; loop_idx < max_loops && !current.empty(); ++loop_idx)
+            {
+                for (const ExPolygon &ex : current)
+                {
+                    if (ex.contour.length() > flow.scaled_spacing())
                     {
-                        if (hole.length() > flow.scaled_spacing())
+                        ExtrusionLoop *loop = new ExtrusionLoop();
+                        loop->paths.emplace_back(
+                            ExtrusionAttributes{ExtrusionRole::Skirt,
+                                                ExtrusionFlow{float(flow.mm3_per_mm()), float(flow.width()),
+                                                              float(print.skirt_first_layer_height())}});
+                        loop->paths.back().polyline = ex.contour.split_at_first_point();
+                        loop->paths.back().polyline.points.push_back(loop->paths.back().polyline.points.front());
+                        brim.entities.emplace_back(loop);
+
+                        for (const Polygon &hole : ex.holes)
                         {
-                            ExtrusionLoop *hole_loop = new ExtrusionLoop();
-                            hole_loop->paths.emplace_back(
-                                ExtrusionAttributes{ExtrusionRole::Skirt,
-                                                    ExtrusionFlow{float(flow.mm3_per_mm()), float(flow.width()),
-                                                                  float(print.skirt_first_layer_height())}});
-                            hole_loop->paths.back().polyline = hole.split_at_first_point();
-                            hole_loop->paths.back().polyline.points.push_back(
-                                hole_loop->paths.back().polyline.points.front());
-                            brim.entities.emplace_back(hole_loop);
+                            if (hole.length() > flow.scaled_spacing())
+                            {
+                                ExtrusionLoop *hole_loop = new ExtrusionLoop();
+                                hole_loop->paths.emplace_back(
+                                    ExtrusionAttributes{ExtrusionRole::Skirt,
+                                                        ExtrusionFlow{float(flow.mm3_per_mm()), float(flow.width()),
+                                                                      float(print.skirt_first_layer_height())}});
+                                hole_loop->paths.back().polyline = hole.split_at_first_point();
+                                hole_loop->paths.back().polyline.points.push_back(
+                                    hole_loop->paths.back().polyline.points.front());
+                                brim.entities.emplace_back(hole_loop);
+                            }
                         }
                     }
                 }
-            }
 
-            // Offset inward for next loop
-            // JoinType::Round creates arc approximations at every corner, causing exponential vertex growth
-            // in concentric loops (100 → 500 → 2500 → 12500 → 19k+ vertices). This causes:
-            // 1. Extreme memory usage and processing time
-            // 2. Clipper2 fragmentation (1 polygon → 893 fragments)
-            // JoinType::Miter maintains vertex count while still producing smooth brims.
-            current = offset_ex(current, -float(flow.scaled_spacing()), JoinType::Miter);
+                current = offset_ex(current, -float(flow.scaled_spacing()), JoinType::Miter);
+            }
         }
     }
-
-    // No need for all_loops - we've directly created the extrusion entities
-    Polylines all_loops; // Empty - kept for compatibility with debug code below
 
 #ifdef BRIM_DEBUG_TO_SVG
     static int irun = 0;

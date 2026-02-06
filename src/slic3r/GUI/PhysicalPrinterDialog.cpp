@@ -51,7 +51,11 @@ namespace Slic3r
 namespace GUI
 {
 
-#define BORDER_W 10
+// DPI-scaled border width helper
+static int GetScaledBorderW()
+{
+    return wxGetApp().em_unit(); // 10px at 100% DPI
+}
 
 //------------------------------------------
 //          PresetForPrinter
@@ -105,11 +109,11 @@ PresetForPrinter::PresetForPrinter(PhysicalPrinterDialog *parent, const std::str
 
     wxBoxSizer *preset_sizer = new wxBoxSizer(wxHORIZONTAL);
     preset_sizer->Add(m_presets_list, 1, wxEXPAND);
-    preset_sizer->Add(m_delete_preset_btn, 0, wxEXPAND | wxLEFT, BORDER_W);
+    preset_sizer->Add(m_delete_preset_btn, 0, wxEXPAND | wxLEFT, GetScaledBorderW());
 
     wxBoxSizer *name_sizer = new wxBoxSizer(wxHORIZONTAL);
     name_sizer->Add(m_info_line, 0, wxEXPAND);
-    name_sizer->Add(m_full_printer_name, 0, wxEXPAND | wxLEFT, BORDER_W);
+    name_sizer->Add(m_full_printer_name, 0, wxEXPAND | wxLEFT, GetScaledBorderW());
 
     m_sizer->Add(preset_sizer, 0, wxEXPAND);
     m_sizer->Add(name_sizer, 0, wxEXPAND);
@@ -337,19 +341,19 @@ PhysicalPrinterDialog::PhysicalPrinterDialog(wxWindow *parent, wxString printer_
 
     wxBoxSizer *nameSizer = new wxBoxSizer(wxHORIZONTAL);
     nameSizer->Add(m_printer_name, 1, wxEXPAND);
-    nameSizer->Add(m_add_preset_btn, 0, wxEXPAND | wxLEFT, BORDER_W);
+    nameSizer->Add(m_add_preset_btn, 0, wxEXPAND | wxLEFT, GetScaledBorderW());
 
     m_presets_sizer = new wxBoxSizer(wxVERTICAL);
     for (PresetForPrinter *preset : m_presets)
-        m_presets_sizer->Add(preset->sizer(), 1, wxEXPAND | wxTOP, BORDER_W);
+        m_presets_sizer->Add(preset->sizer(), 1, wxEXPAND | wxTOP, GetScaledBorderW());
 
     wxBoxSizer *topSizer = new wxBoxSizer(wxVERTICAL);
 
-    topSizer->Add(label_top, 0, wxEXPAND | wxLEFT | wxTOP | wxRIGHT, BORDER_W);
-    topSizer->Add(nameSizer, 0, wxEXPAND | wxLEFT | wxRIGHT, BORDER_W);
-    topSizer->Add(m_presets_sizer, 0, wxEXPAND | wxLEFT | wxRIGHT, BORDER_W);
-    topSizer->Add(m_optgroup->sizer, 1, wxEXPAND | wxLEFT | wxTOP | wxRIGHT, BORDER_W);
-    topSizer->Add(btns, 0, wxEXPAND | wxALL, BORDER_W);
+    topSizer->Add(label_top, 0, wxEXPAND | wxLEFT | wxTOP | wxRIGHT, GetScaledBorderW());
+    topSizer->Add(nameSizer, 0, wxEXPAND | wxLEFT | wxRIGHT, GetScaledBorderW());
+    topSizer->Add(m_presets_sizer, 0, wxEXPAND | wxLEFT | wxRIGHT, GetScaledBorderW());
+    topSizer->Add(m_optgroup->sizer, 1, wxEXPAND | wxLEFT | wxTOP | wxRIGHT, GetScaledBorderW());
+    topSizer->Add(btns, 0, wxEXPAND | wxALL, GetScaledBorderW());
 
     SetSizer(topSizer);
     topSizer->SetSizeHints(this);
@@ -650,7 +654,7 @@ void PhysicalPrinterDialog::build_printhost_settings(ConfigOptionsGroup *m_optgr
 
     const auto opt = m_config->option<ConfigOptionEnum<PrintHostType>>("host_type");
     m_last_host_type = opt->value;
-    // preFlight: Connect service support removed
+    // Connect service support removed
 
     Field *printhost_field = m_optgroup->get_field("print_host");
     if (printhost_field)
@@ -782,7 +786,7 @@ void PhysicalPrinterDialog::update_host_type(bool printer_change)
     // allowed models are: all MK3/S and MK2.5/S. 
     // Since 2.6.2 also MINI, which makes list of supported printers same for both services.
     // Lets keep these 2 functions separated for now.
-    // preFlight: Connect service model check removed
+    // Connect service model check removed
 #endif // 0
     auto model_supports_service = [](const std::string &model)
     {
@@ -822,7 +826,7 @@ void PhysicalPrinterDialog::update_host_type(bool printer_change)
         break;
     }
 
-    // preFlight: Connect service preset check (kept for structure, service disabled)
+    // Connect service preset check (kept for structure, service disabled)
     for (PresetForPrinter *prstft : m_presets)
     {
         std::string preset_name = prstft->get_preset_name();
@@ -1059,7 +1063,7 @@ void PhysicalPrinterDialog::AddPreset(wxEvent &event)
     // enable DELETE button for the first preset, if was disabled
     m_presets.front()->AllowDelete();
 
-    m_presets_sizer->Add(m_presets.back()->sizer(), 1, wxEXPAND | wxTOP, BORDER_W);
+    m_presets_sizer->Add(m_presets.back()->sizer(), 1, wxEXPAND | wxTOP, GetScaledBorderW());
     update_full_printer_names();
     this->Fit();
 

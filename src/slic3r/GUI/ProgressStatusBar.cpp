@@ -39,7 +39,9 @@ ProgressStatusBar::ProgressStatusBar(wxWindow *parent, int id)
     m_cancelbutton->Hide();
 
     self->SetFieldsCount(3);
-    int w[] = {-1, 150, 155};
+    // DPI-scaled status bar field widths (15 and 15.5 em at 100% DPI)
+    int em = GUI::wxGetApp().em_unit();
+    int w[] = {-1, 15 * em, static_cast<int>(15.5 * em)};
     self->SetStatusWidths(3, w);
 
     wxSize s = m_cancelbutton->GetTextExtent(m_cancelbutton->GetLabel());

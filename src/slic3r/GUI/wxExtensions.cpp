@@ -279,10 +279,12 @@ int em_unit(wxWindow *win)
 
 int mode_icon_px_size()
 {
+    // DPI-scaled mode icon size (10/12px base at 100% DPI)
+    int em = Slic3r::GUI::wxGetApp().em_unit();
 #ifdef __APPLE__
-    return 10;
+    return em; // 10px at 100% DPI
 #else
-    return 12;
+    return (12 * em) / 10; // 12px at 100% DPI
 #endif
 }
 

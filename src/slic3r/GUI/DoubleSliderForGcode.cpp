@@ -11,8 +11,16 @@
 namespace DoubleSlider
 {
 
-static const float LEFT_MARGIN = 13.0f + 100.0f; // avoid thumbnail toolbar
-static const float HORIZONTAL_SLIDER_HEIGHT = 40.0f;
+// DPI scaling helpers for slider positioning
+static float GetScaledLeftMargin(float scale)
+{
+    return (13.0f + 100.0f) * scale; // avoid thumbnail toolbar, scaled for DPI
+}
+
+static float GetScaledHorizontalSliderHeight(float scale)
+{
+    return 40.0f * scale; // slider height scaled for DPI
+}
 
 void DSForGcode::Render(const int canvas_width, const int canvas_height, float extra_scale /* = 0.1f*/,
                         float offset /* = 0.f*/)
@@ -21,8 +29,12 @@ void DSForGcode::Render(const int canvas_width, const int canvas_height, float e
         return;
     m_scale = extra_scale * 0.1f * m_em;
 
-    ImVec2 pos = ImVec2{std::max(LEFT_MARGIN, 0.2f * canvas_width), canvas_height - HORIZONTAL_SLIDER_HEIGHT * m_scale};
-    ImVec2 size = ImVec2(canvas_width - 2 * pos.x, HORIZONTAL_SLIDER_HEIGHT * m_scale);
+    // Use DPI-scaled margins and heights
+    const float scaled_left_margin = GetScaledLeftMargin(m_scale);
+    const float scaled_slider_height = GetScaledHorizontalSliderHeight(m_scale);
+    ImVec2 pos = ImVec2{std::max(scaled_left_margin, 0.2f * canvas_width), canvas_height - scaled_slider_height};
+    const float right_margin = 80.0f * m_scale;
+    ImVec2 size = ImVec2(canvas_width - 2 * pos.x - right_margin, scaled_slider_height);
 
     m_ctrl.Init(pos, size, m_scale);
     if (m_ctrl.render())

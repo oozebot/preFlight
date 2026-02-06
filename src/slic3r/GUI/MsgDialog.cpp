@@ -35,6 +35,22 @@ namespace Slic3r
 namespace GUI
 {
 
+// DPI-scaled layout methods
+int MsgDialog::GetScaledBorder()
+{
+    return wxGetApp().em_unit() * 3; // 30px at 100% DPI
+}
+
+int MsgDialog::GetScaledVertSpacing()
+{
+    return (wxGetApp().em_unit() * 15) / 10; // 15px at 100% DPI
+}
+
+int MsgDialog::GetScaledHorizSpacing()
+{
+    return wxGetApp().em_unit() / 2; // 5px at 100% DPI
+}
+
 MsgDialog::MsgDialog(wxWindow *parent, const wxString &title, const wxString &headline, long style, wxBitmap bitmap)
     : wxDialog(parent ? parent : dynamic_cast<wxWindow *>(wxGetApp().mainframe), wxID_ANY, title, wxDefaultPosition,
                wxDefaultSize, wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
@@ -54,23 +70,28 @@ MsgDialog::MsgDialog(wxWindow *parent, const wxString &title, const wxString &he
     auto *topsizer = new wxBoxSizer(wxHORIZONTAL);
     auto *rightsizer = new wxBoxSizer(wxVERTICAL);
 
+    // DPI-scaled spacing values
+    const int border = GetScaledBorder();
+    const int vert_spacing = GetScaledVertSpacing();
+    const int horiz_spacing = GetScaledHorizSpacing();
+
     auto *headtext = new wxStaticText(this, wxID_ANY, headline);
     headtext->SetFont(boldfont);
     headtext->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
     rightsizer->Add(headtext);
-    rightsizer->AddSpacer(VERT_SPACING);
+    rightsizer->AddSpacer(vert_spacing);
 
     rightsizer->Add(content_sizer, 1, wxEXPAND);
     btn_sizer->AddStretchSpacer();
 
     logo = new wxStaticBitmap(this, wxID_ANY, bitmap.IsOk() ? bitmap : wxNullBitmap);
 
-    topsizer->Add(logo, 0, wxALL, BORDER);
-    topsizer->Add(rightsizer, 1, wxTOP | wxBOTTOM | wxRIGHT | wxEXPAND, BORDER);
+    topsizer->Add(logo, 0, wxALL, border);
+    topsizer->Add(rightsizer, 1, wxTOP | wxBOTTOM | wxRIGHT | wxEXPAND, border);
 
     main_sizer->Add(topsizer, 1, wxEXPAND);
-    main_sizer->Add(new StaticLine(this), 0, wxEXPAND | wxLEFT | wxRIGHT, HORIZ_SPACING);
-    main_sizer->Add(btn_sizer, 0, wxALL | wxEXPAND, VERT_SPACING);
+    main_sizer->Add(new StaticLine(this), 0, wxEXPAND | wxLEFT | wxRIGHT, horiz_spacing);
+    main_sizer->Add(btn_sizer, 0, wxALL | wxEXPAND, vert_spacing);
 
     apply_style(style);
 
@@ -99,7 +120,7 @@ wxButton *MsgDialog::add_button(wxWindowID btn_id, bool set_focus /*= false*/, c
         // See https://twitter.com/ZMelmed/status/1472678454168539146
         btn->SetDefault();
     }
-    btn_sizer->Add(btn, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, HORIZ_SPACING);
+    btn_sizer->Add(btn, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, GetScaledHorizSpacing());
     btn->Bind(wxEVT_BUTTON, [this, btn_id](wxCommandEvent &) { this->EndModal(btn_id); });
     return btn;
 };
@@ -168,11 +189,11 @@ static void add_msg_content(MsgDialog *parent, wxBoxSizer *content_sizer, const 
     const int font_size = font.GetPointSize();
     int size[] = {font_size, font_size, font_size, font_size, font_size, font_size, font_size};
     html->SetFonts(font.GetFaceName(), monospace.GetFaceName(), size);
-    html->SetBorders(2);
 
     // calculate html page size from text
     wxSize page_size;
     int em = wxGetApp().em_unit();
+    html->SetBorders(em / 5); // DPI-scaled (2px at 100%)
     if (!wxGetApp().mainframe)
     {
         // If mainframe is nullptr, it means that GUI_App::on_init_inner() isn't completed

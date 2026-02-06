@@ -14,6 +14,7 @@
 
 #include <cmath>
 #include <map>
+#include <set>
 #include <string>
 #include <wx/msgdlg.h>
 
@@ -143,7 +144,8 @@ std::optional<DynamicPrintConfig> handle_automatic_extrusion_widths(const Dynami
     return std::nullopt;
 }
 
-void ConfigManipulation::update_print_fff_config(DynamicPrintConfig *config, const bool is_global_config)
+void ConfigManipulation::update_print_fff_config(DynamicPrintConfig *config, const bool is_global_config,
+                                                 const std::string &changed_opt_key)
 {
     // #ys_FIXME_to_delete
     //! Temporary workaround for the correct updates of the TextCtrl (like "layer_height"):
@@ -152,6 +154,21 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig *config, con
     // let check if this process is already started.
     if (is_msg_dlg_already_exist)
         return;
+
+    // Determine if we should validate extrusion widths
+    // Only validate when the changed key is an extrusion width or nozzle_diameter
+    static const std::set<std::string> extrusion_width_keys = {"extrusion_width",
+                                                               "first_layer_extrusion_width",
+                                                               "perimeter_extrusion_width",
+                                                               "external_perimeter_extrusion_width",
+                                                               "infill_extrusion_width",
+                                                               "solid_infill_extrusion_width",
+                                                               "top_infill_extrusion_width",
+                                                               "support_material_extrusion_width",
+                                                               "support_material_interface_extrusion_width",
+                                                               "bridge_extrusion_width",
+                                                               "nozzle_diameter"};
+    bool should_validate_extrusion_widths = changed_opt_key.empty() || extrusion_width_keys.count(changed_opt_key) > 0;
 
     // layer_height shouldn't be equal to zero
     if (config->opt_float("layer_height") < EPSILON)
@@ -328,6 +345,11 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig *config, con
 
         // Skip validation during initial app load (user hasn't configured anything yet)
         if (s_suppress_extrusion_width_warnings)
+            return;
+
+        // Skip validation if the changed key is not related to extrusion widths
+        // This prevents warnings when user changes unrelated settings like "perimeters"
+        if (!should_validate_extrusion_widths)
             return;
 
         auto *width_opt = config->option<ConfigOptionFloatOrPercent>(width_key);

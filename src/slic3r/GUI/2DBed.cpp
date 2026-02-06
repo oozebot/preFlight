@@ -128,9 +128,10 @@ void Bed_2D::repaint(const std::vector<Vec2d> &shape)
 
     auto origin_px = to_pixels(Vec2d(0, 0), ch);
 
-    // draw axes
-    auto axes_len = 50;
-    auto arrow_len = 6;
+    // draw axes - preFlight: DPI-scaled
+    const double scale_factor = dc.GetContentScaleFactor();
+    auto axes_len = static_cast<int>(50 * scale_factor);
+    auto arrow_len = static_cast<int>(6 * scale_factor);
     auto arrow_angle = Geometry::deg2rad(45.0);
     dc.SetPen(wxPen(wxColour(255, 0, 0), 2, wxPENSTYLE_SOLID)); // red
     auto x_end = Vec2d(origin_px(0) + axes_len, origin_px(1));
@@ -152,14 +153,14 @@ void Bed_2D::repaint(const std::vector<Vec2d> &shape)
         dc.DrawLine(wxPoint(y_end(0), y_end(1)), wxPoint(end(0), end(1)));
     }
 
-    // draw origin
+    // draw origin - preFlight: DPI-scaled
     dc.SetPen(wxPen(wxColour(0, 0, 0), 1, wxPENSTYLE_SOLID));
     dc.SetBrush(wxBrush(wxColour(0, 0, 0), wxBRUSHSTYLE_SOLID));
-    dc.DrawCircle(origin_px(0), origin_px(1), 3);
+    dc.DrawCircle(origin_px(0), origin_px(1), static_cast<int>(3 * scale_factor));
 
     static const auto origin_label = wxString("(0,0)");
     dc.SetTextForeground(wxColour(0, 0, 0));
-    dc.SetFont(wxFont(10, wxFONTFAMILY_DEFAULT, wxFONTSTYLE_NORMAL, wxFONTWEIGHT_NORMAL));
+    dc.SetFont(wxGetApp().normal_font()); // DPI-aware font
     auto extent = dc.GetTextExtent(origin_label);
     const auto origin_label_x = origin_px(0) <= cw / 2 ? origin_px(0) + 1 : origin_px(0) - 1 - extent.GetWidth();
     const auto origin_label_y = origin_px(1) <= ch / 2 ? origin_px(1) + 1 : origin_px(1) - 1 - extent.GetHeight();
@@ -171,10 +172,11 @@ void Bed_2D::repaint(const std::vector<Vec2d> &shape)
         auto pos_px = to_pixels(m_pos, ch);
         dc.SetPen(wxPen(wxColour(200, 0, 0), 2, wxPENSTYLE_SOLID));
         dc.SetBrush(wxBrush(wxColour(200, 0, 0), wxBRUSHSTYLE_TRANSPARENT));
-        dc.DrawCircle(pos_px(0), pos_px(1), 5);
+        dc.DrawCircle(pos_px(0), pos_px(1), static_cast<int>(5 * scale_factor));
 
-        dc.DrawLine(pos_px(0) - 15, pos_px(1), pos_px(0) + 15, pos_px(1));
-        dc.DrawLine(pos_px(0), pos_px(1) - 15, pos_px(0), pos_px(1) + 15);
+        const int crosshair_len = static_cast<int>(15 * scale_factor);
+        dc.DrawLine(pos_px(0) - crosshair_len, pos_px(1), pos_px(0) + crosshair_len, pos_px(1));
+        dc.DrawLine(pos_px(0), pos_px(1) - crosshair_len, pos_px(0), pos_px(1) + crosshair_len);
     }
 }
 

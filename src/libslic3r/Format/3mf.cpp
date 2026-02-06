@@ -1027,6 +1027,8 @@ bool _3MF_Importer::_load_model_from_file(const std::string &filename, Model &mo
                         model_object->brim_points.push_back(pt);
                     }
                 }
+                else if (metadata.key == "notes")
+                    model_object->notes = metadata.value;
                 else
                     model_object->config.set_deserialize(metadata.key, metadata.value, config_substitutions);
             }
@@ -2782,16 +2784,25 @@ bool _3MF_Importer::_handle_end_config_volume_mesh()
 
 bool _3MF_Importer::_handle_start_config_metadata(const char **attributes, unsigned int num_attributes)
 {
+    std::string type = get_attribute_value_string(attributes, num_attributes, TYPE_ATTR);
+    std::string key = get_attribute_value_string(attributes, num_attributes, KEY_ATTR);
+    std::string value = get_attribute_value_string(attributes, num_attributes, VALUE_ATTR);
+
+    // Handle project-level metadata (outside object context)
+    if (type == "project")
+    {
+        if (key == "notes")
+            m_model->project_notes = value;
+        return true;
+    }
+
+    // For object and volume metadata, we need a valid object context
     IdToMetadataMap::iterator object = m_objects_metadata.find(m_curr_config.object_id);
     if (object == m_objects_metadata.end())
     {
         add_error("Cannot assign metadata to valid object id");
         return false;
     }
-
-    std::string type = get_attribute_value_string(attributes, num_attributes, TYPE_ATTR);
-    std::string key = get_attribute_value_string(attributes, num_attributes, KEY_ATTR);
-    std::string value = get_attribute_value_string(attributes, num_attributes, VALUE_ATTR);
 
     if (type == OBJECT_TYPE)
         object->second.metadata.emplace_back(key, value);
@@ -4151,6 +4162,10 @@ bool _3MF_Exporter::_add_model_config_file_to_archive(mz_zip_archive &archive, c
             add_metadata(stream, 2, MetadataType::object, "brim_points", brim_points_str.str());
         }
 
+        // stores object's notes
+        if (!obj->notes.empty())
+            add_metadata(stream, 2, MetadataType::object, "notes", obj->notes);
+
         for (const ModelVolume *volume : obj_metadata.second.object->volumes)
         {
             if (volume == nullptr)
@@ -4247,6 +4262,13 @@ bool _3MF_Exporter::_add_model_config_file_to_archive(mz_zip_archive &archive, c
             }
         }
         stream << " </" << OBJECT_TAG << ">\n";
+    }
+
+    // stores project notes
+    if (!model.project_notes.empty())
+    {
+        stream << " <" << METADATA_TAG << " " << TYPE_ATTR << "=\"project\" " << KEY_ATTR << "=\"notes\" " << VALUE_ATTR
+               << "=\"" << xml_escape_double_quotes_attribute_value(model.project_notes) << "\"/>\n";
     }
 
     stream << "</" << CONFIG_TAG << ">\n";

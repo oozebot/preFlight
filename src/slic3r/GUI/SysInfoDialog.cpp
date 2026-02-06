@@ -112,11 +112,12 @@ SysInfoDialog::SysInfoDialog()
     SetBackgroundColour(bgr_clr);
     SetFont(wxGetApp().normal_font());
 
+    int em = wxGetApp().em_unit();
     wxBoxSizer *hsizer = new wxBoxSizer(wxHORIZONTAL);
-    hsizer->SetMinSize(wxSize(50 * wxGetApp().em_unit(), -1));
+    hsizer->SetMinSize(wxSize(50 * em, -1));
 
     auto main_sizer = new wxBoxSizer(wxVERTICAL);
-    main_sizer->Add(hsizer, 1, wxEXPAND | wxALL, 10);
+    main_sizer->Add(hsizer, 1, wxEXPAND | wxALL, em);
 
     // logo
     //m_logo_bmp = ScalableBitmap(this, wxGetApp().logo_name(), 192);
@@ -126,7 +127,7 @@ SysInfoDialog::SysInfoDialog()
     hsizer->Add(m_logo, 0, wxALIGN_CENTER_VERTICAL);
 
     wxBoxSizer *vsizer = new wxBoxSizer(wxVERTICAL);
-    hsizer->Add(vsizer, 1, wxEXPAND | wxLEFT, 20);
+    hsizer->Add(vsizer, 1, wxEXPAND | wxLEFT, em * 2);
 
     // title
     {
@@ -152,7 +153,7 @@ SysInfoDialog::SysInfoDialog()
     m_html = new wxHtmlWindow(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxHW_SCROLLBAR_NEVER);
     {
         m_html->SetFonts(font.GetFaceName(), font.GetFaceName(), size);
-        m_html->SetBorders(2);
+        m_html->SetBorders(wxGetApp().em_unit() / 5); // DPI-scaled (2px at 100%)
         const auto text = wxString::Format("<html>"
                                            "<body bgcolor= %s link= %s>"
                                            "<font color=%s>"
@@ -170,7 +171,7 @@ SysInfoDialog::SysInfoDialog()
     {
         m_opengl_info_html->SetMinSize(wxSize(-1, 16 * wxGetApp().em_unit()));
         m_opengl_info_html->SetFonts(font.GetFaceName(), font.GetFaceName(), size);
-        m_opengl_info_html->SetBorders(10);
+        m_opengl_info_html->SetBorders(wxGetApp().em_unit());
         wxString blacklisted_libraries_message;
 #ifdef WIN32
         std::wstring blacklisted_libraries = BlacklistedLibraryCheck::get_instance().get_blacklisted_string().c_str();
@@ -192,7 +193,7 @@ SysInfoDialog::SysInfoDialog()
                                                 Eigen::SimdInstructionSetsInUse());
 
         m_opengl_info_html->SetPage(text);
-        main_sizer->Add(m_opengl_info_html, 1, wxEXPAND | wxBOTTOM, 15);
+        main_sizer->Add(m_opengl_info_html, 1, wxEXPAND | wxBOTTOM, (3 * wxGetApp().em_unit()) / 2);
     }
 
     wxStdDialogButtonSizer *buttons = this->CreateStdDialogButtonSizer(wxOK);
@@ -200,12 +201,12 @@ SysInfoDialog::SysInfoDialog()
     m_btn_copy_to_clipboard = new wxButton(this, wxID_ANY, _L("Copy to Clipboard"), wxDefaultPosition, wxDefaultSize);
     wxGetApp().SetWindowVariantForButton(m_btn_copy_to_clipboard);
 
-    buttons->Insert(0, m_btn_copy_to_clipboard, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 5);
+    buttons->Insert(0, m_btn_copy_to_clipboard, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, wxGetApp().em_unit() / 2);
     m_btn_copy_to_clipboard->Bind(wxEVT_BUTTON, &SysInfoDialog::onCopyToClipboard, this);
 
     this->SetEscapeId(wxID_OK);
     this->Bind(wxEVT_BUTTON, &SysInfoDialog::onCloseDialog, this, wxID_OK);
-    main_sizer->Add(buttons, 0, wxEXPAND | wxRIGHT | wxBOTTOM, 3);
+    main_sizer->Add(buttons, 0, wxEXPAND | wxRIGHT | wxBOTTOM, wxGetApp().em_unit() / 3);
 
     wxGetApp().UpdateDlgDarkUI(this, true);
 
@@ -218,8 +219,7 @@ SysInfoDialog::SysInfoDialog()
 
 void SysInfoDialog::on_dpi_changed(const wxRect &suggested_rect)
 {
-    //m_logo_bmp.msw_rescale();
-    //m_logo->SetBitmap(m_logo_bmp.bmp());
+    // Note: Logo was removed from this dialog
 
     wxFont font = get_default_font(this);
     const int fs = font.GetPointSize() - 1;

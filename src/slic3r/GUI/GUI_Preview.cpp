@@ -62,8 +62,13 @@ View3D::View3D(wxWindow *parent, Bed3D &bed, Model *model, DynamicPrintConfig *c
 
 View3D::~View3D()
 {
+    // GLCanvas3D is not a wxWindow, so we must delete it manually
     delete m_canvas;
-    delete m_canvas_widget;
+    m_canvas = nullptr;
+
+    // m_canvas_widget is a child window of View3D - do NOT delete manually
+    // wxWidgets will auto-delete it via DestroyChildren() in base class destructor
+    m_canvas_widget = nullptr;
 }
 
 bool View3D::init(wxWindow *parent, Bed3D &bed, Model *model, DynamicPrintConfig *config,
@@ -259,11 +264,16 @@ Preview::~Preview()
 {
     unbind_event_handlers();
 
+    // GLCanvas3D is not a wxWindow, so we must delete it manually
     if (m_canvas != nullptr)
+    {
         delete m_canvas;
+        m_canvas = nullptr;
+    }
 
-    if (m_canvas_widget != nullptr)
-        delete m_canvas_widget;
+    // m_canvas_widget is a child window of Preview - do NOT delete manually
+    // wxWidgets will auto-delete it via DestroyChildren() in base class destructor
+    m_canvas_widget = nullptr;
 }
 
 void Preview::set_as_dirty()
@@ -328,20 +338,11 @@ void Preview::render_sliders(GLCanvas3D &canvas)
     const int canvas_height = cnv_size.get_height();
     const float extra_scale = cnv_size.get_scale_factor();
 
-    GLToolbar &collapse_toolbar = wxGetApp().plater()->get_collapse_toolbar();
-#if ENABLE_HACK_GCODEVIEWER_SLOW_ON_MAC
-    // When the application is run as GCodeViewer the collapse toolbar is enabled but invisible, as it is renderer
-    // outside of the screen
-    const bool is_collapse_btn_shown = wxGetApp().is_editor() ? collapse_toolbar.is_enabled() : false;
-#else
-    const bool is_collapse_btn_shown = collapse_toolbar.is_enabled();
-#endif // ENABLE_HACK_GCODEVIEWER_SLOW_ON_MAC
-
+    // collapse toolbar not used, no offset needed for layers slider
     if (m_layers_slider)
     {
-        float top_offset = is_collapse_btn_shown ? collapse_toolbar.get_height() : 0.f;
         // Use full canvas height now that view toolbar is hidden
-        m_layers_slider->Render(canvas_width, canvas_height, extra_scale, top_offset);
+        m_layers_slider->Render(canvas_width, canvas_height, extra_scale, 0.f);
     }
     if (m_moves_slider)
         m_moves_slider->Render(canvas_width, canvas_height, extra_scale);
@@ -1059,11 +1060,10 @@ void Preview::move_slider_by_key(int arrow_key, int delta, bool from_gcode_scrol
         }
         else
         { // WXK_RIGHT
-            // Skip this special handling when from gcode scroll - let stuck detection handle it
-            // Otherwise we get double-transition (this + stuck detection's WXK_UP)
-            if (m_layers_slider->GetHigherPos() == 0 && !from_gcode_scroll)
+            // At Layer 0 (blank build plate), immediately jump to Layer 1 start
+            // Layer 0 is the empty build plate - skip it for both keyboard and mouse wheel
+            if (m_layers_slider->GetHigherPos() == 0)
             {
-                // At Layer 0 (blank build plate), jump to Layer 1 start
                 m_layers_slider->move_current_thumb(-1);
                 m_moves_slider->SetHigherPos(m_moves_slider->GetMinPos());
             }
@@ -1256,8 +1256,7 @@ void Preview::load_print_as_fff(bool keep_z_range)
         //         m_canvas->set_gcode_view_type(gcode_view_type);
         //     zs = m_canvas->get_gcode_layers_zs();
         // }
-        // m_moves_slider->Show(gcode_preview_data_valid && !zs.empty());
-        m_moves_slider->Hide(); // Always hide the moves slider
+        m_moves_slider->Show(gcode_preview_data_valid && !zs.empty());
 
         if (!zs.empty() && !m_keep_current_preview_type)
         {
@@ -1322,9 +1321,6 @@ void Preview::on_layers_slider_scroll_changed()
             unsigned int tp_high = (higher_pos == 0) ? 0 : static_cast<unsigned int>(higher_pos - 1);
             m_canvas->set_toolpaths_z_range({tp_low, tp_high});
 
-            // Track previous position for Layer 0 transition detection
-            static int prev_higher_pos = -1;
-
             // When at layer 0 (minimum position), reset the moves slider to show from the beginning
             // of the file. This allows scrubbing forward through startup G-code moves.
             if (lower_pos == 0 && higher_pos == 0)
@@ -1335,12 +1331,6 @@ void Preview::on_layers_slider_scroll_changed()
                     static_cast<unsigned int>(m_moves_slider->GetLowerValue() - 1),
                     static_cast<unsigned int>(m_moves_slider->GetHigherValue() - 1));
             }
-            else if (prev_higher_pos == 0 && higher_pos > 0)
-            {
-                m_moves_slider->SetSelectionSpan(m_moves_slider->GetMinPos(), m_moves_slider->GetMaxPos());
-            }
-
-            prev_higher_pos = higher_pos;
 
             m_canvas->set_as_dirty();
         }

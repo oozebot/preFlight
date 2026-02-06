@@ -124,9 +124,12 @@
 #include "RemovableDriveManager.hpp"
 #include "InstanceCheck.hpp"
 #include "NotificationManager.hpp"
+#include "NotesDialog.hpp"
 #include "PresetComboBoxes.hpp"
 #include "MsgDialog.hpp"
+#include "Sidebar.hpp"
 #include "ModernTabBar.hpp"
+#include "Widgets/CustomMenu.hpp"
 #include "ProjectDirtyStateManager.hpp"
 #include "Gizmos/GLGizmoSimplify.hpp" // create suggestion notification
 #include "Gizmos/GLGizmoSVG.hpp"      // Drop SVG file
@@ -305,6 +308,7 @@ struct Plater::priv
     GLToolbar collapse_toolbar;
     Preview *preview;
     std::unique_ptr<NotificationManager> notification_manager;
+    NotesDialog notes_dialog;
 
     ProjectDirtyStateManager dirty_state;
 
@@ -764,8 +768,10 @@ void Plater::priv::init()
     panel_sizer->Add(view3D, 1, wxEXPAND | wxALL, 0);
     panel_sizer->Add(preview, 1, wxEXPAND | wxALL, 0);
     panels = {view3D, preview};
-    // Add sidebar BEFORE the panel_sizer to position it on the left
-    hsizer->Add(sidebar, 0, wxEXPAND | wxLEFT | wxRIGHT, 0);
+
+    // Add sidebar with resize handle
+    hsizer->Add(sidebar, 0, wxEXPAND | wxLEFT, 0);
+
     hsizer->Add(panel_sizer, 1, wxEXPAND | wxALL, 0);
     q->SetSizer(hsizer);
 
@@ -849,6 +855,32 @@ void Plater::priv::init()
     // Preview events:
     preview->get_wxglcanvas()->Bind(EVT_GLCANVAS_QUESTION_MARK, [](SimpleEvent &) { wxGetApp().keyboard_shortcuts(); });
     preview->get_wxglcanvas()->Bind(EVT_GLCANVAS_UPDATE_BED_SHAPE, [this](SimpleEvent &) { q->set_bed_shape(); });
+    preview->get_wxglcanvas()->Bind(EVT_GLCANVAS_RIGHT_CLICK,
+                                    [this](RBtnEvent &evt)
+                                    {
+                                        // Show Notes menu on right-click in Preview (read-only view)
+                                        wxMenu menu;
+                                        append_menu_item(
+                                            &menu, wxID_ANY, _L("Notes"), _L("View project notes"),
+                                            [this](wxCommandEvent &) { this->notes_dialog.show(-1); }, "note", nullptr);
+                                        Vec2d mouse_position = evt.data.first;
+                                        wxPoint position(static_cast<int>(mouse_position.x()),
+                                                         static_cast<int>(mouse_position.y()));
+                                        // Use CustomMenu for consistent theming
+                                        auto customMenu = CustomMenu::FromWxMenu(&menu, preview->get_wxglcanvas());
+                                        if (customMenu)
+                                        {
+                                            customMenu->KeepAliveUntilDismissed(customMenu);
+                                            if (!customMenu->GetParent())
+                                                customMenu->Create(preview->get_wxglcanvas());
+                                            wxPoint screenPos = preview->get_wxglcanvas()->ClientToScreen(position);
+                                            customMenu->ShowAt(screenPos, preview->get_wxglcanvas());
+                                        }
+                                        else
+                                        {
+                                            preview->get_wxglcanvas()->PopupMenu(&menu, position);
+                                        }
+                                    });
     if (wxGetApp().is_editor())
     {
         preview->get_wxglcanvas()->Bind(EVT_GLCANVAS_TAB, [this](SimpleEvent &) { select_next_view_3D(); });
@@ -1428,12 +1460,15 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path> &input_
                 // Print settings and filament settings are expected to differ per-project,
                 // but printer profile changes should be explicit user choices.
                 const std::string current_printer = preset_bundle->printers.get_selected_preset_name();
+                const std::string current_physical_printer =
+                    preset_bundle->physical_printers.get_selected_printer_name();
                 const auto *project_printer_opt = config.option<ConfigOptionString>("printer_settings_id");
                 const std::string project_printer = project_printer_opt ? project_printer_opt->value : "";
 
+                bool should_apply_printer_from_project = true;
+
                 if (!project_printer.empty())
                 {
-                    bool should_apply_printer_from_project = true;
                     const DynamicPrintConfig &current_config = preset_bundle->printers.get_edited_preset().config;
 
                     if (project_printer != current_printer)
@@ -1518,6 +1553,15 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path> &input_
 
                 // For exporting from the 3mf we shouldn't check printer_presets for the containing information about "Print Host upload"
                 wxGetApp().load_current_presets(false);
+
+                // If user chose to keep current printer, restore the physical printer selection
+                // (load_current_presets may have changed it)
+                if (!should_apply_printer_from_project && !current_physical_printer.empty())
+                {
+                    preset_bundle->physical_printers.select_printer(current_physical_printer);
+                    // Refresh the printer webview tab if it exists
+                    wxGetApp().show_printer_webview_tab();
+                }
                 // Update filament colors for the MM-printer profile in the full config
                 // to avoid black (default) colors for Extruders in the ObjectList,
                 // when for extruder colors are used filament colors
@@ -2039,7 +2083,7 @@ wxString Plater::priv::get_export_file(GUI::FileType file_type)
                                                                    : from_path(output_file.parent_path())),
                      from_path(output_file.filename()), wildcard, wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
 
-    if (dlg.ShowModal() != wxID_OK)
+    if (ShowFileDialogModal(dlg) != wxID_OK)
         return wxEmptyString;
 
     wxString out_path = dlg.GetPath();
@@ -2100,6 +2144,10 @@ void Plater::priv::selection_changed()
 
     // forces a frame render to update the view (to avoid a missed update if, for example, the context menu appears)
     view3D->render();
+
+    // Sync notes dialog with selected object
+    int selected_obj_idx = get_selected_object_idx();
+    notes_dialog.on_selection_changed(selected_obj_idx);
 }
 
 void Plater::priv::object_list_changed()
@@ -2153,6 +2201,9 @@ void Plater::priv::object_list_changed()
         bool has_objects = s_multiple_beds.is_bed_occupied(s_multiple_beds.get_active_bed());
         wxGetApp().mainframe->m_modern_tabbar->EnableSliceButton(has_objects && !export_in_progress);
     }
+
+    // Update notes dialog when objects change
+    notes_dialog.on_objects_changed();
 }
 
 void Plater::priv::select_all()
@@ -3950,18 +4001,9 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
             wxGetApp().mainframe->m_modern_tabbar->UpdateSliceButtonState(true);
         }
 
-        // Use CallAfter to ensure this happens after all other UI updates
-        if (!sidebar->is_collapsed)
-        {
-            wxGetApp().CallAfter(
-                [this]()
-                {
-                    if (!sidebar->is_collapsed)
-                    {
-                        collapse_sidebar(true);
-                    }
-                });
-        }
+        // preFlight: Sidebar collapse removed - user controls sidebar visibility manually.
+        // The sidebar is hidden in Preview via set_current_panel() and restored
+        // when returning to the Prepare view if is_collapsed is false.
     }
 
     // This updates the "Slice now", "Export G-code", "Arrange" buttons status.
@@ -4116,9 +4158,31 @@ void Plater::priv::on_right_click(RBtnEvent &evt)
 #endif
         canvas.apply_retina_scale(mouse_position);
         canvas.set_popup_menu_position(mouse_position);
-        // Show popup menu on the canvas itself instead of the Plater to use canvas-relative coordinates
-        canvas.get_wxglcanvas()->PopupMenu(menu, position);
-        canvas.clear_popup_menu_position();
+
+        // Use CustomMenu for consistent theming
+        auto customMenu = CustomMenu::FromWxMenu(menu, canvas.get_wxglcanvas());
+        if (customMenu)
+        {
+            // Capture Plater pointer for dismiss callback (safer than capturing canvas reference)
+            Plater *plater = q;
+            customMenu->SetDismissCallback(
+                [plater]()
+                {
+                    if (plater && plater->canvas3D())
+                        plater->canvas3D()->clear_popup_menu_position();
+                });
+            customMenu->KeepAliveUntilDismissed(customMenu);
+            if (!customMenu->GetParent())
+                customMenu->Create(canvas.get_wxglcanvas());
+            wxPoint screenPos = canvas.get_wxglcanvas()->ClientToScreen(position);
+            customMenu->ShowAt(screenPos, canvas.get_wxglcanvas());
+        }
+        else
+        {
+            // Fallback to native menu
+            canvas.get_wxglcanvas()->PopupMenu(menu, position);
+            canvas.clear_popup_menu_position();
+        }
     }
 }
 
@@ -5531,6 +5595,7 @@ LoadProjectsDialog::LoadProjectsDialog(const std::vector<fs::path> &paths)
                 wxDEFAULT_DIALOG_STYLE)
 {
     SetFont(wxGetApp().normal_font());
+    int em = wxGetApp().em_unit();
 
     wxBoxSizer *main_sizer = new wxBoxSizer(wxVERTICAL);
     bool contains_projects = !paths.empty();
@@ -5540,12 +5605,12 @@ LoadProjectsDialog::LoadProjectsDialog(const std::vector<fs::path> &paths)
                                          get_wraped_wxString(
                                              _L("There are several files being loaded, including Project files.") +
                                              "\n" + _L("Select an action to apply to all files."))),
-                        0, wxEXPAND | wxALL, 10);
+                        0, wxEXPAND | wxALL, em);
     else
         main_sizer->Add(new wxStaticText(this, wxID_ANY,
                                          get_wraped_wxString(_L("There are several files being loaded.") + "\n" +
                                                              _L("Select an action to apply to all files."))),
-                        0, wxEXPAND | wxALL, 10);
+                        0, wxEXPAND | wxALL, em);
 
     wxStaticBox *action_stb = new wxStaticBox(this, wxID_ANY, _L("Action"));
     if (!wxOSX)
@@ -5586,7 +5651,7 @@ LoadProjectsDialog::LoadProjectsDialog(const std::vector<fs::path> &paths)
                       m_combo_config->Enable(false);
                   }
               });
-    stb_sizer->Add(btn, 0, wxEXPAND | wxTOP, 5);
+    stb_sizer->Add(btn, 0, wxEXPAND | wxTOP, em / 2);
     id++;
     // all new window
     if (instances_allowed)
@@ -5604,7 +5669,7 @@ LoadProjectsDialog::LoadProjectsDialog(const std::vector<fs::path> &paths)
                           m_combo_config->Enable(false);
                       }
                   });
-        stb_sizer->Add(btn, 0, wxEXPAND | wxTOP, 5);
+        stb_sizer->Add(btn, 0, wxEXPAND | wxTOP, em / 2);
     }
     id++; // IMPORTANT TO ALWAYS UP THE ID EVEN IF OPTION IS NOT ADDED!
     if (contains_projects)
@@ -5620,8 +5685,8 @@ LoadProjectsDialog::LoadProjectsDialog(const std::vector<fs::path> &paths)
                       m_combo_project->Enable(true);
                       m_combo_config->Enable(false);
                   });
-        stb_sizer->Add(btn, 0, wxEXPAND | wxTOP, 5);
-        stb_sizer->Add(m_combo_project, 0, wxEXPAND | wxTOP, 5);
+        stb_sizer->Add(btn, 0, wxEXPAND | wxTOP, em / 2);
+        stb_sizer->Add(m_combo_project, 0, wxEXPAND | wxTOP, em / 2);
         // one config
         id++;
         btn = new wxRadioButton(this, wxID_ANY, _L("Select only one file to load the configuration."),
@@ -5635,14 +5700,14 @@ LoadProjectsDialog::LoadProjectsDialog(const std::vector<fs::path> &paths)
                           m_combo_project->Enable(false);
                       m_combo_config->Enable(true);
                   });
-        stb_sizer->Add(btn, 0, wxEXPAND | wxTOP, 5);
-        stb_sizer->Add(m_combo_config, 0, wxEXPAND | wxTOP, 5);
+        stb_sizer->Add(btn, 0, wxEXPAND | wxTOP, em / 2);
+        stb_sizer->Add(m_combo_config, 0, wxEXPAND | wxTOP, em / 2);
     }
 
-    main_sizer->Add(stb_sizer, 1, wxEXPAND | wxRIGHT | wxLEFT, 10);
+    main_sizer->Add(stb_sizer, 1, wxEXPAND | wxRIGHT | wxLEFT, em);
     wxBoxSizer *bottom_sizer = new wxBoxSizer(wxHORIZONTAL);
-    bottom_sizer->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxLEFT, 5);
-    main_sizer->Add(bottom_sizer, 0, wxEXPAND | wxALL, 10);
+    bottom_sizer->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxLEFT, em / 2);
+    main_sizer->Add(bottom_sizer, 0, wxEXPAND | wxALL, em);
     SetSizer(main_sizer);
     main_sizer->SetSizeHints(this);
 
@@ -5889,6 +5954,7 @@ ProjectDropDialog::ProjectDropDialog(const std::string &filename)
                 wxDEFAULT_DIALOG_STYLE)
 {
     SetFont(wxGetApp().normal_font());
+    int em = wxGetApp().em_unit();
 
     bool single_instance_only = wxGetApp().app_config->get_bool("single_instance");
     wxBoxSizer *main_sizer = new wxBoxSizer(wxVERTICAL);
@@ -5903,7 +5969,7 @@ ProjectDropDialog::ProjectDropDialog(const std::string &filename)
     main_sizer->Add(new wxStaticText(this, wxID_ANY,
                                      get_wraped_wxString(_L("Select an action to apply to the file") + ": " +
                                                          from_u8(filename))),
-                    0, wxEXPAND | wxALL, 10);
+                    0, wxEXPAND | wxALL, em);
 
     m_action = std::clamp(std::stoi(wxGetApp().app_config->get("drop_project_action")),
                           static_cast<int>(LoadType::OpenProject),
@@ -5924,19 +5990,19 @@ ProjectDropDialog::ProjectDropDialog(const std::string &filename)
                                                id == 0 ? wxRB_GROUP : 0);
         btn->SetValue(id == m_action);
         btn->Bind(wxEVT_RADIOBUTTON, [this, id](wxCommandEvent &) { m_action = id; });
-        stb_sizer->Add(btn, 0, wxEXPAND | wxTOP, 5);
+        stb_sizer->Add(btn, 0, wxEXPAND | wxTOP, em / 2);
         id++;
     }
-    main_sizer->Add(stb_sizer, 1, wxEXPAND | wxRIGHT | wxLEFT, 10);
+    main_sizer->Add(stb_sizer, 1, wxEXPAND | wxRIGHT | wxLEFT, em);
 
     wxBoxSizer *bottom_sizer = new wxBoxSizer(wxHORIZONTAL);
     ::CheckBox *check = new ::CheckBox(this, _L("Don't show again"));
     check->Bind(wxEVT_CHECKBOX, [](wxCommandEvent &evt)
                 { wxGetApp().app_config->set("show_drop_project_dialog", evt.IsChecked() ? "0" : "1"); });
 
-    bottom_sizer->Add(check, 0, wxEXPAND | wxRIGHT, 5);
-    bottom_sizer->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxLEFT, 5);
-    main_sizer->Add(bottom_sizer, 0, wxEXPAND | wxALL, 10);
+    bottom_sizer->Add(check, 0, wxEXPAND | wxRIGHT, em / 2);
+    bottom_sizer->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxLEFT, em / 2);
+    main_sizer->Add(bottom_sizer, 0, wxEXPAND | wxALL, em);
 
     SetSizer(main_sizer);
     main_sizer->SetSizeHints(this);
@@ -6680,7 +6746,7 @@ std::optional<fs::path> Plater::get_output_path(const std::string &start_dir, co
     wxFileDialog dlg(this, _L("Save G-code file as:"), start_dir, from_path(default_output_file.filename()),
                      GUI::file_wildcards(FT_GCODE, ext), wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
 
-    if (dlg.ShowModal() != wxID_OK)
+    if (ShowFileDialogModal(dlg) != wxID_OK)
     {
         return std::nullopt;
     }
@@ -8503,6 +8569,21 @@ const NotificationManager *Plater::get_notification_manager() const
     return p->notification_manager.get();
 }
 
+void Plater::show_notes_dialog(int preselect_object_idx)
+{
+    p->notes_dialog.show(preselect_object_idx);
+}
+
+void Plater::toggle_notes_dialog()
+{
+    p->notes_dialog.toggle();
+}
+
+void Plater::render_notes_dialog()
+{
+    p->notes_dialog.render();
+}
+
 UserAccount *Plater::get_user_account()
 {
     return nullptr;
@@ -8676,24 +8757,60 @@ Plater::TakeSnapshot::TakeSnapshot(Plater *plater, const std::string &snapshot_n
 {
 }
 
-// Wrapper around wxWindow::PopupMenu to suppress error messages popping out while tracking the popup menu.
+// Wrapper around wxWindow::PopupMenu to use our custom themed popup menu.
+// Also suppresses error messages popping out while tracking the popup menu.
 bool Plater::PopupMenu(wxMenu *menu, const wxPoint &pos)
 {
-    // Don't want to wake up and trigger reslicing while tracking the pop-up menu.
-    SuppressBackgroundProcessingUpdate sbpu;
-    // When tracking a pop-up menu, postpone error messages from the slicing result.
-    m_tracking_popup_menu = true;
-    bool out = this->wxPanel::PopupMenu(menu, pos);
-    m_tracking_popup_menu = false;
-    if (!m_tracking_popup_menu_error_message.empty())
+    // Convert to CustomMenu for consistent theming
+    auto customMenu = CustomMenu::FromWxMenu(menu, this);
+    if (!customMenu)
     {
-        // Don't know whether the CallAfter is necessary, but it should not hurt.
-        // The menus likely sends out some commands, so we may be safer if the dialog is shown after the menu command is processed.
-        wxString message = std::move(m_tracking_popup_menu_error_message);
-        wxTheApp->CallAfter([message, this]() { show_error(this, message); });
-        m_tracking_popup_menu_error_message.clear();
+        // Fallback to native menu if conversion failed
+        SuppressBackgroundProcessingUpdate sbpu;
+        m_tracking_popup_menu = true;
+        bool out = this->wxPanel::PopupMenu(menu, pos);
+        m_tracking_popup_menu = false;
+        if (!m_tracking_popup_menu_error_message.empty())
+        {
+            wxString message = std::move(m_tracking_popup_menu_error_message);
+            wxTheApp->CallAfter([message, this]() { show_error(this, message); });
+            m_tracking_popup_menu_error_message.clear();
+        }
+        return out;
     }
-    return out;
+
+    // Use shared_ptr to keep SuppressBackgroundProcessingUpdate alive until menu closes
+    auto sbpu = std::make_shared<SuppressBackgroundProcessingUpdate>();
+
+    // When tracking a pop-up menu, postpone error messages from the slicing result
+    m_tracking_popup_menu = true;
+
+    // Set dismiss callback to clean up when menu closes
+    customMenu->SetDismissCallback(
+        [this, sbpu]()
+        {
+            // sbpu will be released when this callback is destroyed
+            m_tracking_popup_menu = false;
+            if (!m_tracking_popup_menu_error_message.empty())
+            {
+                wxString message = std::move(m_tracking_popup_menu_error_message);
+                wxTheApp->CallAfter([message, this]() { show_error(this, message); });
+                m_tracking_popup_menu_error_message.clear();
+            }
+        });
+
+    // Keep the menu alive until dismissed
+    customMenu->KeepAliveUntilDismissed(customMenu);
+
+    // Explicitly create the menu window (required before showing)
+    if (!customMenu->GetParent())
+        customMenu->Create(this);
+
+    // Convert position to screen coordinates and show the menu
+    wxPoint screenPos = ClientToScreen(pos);
+    customMenu->ShowAt(screenPos, this);
+
+    return true;
 }
 void Plater::bring_instance_forward()
 {

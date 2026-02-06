@@ -29,7 +29,9 @@ namespace GUI
 AboutDialogLogo::AboutDialogLogo(wxWindow *parent) : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize)
 {
     this->SetBackgroundColour(*wxWHITE);
-    this->logo = get_bmp_bundle("preFlight", 192)->GetBitmap(wxSize(192, 192));
+    // DPI-scaled logo size (192px at 100% DPI = ~19 * em)
+    int logo_size = wxGetApp().em_unit() * 19;
+    this->logo = get_bmp_bundle("preFlight", 192)->GetBitmap(wxSize(logo_size, logo_size));
     this->SetMinSize(this->logo.GetSize());
 
     this->Bind(wxEVT_PAINT, &AboutDialogLogo::onRepaint, this);
@@ -64,12 +66,12 @@ CopyrightsDialog::CopyrightsDialog()
     this->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
 #endif
 
+    int em = em_unit();
     auto sizer = new wxBoxSizer(wxVERTICAL);
 
     fill_entries();
 
-    m_html = new wxHtmlWindow(this, wxID_ANY, wxDefaultPosition, wxSize(40 * em_unit(), 20 * em_unit()),
-                              wxHW_SCROLLBAR_AUTO);
+    m_html = new wxHtmlWindow(this, wxID_ANY, wxDefaultPosition, wxSize(40 * em, 20 * em), wxHW_SCROLLBAR_AUTO);
 
     wxFont font = this->GetFont(); // get_default_font(this);
     const int fs = font.GetPointSize();
@@ -77,10 +79,10 @@ CopyrightsDialog::CopyrightsDialog()
     int size[] = {fs, fs, fs, fs, fs2, fs2, fs2};
 
     m_html->SetFonts(font.GetFaceName(), font.GetFaceName(), size);
-    m_html->SetBorders(2);
+    m_html->SetBorders(em / 5); // DPI-scaled (2px at 100%)
     m_html->SetPage(get_html_text());
 
-    sizer->Add(m_html, 1, wxEXPAND | wxALL, 15);
+    sizer->Add(m_html, 1, wxEXPAND | wxALL, (em * 15) / 10);
     m_html->Bind(wxEVT_HTML_LINK_CLICKED, &CopyrightsDialog::onLinkClicked, this);
 
     wxStdDialogButtonSizer *buttons = this->CreateStdDialogButtonSizer(wxCLOSE);
@@ -88,7 +90,7 @@ CopyrightsDialog::CopyrightsDialog()
     wxGetApp().UpdateDlgDarkUI(this, true);
     this->SetEscapeId(wxID_CLOSE);
     this->Bind(wxEVT_BUTTON, &CopyrightsDialog::onCloseDialog, this, wxID_CLOSE);
-    sizer->Add(buttons, 0, wxEXPAND | wxRIGHT | wxBOTTOM, 3);
+    sizer->Add(buttons, 0, wxEXPAND | wxRIGHT | wxBOTTOM, em / 3);
 
     SetSizer(sizer);
     sizer->SetSizeHints(this);
@@ -216,20 +218,21 @@ AboutDialog::AboutDialog()
                 wxDefaultPosition, wxDefaultSize, /*wxCAPTION*/ wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
 {
     SetFont(wxGetApp().normal_font());
+    int em = wxGetApp().em_unit();
 
     wxColour bgr_clr = wxGetApp().get_window_default_clr(); //wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
     SetBackgroundColour(bgr_clr);
     wxBoxSizer *hsizer = new wxBoxSizer(wxHORIZONTAL);
 
     auto main_sizer = new wxBoxSizer(wxVERTICAL);
-    main_sizer->Add(hsizer, 0, wxEXPAND | wxALL, 20);
+    main_sizer->Add(hsizer, 0, wxEXPAND | wxALL, em * 2);
 
     // logo
     m_logo = new wxStaticBitmap(this, wxID_ANY, *get_bmp_bundle(wxGetApp().logo_name(), 192));
     hsizer->Add(m_logo, 1, wxALIGN_CENTER_VERTICAL);
 
     wxBoxSizer *vsizer = new wxBoxSizer(wxVERTICAL);
-    hsizer->Add(vsizer, 2, wxEXPAND | wxLEFT, 20);
+    hsizer->Add(vsizer, 2, wxEXPAND | wxLEFT, em * 2);
 
     // title
     {
@@ -240,7 +243,7 @@ AboutDialog::AboutDialog()
         title_font.SetFamily(wxFONTFAMILY_ROMAN);
         title_font.SetPointSize(int(2.5 * title_font.GetPointSize())); //title_font.SetPointSize(24);
         title->SetFont(title_font);
-        vsizer->Add(title, 0, wxALIGN_LEFT | wxTOP, 10);
+        vsizer->Add(title, 0, wxALIGN_LEFT | wxTOP, em);
     }
 
     // version
@@ -249,13 +252,10 @@ AboutDialog::AboutDialog()
         wxStaticText *version = new wxStaticText(this, wxID_ANY, version_string.c_str(), wxDefaultPosition,
                                                  wxDefaultSize);
         wxFont version_font = GetFont();
-#ifdef __WXMSW__
+        // Use relative font sizing for DPI awareness
         version_font.SetPointSize(version_font.GetPointSize() - 1);
-#else
-        version_font.SetPointSize(11);
-#endif
         version->SetFont(version_font);
-        vsizer->Add(version, 0, wxALIGN_LEFT | wxBOTTOM, 10);
+        vsizer->Add(version, 0, wxALIGN_LEFT | wxBOTTOM, em);
     }
 
     // text
@@ -270,13 +270,13 @@ AboutDialog::AboutDialog()
         const int fs = font.GetPointSize() - 1;
         int size[] = {fs, fs, fs, fs, fs, fs, fs};
         m_html->SetFonts(font.GetFaceName(), font.GetFaceName(), size);
-        m_html->SetBorders(2);
+        m_html->SetBorders(em / 5); // DPI-scaled (2px at 100%)
         const wxString copyright_str = _L("Copyright");
         // TRN AboutDialog: "Slic3r %1% GNU Affero General Public License"
         const wxString is_lecensed_str = _L("is licensed under the");
         const wxString license_str = _L("GNU AGPL v3");
         const wxString based_on_str = _L(
-            "preFlight carries forward the legacy of Slic3r by Alessandro Ranellucci and the open-source community.");
+            "preFlight carries forward the legacy of Slic3r by Alessandro Ranellucci, PrusaSlicer, and the open-source community.");
         const auto text = format_wxstr(
             "<html>"
             "<body bgcolor= %1% link= %2%>"
@@ -285,7 +285,7 @@ AboutDialog::AboutDialog()
             "%4% &copy; 2025+ oozeBot, LLC. <br />"
             "%4% Based on original work by the open-source community. <br />"
             "%5% &copy; 2011-2018 Alessandro Ranellucci. <br />"
-            "<a href=\"http://ooze.bot/preFlight\">preFlight</a> %6% "
+            "<a href=\"https://github.com/oozebot/preFlight\">preFlight</a> %6% "
             "<a href=\"http://www.gnu.org/licenses/agpl-3.0.html\">%7%</a>."
             "<br /><br />"
             "%8%"
@@ -301,7 +301,7 @@ AboutDialog::AboutDialog()
             bgr_clr_str, text_clr_str, text_clr_str, copyright_str, copyright_str, is_lecensed_str, license_str,
             based_on_str);
         m_html->SetPage(text);
-        vsizer->Add(m_html, 1, wxEXPAND | wxBOTTOM, 10);
+        vsizer->Add(m_html, 1, wxEXPAND | wxBOTTOM, em);
         m_html->Bind(wxEVT_HTML_LINK_CLICKED, &AboutDialog::onLinkClicked, this);
     }
 
@@ -310,13 +310,13 @@ AboutDialog::AboutDialog()
 
     m_copy_rights_btn_id = NewControlId();
     auto copy_rights_btn = new wxButton(this, m_copy_rights_btn_id, _L("Portions copyright") + dots);
-    buttons->Insert(0, copy_rights_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 5);
+    buttons->Insert(0, copy_rights_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, em / 2);
     copy_rights_btn->Bind(wxEVT_BUTTON, &AboutDialog::onCopyrightBtn, this);
     wxGetApp().SetWindowVariantForButton(copy_rights_btn);
 
     m_copy_version_btn_id = NewControlId();
     auto copy_version_btn = new wxButton(this, m_copy_version_btn_id, _L("Copy Version Info"));
-    buttons->Insert(1, copy_version_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, 5);
+    buttons->Insert(1, copy_version_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, em / 2);
     copy_version_btn->Bind(wxEVT_BUTTON, &AboutDialog::onCopyToClipboard, this);
     wxGetApp().SetWindowVariantForButton(copy_version_btn);
 
@@ -324,7 +324,7 @@ AboutDialog::AboutDialog()
 
     this->SetEscapeId(wxID_CLOSE);
     this->Bind(wxEVT_BUTTON, &AboutDialog::onCloseDialog, this, wxID_CLOSE);
-    vsizer->Add(buttons, 0, wxEXPAND | wxRIGHT | wxBOTTOM, 3);
+    vsizer->Add(buttons, 0, wxEXPAND | wxRIGHT | wxBOTTOM, em / 3);
 
     SetSizer(main_sizer);
     main_sizer->SetSizeHints(this);
@@ -333,8 +333,7 @@ AboutDialog::AboutDialog()
 
 void AboutDialog::on_dpi_changed(const wxRect &suggested_rect)
 {
-    //    m_logo_bitmap.msw_rescale();
-    //    m_logo->SetBitmap(m_logo_bitmap.bmp());
+    // Note: Logo uses AboutDialogLogo with get_bmp_bundle() which auto-scales
 
     const wxFont &font = GetFont();
     const int fs = font.GetPointSize() - 1;

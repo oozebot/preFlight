@@ -120,7 +120,21 @@ void StateHandler::changed(wxEvent &event)
         {
             if (event.GetEventType() == events[i])
             {
-                states_ ^= (1 << i);
+                // For EVT_ENABLE_CHANGED (i==0): SET/CLEAR based on actual window state
+                // instead of XOR toggle. XOR is fragile - if the event fires when the
+                // StateHandler state and wxWindow state are out of sync (e.g., parent was
+                // temporarily disabled), the toggle goes wrong and gets stuck.
+                if (i == 0 && owner_)
+                {
+                    if (owner_->IsThisEnabled())
+                        states_ |= (1 << i);
+                    else
+                        states_ &= ~(1 << i);
+                }
+                else
+                {
+                    states_ ^= (1 << i);
+                }
                 break;
             }
         }

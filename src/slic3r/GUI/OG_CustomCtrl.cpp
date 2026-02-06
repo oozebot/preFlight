@@ -6,6 +6,7 @@
 #include "OG_CustomCtrl.hpp"
 #include "OptionsGroup.hpp"
 #include "Plater.hpp"
+#include "Sidebar.hpp"
 #include "GUI_App.hpp"
 #include "MsgDialog.hpp"
 #include "libslic3r/AppConfig.hpp"
@@ -48,10 +49,21 @@ OG_CustomCtrl::OG_CustomCtrl(wxWindow *parent, OptionsGroup *og, const wxPoint &
     m_v_gap = lround(1.0 * m_em_unit);
     m_h_gap = lround(0.2 * m_em_unit);
 
-    m_bmp_mode_sz = get_bitmap_size(get_bmp_bundle("mode", wxOSX ? 10 : 12), this);
+    m_bmp_mode_sz = get_bitmap_size(get_bmp_bundle("mode", mode_icon_px_size()), this);
     m_bmp_blinking_sz = get_bitmap_size(get_bmp_bundle("search_blink"), this);
 
     init_ctrl_lines(); // from og.lines()
+
+    // Enable row checkboxes if this optgroup has sidebar checkbox enabled
+    if (opt_group->is_sidebar_checkbox_enabled())
+    {
+        for (CtrlLine &line : ctrl_lines)
+        {
+            // Only enable for lines that have options (not separators, not widget-only lines)
+            if (!line.og_line.get_options().empty())
+                line.draw_sidebar_checkbox = true;
+        }
+    }
 
     this->Bind(wxEVT_PAINT, &OG_CustomCtrl::OnPaint, this);
     this->Bind(wxEVT_MOTION, &OG_CustomCtrl::OnMotion, this);
@@ -144,7 +156,18 @@ wxPoint OG_CustomCtrl::get_pos(const Line &line, Field *field_in /* = nullptr*/)
     {
         if (&ctrl_line.og_line == &line)
         {
-            h_pos = m_bmp_mode_sz.GetWidth() + m_h_gap;
+            // Use checkbox width if sidebar checkbox is enabled, otherwise mode bitmap width
+            if (ctrl_line.draw_sidebar_checkbox)
+            {
+                const wxCoord x_indent = lround(1.2 * m_em_unit);
+                // DPI-scaled checkbox width (1.6 * em_unit)
+                const int checkbox_width = lround(1.6 * m_em_unit);
+                h_pos = x_indent + checkbox_width + m_h_gap;
+            }
+            else
+            {
+                h_pos = m_bmp_mode_sz.GetWidth() + m_h_gap;
+            }
             if (line.near_label_widget_win)
             {
                 wxSize near_label_widget_sz = line.near_label_widget_win->GetSize();
@@ -271,6 +294,14 @@ void OG_CustomCtrl::OnMotion(wxMouseEvent &event)
 
     for (CtrlLine &line : ctrl_lines)
     {
+        // Check sidebar visibility checkbox tooltip
+        if (line.draw_sidebar_checkbox && !line.rect_sidebar_checkbox.IsEmpty() &&
+            is_point_in_rect(pos, line.rect_sidebar_checkbox))
+        {
+            tooltip = _L("Show this item in the sidebar");
+            break;
+        }
+
         line.is_focused = is_point_in_rect(pos, line.rect_label);
         if (line.is_focused)
         {
@@ -327,8 +358,22 @@ void OG_CustomCtrl::OnLeftDown(wxMouseEvent &event)
 {
     const wxPoint pos = event.GetLogicalPosition(wxClientDC(this));
 
-    for (const CtrlLine &line : ctrl_lines)
+    for (CtrlLine &line : ctrl_lines)
     {
+        // Check sidebar visibility checkbox click
+        if (line.draw_sidebar_checkbox && !line.rect_sidebar_checkbox.IsEmpty() &&
+            is_point_in_rect(pos, line.rect_sidebar_checkbox))
+        {
+            // Toggle visibility
+            line.set_sidebar_visible(!line.is_sidebar_visible());
+            // Notify optgroup to update section checkbox
+            on_sidebar_visibility_changed();
+            // Redraw
+            Refresh();
+            event.Skip();
+            return;
+        }
+
         if (line.launch_browser())
             return;
 
@@ -465,7 +510,7 @@ void OG_CustomCtrl::msw_rescale()
     m_v_gap = lround(1.0 * m_em_unit);
     m_h_gap = lround(0.2 * m_em_unit);
 
-    m_bmp_mode_sz = get_bitmap_size(get_bmp_bundle("mode", wxOSX ? 10 : 12), this);
+    m_bmp_mode_sz = get_bitmap_size(get_bmp_bundle("mode", mode_icon_px_size()), this);
     m_bmp_blinking_sz = get_bitmap_size(get_bmp_bundle("search_blink"), this);
 
     init_max_win_width();
@@ -484,6 +529,33 @@ void OG_CustomCtrl::msw_rescale()
 
 void OG_CustomCtrl::sys_color_changed() {}
 
+void OG_CustomCtrl::enable_sidebar_checkboxes(bool enable)
+{
+    for (CtrlLine &line : ctrl_lines)
+    {
+        line.draw_sidebar_checkbox = enable;
+        if (enable)
+            line.draw_mode_bitmap = true; // Ensure mode bitmap area is used for checkbox
+    }
+    Refresh();
+}
+
+void OG_CustomCtrl::on_sidebar_visibility_changed()
+{
+    // Delegate to OptionsGroup to update section checkbox
+    if (opt_group)
+        opt_group->update_section_checkbox_from_rows();
+
+    // Trigger sidebar rebuild to reflect visibility changes
+    // Use CallAfter to avoid potential issues during paint/event handling
+    wxTheApp->CallAfter(
+        []()
+        {
+            if (wxGetApp().plater())
+                wxGetApp().sidebar().rebuild_settings_panels();
+        });
+}
+
 OG_CustomCtrl::CtrlLine::CtrlLine(wxCoord height, OG_CustomCtrl *ctrl, const Line &og_line,
                                   bool draw_just_act_buttons /* = false*/, bool draw_mode_bitmap /* = true*/)
     : height(height)
@@ -497,6 +569,35 @@ OG_CustomCtrl::CtrlLine::CtrlLine(wxCoord height, OG_CustomCtrl *ctrl, const Lin
         rects_undo_icon.emplace_back(wxRect());
         rects_undo_to_sys_icon.emplace_back(wxRect());
     }
+}
+
+std::string OG_CustomCtrl::CtrlLine::get_first_option_key() const
+{
+    const std::vector<Option> &options = og_line.get_options();
+    if (options.empty())
+        return "";
+    return options.front().opt_id;
+}
+
+bool OG_CustomCtrl::CtrlLine::is_sidebar_visible() const
+{
+    std::string opt_key = get_first_option_key();
+    if (opt_key.empty())
+        return true;
+    // Default to visible if not set
+    return get_app_config()->get("sidebar_visibility", opt_key) != "0";
+}
+
+void OG_CustomCtrl::CtrlLine::set_sidebar_visible(bool visible)
+{
+    const std::vector<Option> &options = og_line.get_options();
+    if (options.empty())
+        return;
+    // Set visibility for ALL options on this line (handles multi-option rows like "Solid layers")
+    for (const auto &opt : options)
+        get_app_config()->set("sidebar_visibility", opt.opt_id, visible ? "1" : "0");
+    // Save immediately so settings persist even if app crashes
+    get_app_config()->save();
 }
 
 int OG_CustomCtrl::CtrlLine::get_max_win_width()
@@ -626,7 +727,21 @@ void OG_CustomCtrl::CtrlLine::render(wxDC &dc, wxCoord v_pos)
         return;
     }
 
-    wxCoord h_pos = draw_mode_bmp(dc, v_pos);
+    // Draw sidebar visibility checkbox if enabled (completely independent of mode bitmap)
+    wxCoord checkbox_width = draw_sidebar_visibility_checkbox(dc, v_pos);
+
+    // Draw mode bitmap (or just calculate position) - only draw if no checkbox
+    wxCoord h_pos;
+    if (checkbox_width > 0)
+    {
+        // Checkbox was drawn, use its width for layout
+        h_pos = checkbox_width;
+    }
+    else
+    {
+        // No checkbox, draw mode bitmap as usual
+        h_pos = draw_mode_bmp(dc, v_pos);
+    }
 
     const std::vector<Option> &option_set = og_line.get_options();
     if (option_set.empty())
@@ -763,8 +878,9 @@ wxCoord OG_CustomCtrl::CtrlLine::draw_mode_bmp(wxDC &dc, wxCoord v_pos)
     if (og_line.get_options().empty())
         return ctrl->m_h_gap;
 
+    // Original mode bitmap drawing - unchanged regardless of sidebar checkbox state
     ConfigOptionMode mode = og_line.get_options()[0].opt.mode;
-    int pix_cnt = wxOSX ? 10 : 12;
+    int pix_cnt = mode_icon_px_size();
     wxBitmapBundle *bmp = get_bmp_bundle("mode", pix_cnt, pix_cnt, wxGetApp().get_mode_btn_color(mode));
     wxCoord y_draw = v_pos + lround((height - get_bitmap_size(bmp, ctrl).GetHeight()) / 2);
 
@@ -772,6 +888,54 @@ wxCoord OG_CustomCtrl::CtrlLine::draw_mode_bmp(wxDC &dc, wxCoord v_pos)
         dc.DrawBitmap(bmp->GetBitmapFor(ctrl), 0, y_draw);
 
     return get_bitmap_size(bmp, ctrl).GetWidth() + ctrl->m_h_gap;
+}
+
+wxCoord OG_CustomCtrl::CtrlLine::draw_sidebar_visibility_checkbox(wxDC &dc, wxCoord v_pos)
+{
+    // Reset checkbox rect
+    rect_sidebar_checkbox = wxRect();
+
+    if (!draw_sidebar_checkbox)
+        return 0;
+
+    if (og_line.get_options().empty())
+        return 0;
+
+    if (og_line.get_options().front().opt.gui_type == ConfigOptionDef::GUIType::legend)
+        return 0;
+
+    // Initialize visibility in AppConfig if not set (first time checkbox is shown)
+    // This allows is_any_category_visible() to distinguish between "no checkbox" and "has checkbox, default visible"
+    const std::vector<Option> &options = og_line.get_options();
+    for (const auto &opt : options)
+    {
+        std::string visibility = get_app_config()->get("sidebar_visibility", opt.opt_id);
+        if (visibility.empty())
+        {
+            // First time this checkbox is rendered - initialize to visible
+            get_app_config()->set("sidebar_visibility", opt.opt_id, "1");
+        }
+    }
+
+    // Indent row checkboxes to show hierarchy under section checkbox
+    const wxCoord x_indent = lround(1.2 * ctrl->m_em_unit);
+
+    // Use same checkbox bitmaps as ::CheckBox widget - 16px base, wxBitmapBundle handles DPI scaling
+    const int pix_cnt = 16;
+    bool checked = is_sidebar_visible();
+    wxBitmapBundle *bmp = get_bmp_bundle(checked ? "check_on" : "check_off", pix_cnt);
+    wxSize bmp_size = get_bitmap_size(bmp, ctrl);
+
+    wxCoord y_draw = v_pos + lround((height - bmp_size.GetHeight()) / 2);
+
+    // Store rect for click detection (includes indent)
+    rect_sidebar_checkbox = wxRect(x_indent, y_draw, bmp_size.GetWidth(), bmp_size.GetHeight());
+
+    // Draw the checkbox bitmap with indent
+    dc.DrawBitmap(bmp->GetBitmapFor(ctrl), x_indent, y_draw);
+
+    // Return the width consumed by the checkbox (including indent)
+    return x_indent + bmp_size.GetWidth() + ctrl->m_h_gap;
 }
 
 wxCoord OG_CustomCtrl::CtrlLine::draw_text(wxDC &dc, wxPoint pos, const wxString &text, const wxColour *color,
@@ -862,6 +1026,7 @@ wxPoint OG_CustomCtrl::CtrlLine::draw_act_bmps(wxDC &dc, wxPoint pos, const wxBi
     rects_undo_to_sys_icon[rect_id] = wxRect(h_pos, v_pos, bmp_dim, bmp_dim);
 
     h_pos += bmp_dim + ctrl->m_h_gap;
+
     dc.DrawBitmap(bmp_undo.GetBitmapFor(ctrl), h_pos, v_pos);
 
     bmp_dim = get_bitmap_size(&bmp_undo, ctrl).GetWidth();

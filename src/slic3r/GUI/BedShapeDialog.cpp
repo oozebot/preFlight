@@ -181,7 +181,7 @@ void BedShapeDialog::build_dialog(const ConfigOptionPoints &default_pt, const Co
     wxStdDialogButtonSizer *buttons = CreateStdDialogButtonSizer(wxOK | wxCANCEL);
     wxGetApp().SetWindowVariantForButton(buttons->GetAffirmativeButton());
     wxGetApp().SetWindowVariantForButton(buttons->GetCancelButton());
-    main_sizer->Add(buttons, 0, wxALIGN_CENTER_HORIZONTAL | wxBOTTOM, 10);
+    main_sizer->Add(buttons, 0, wxALIGN_CENTER_HORIZONTAL | wxBOTTOM, wxGetApp().em_unit());
 
     wxGetApp().UpdateDlgDarkUI(this, true);
 
@@ -276,8 +276,8 @@ void BedShapePanel::build_panel(const ConfigOptionPoints &default_pt, const Conf
     left_sizer->Add(model_panel, 1, wxEXPAND);
 
     wxSizer *top_sizer = new wxBoxSizer(wxHORIZONTAL);
-    top_sizer->Add(left_sizer, 0, wxEXPAND | wxLEFT | wxTOP | wxBOTTOM, 10);
-    top_sizer->Add(m_canvas, 1, wxEXPAND | wxALL, 10);
+    top_sizer->Add(left_sizer, 0, wxEXPAND | wxLEFT | wxTOP | wxBOTTOM, wxGetApp().em_unit());
+    top_sizer->Add(m_canvas, 1, wxEXPAND | wxALL, wxGetApp().em_unit());
 
     SetSizerAndFit(top_sizer);
 
@@ -345,7 +345,7 @@ wxPanel *BedShapePanel::init_texture_panel()
         wxSizer *sizer = new wxBoxSizer(wxVERTICAL);
         sizer->Add(filename_sizer, 1, wxEXPAND);
         sizer->Add(load_sizer, 1, wxEXPAND);
-        sizer->Add(remove_sizer, 1, wxEXPAND | wxTOP, 2);
+        sizer->Add(remove_sizer, 1, wxEXPAND | wxTOP, wxGetApp().em_unit() / 5);
 
         load_btn->Bind(wxEVT_BUTTON, ([this](wxCommandEvent &e) { load_texture(); }));
         remove_btn->Bind(wxEVT_BUTTON, (
@@ -428,7 +428,7 @@ wxPanel *BedShapePanel::init_model_panel()
         wxSizer *sizer = new wxBoxSizer(wxVERTICAL);
         sizer->Add(filename_sizer, 1, wxEXPAND);
         sizer->Add(load_sizer, 1, wxEXPAND);
-        sizer->Add(remove_sizer, 1, wxEXPAND | wxTOP, 2);
+        sizer->Add(remove_sizer, 1, wxEXPAND | wxTOP, wxGetApp().em_unit() / 5);
 
         load_btn->Bind(wxEVT_BUTTON, ([this](wxCommandEvent &e) { load_model(); }));
 

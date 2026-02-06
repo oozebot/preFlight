@@ -6,7 +6,13 @@
 #define slic3r_GUI_SpinInput_hpp_
 
 #include <wx/textctrl.h>
+#include <wx/brush.h>
 #include "StaticBox.hpp"
+#include "ThemedTextCtrl.hpp"
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 class Button;
 
@@ -16,10 +22,13 @@ protected:
     wxSize labelSize;
     StateColor label_color;
     StateColor text_color;
-    wxTextCtrl *text_ctrl{nullptr};
+    Slic3r::GUI::ThemedTextCtrl *text_ctrl{nullptr};
     Button *button_inc{nullptr};
     Button *button_dec{nullptr};
     wxTimer timer;
+#ifdef _WIN32
+    HBRUSH m_hEditBgBrush = NULL; // Native GDI brush for WM_CTLCOLOREDIT response
+#endif
 
     static const int SpinInputWidth = 200;
     static const int SpinInputHeight = 50;
@@ -32,6 +41,7 @@ protected:
 
 public:
     SpinInputBase();
+    virtual ~SpinInputBase();
 
     void SetCornerRadius(double radius);
 
@@ -45,7 +55,14 @@ public:
 
     void Rescale();
 
+    void msw_rescale();
+
     virtual bool Enable(bool enable = true) wxOVERRIDE;
+
+#ifdef _WIN32
+    // Handle WM_CTLCOLOREDIT from child ThemedTextCtrl
+    virtual WXLRESULT MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam) wxOVERRIDE;
+#endif
 
     wxTextCtrl *GetText() { return text_ctrl; }
 

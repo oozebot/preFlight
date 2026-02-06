@@ -10,6 +10,28 @@
 
 #include "slic3r/GUI/GUI_App.hpp"
 
+// DPI scaling helper functions
+static int GetScaledSmallPadding()
+{
+    return (Slic3r::GUI::wxGetApp().em_unit() * 4) / 10; // 4px at 100% DPI
+}
+
+static int GetScaledSmallMargin()
+{
+    return Slic3r::GUI::wxGetApp().em_unit() / 2; // 5px at 100% DPI
+}
+
+static int GetScaledHeightPadding()
+{
+    return (Slic3r::GUI::wxGetApp().em_unit() * 8) / 10; // 8px at 100% DPI
+}
+
+#ifdef _WIN32
+#include <windows.h>
+#include <uxtheme.h>
+#pragma comment(lib, "uxtheme.lib")
+#endif
+
 BEGIN_EVENT_TABLE(TextInput, wxPanel)
 
 EVT_PAINT(TextInput::paintEvent)
@@ -33,6 +55,17 @@ TextInput::TextInput()
     border_width = 1;
 }
 
+TextInput::~TextInput()
+{
+#ifdef _WIN32
+    if (m_hEditBgBrush != NULL)
+    {
+        DeleteObject(m_hEditBgBrush);
+        m_hEditBgBrush = NULL;
+    }
+#endif
+}
+
 TextInput::TextInput(wxWindow *parent, wxString text, wxString label, wxString icon, const wxPoint &pos,
                      const wxSize &size, long style)
     : TextInput()
@@ -49,17 +82,38 @@ void TextInput::Create(wxWindow *parent, wxString text, wxString label, wxString
 
     state_handler.attach({&label_color, &text_color});
     state_handler.update_binds();
-
-    text_ctrl = new wxTextCtrl(this, wxID_ANY, text, {4, 4}, size, style | wxBORDER_NONE);
+    const int small_padding = GetScaledSmallPadding();
+    text_ctrl = new Slic3r::GUI::ThemedTextCtrl(this, wxID_ANY, text, {small_padding, small_padding}, size,
+                                                style | wxBORDER_NONE);
 #ifdef __WXOSX__
     text_ctrl->OSXDisableAllSmartSubstitutions();
 #endif // __WXOSX__
-    text_ctrl->SetInitialSize(text_ctrl->GetBestSize());
-    if (parent)
+#ifdef _WIN32
+    // For multiline text controls (with scrollbars), use DarkMode_Explorer for themed scrollbars
+    // For single-line controls, disable visual styles so WM_CTLCOLOREDIT colors are respected
+    if (style & wxTE_MULTILINE)
     {
-        SetBackgroundColour(parent->GetBackgroundColour());
-        SetForegroundColour(parent->GetForegroundColour());
+        // Apply dark explorer theme for proper scrollbar theming
+        if (Slic3r::GUI::wxGetApp().dark_mode())
+            SetWindowTheme((HWND) text_ctrl->GetHWND(), L"DarkMode_Explorer", nullptr);
+        else
+            SetWindowTheme((HWND) text_ctrl->GetHWND(), L"Explorer", nullptr);
     }
+    else
+    {
+        // Single-line: disable visual styles for custom background color support
+        SetWindowTheme((HWND) text_ctrl->GetHWND(), L"", L"");
+    }
+#endif
+    text_ctrl->SetInitialSize(text_ctrl->GetBestSize());
+    // Use UIColors to ensure correct theme colors on startup
+    bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
+    wxColour bg_color = is_dark ? UIColors::InputBackgroundDark() : UIColors::InputBackgroundLight();
+    wxColour fg_color = is_dark ? UIColors::InputForegroundDark() : UIColors::InputForegroundLight();
+    SetBackgroundColour(bg_color);
+    SetForegroundColour(fg_color);
+    // Set themed colors on the internal text control - these will persist through theme changes
+    text_ctrl->SetThemedColors(bg_color, fg_color);
     state_handler.attach_child(text_ctrl);
 
     text_ctrl->Bind(wxEVT_KILL_FOCUS,
@@ -109,9 +163,10 @@ void TextInput::SetLabel(const wxString &label)
 
 bool TextInput::SetBackgroundColour(const wxColour &colour)
 {
-    const int clr_background_disabled = Slic3r::GUI::wxGetApp().dark_mode() ? clr_background_disabled_dark
-                                                                            : clr_background_disabled_light;
-    const StateColor clr_state(std::make_pair(clr_background_disabled, (int) StateColor::Disabled),
+    // Use UIColors for disabled background - NOT legacy constants!
+    bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
+    wxColour disabled_bg = is_dark ? UIColors::InputBackgroundDisabledDark() : UIColors::InputBackgroundDisabledLight();
+    const StateColor clr_state(std::make_pair(disabled_bg, (int) StateColor::Disabled),
                                std::make_pair(clr_background_focused, (int) StateColor::Checked),
                                std::make_pair(colour, (int) StateColor::Focused),
                                std::make_pair(colour, (int) StateColor::Normal));
@@ -125,9 +180,10 @@ bool TextInput::SetBackgroundColour(const wxColour &colour)
 
 bool TextInput::SetForegroundColour(const wxColour &colour)
 {
-    const int disabled_color = Slic3r::GUI::wxGetApp().dark_mode() ? clr_foreground_disabled_dark
-                                                                   : clr_foreground_disabled_light;
-    const StateColor clr_state(std::make_pair(disabled_color, (int) StateColor::Disabled),
+    // Use UIColors for disabled foreground - NOT legacy constants!
+    bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
+    wxColour disabled_fg = is_dark ? UIColors::InputForegroundDisabledDark() : UIColors::InputForegroundDisabledLight();
+    const StateColor clr_state(std::make_pair(disabled_fg, (int) StateColor::Disabled),
                                std::make_pair(colour, (int) StateColor::Normal));
 
     SetLabelColor(clr_state);
@@ -161,13 +217,41 @@ void TextInput::SetSelection(long from, long to)
 
 void TextInput::SysColorsChanged()
 {
-    if (auto parent = this->GetParent())
+    bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
+
+    // Use UIColors namespace for centralized color management
+    wxColour bg_normal = is_dark ? UIColors::InputBackgroundDark() : UIColors::InputBackgroundLight();
+    wxColour fg_normal = is_dark ? UIColors::InputForegroundDark() : UIColors::InputForegroundLight();
+
+#ifdef _WIN32
+    // Invalidate the cached brush so it gets recreated with new color on next WM_CTLCOLOR
+    if (m_hEditBgBrush != NULL)
     {
-        SetBackgroundColour(parent->GetBackgroundColour());
-        SetForegroundColour(parent->GetForegroundColour());
-        if (this->drop_down_icon.bmp().IsOk())
-            this->drop_down_icon.sys_color_changed();
+        DeleteObject(m_hEditBgBrush);
+        m_hEditBgBrush = NULL;
     }
+#endif
+
+    // Set wxWindow background (needed for proper rendering)
+    SetBackgroundColour(bg_normal);
+    SetForegroundColour(fg_normal);
+
+    // Apply themed colors to internal text control
+    if (text_ctrl)
+    {
+        text_ctrl->SetThemedColors(bg_normal, fg_normal);
+#ifdef _WIN32
+        // DO NOT call SetDarkExplorerTheme on edit controls!
+        // Edit controls have visual styles disabled at creation via SetWindowTheme(hwnd, L"", L"")
+        // which allows WM_CTLCOLOREDIT brush returns to work. Applying DarkMode_Explorer
+        // would re-enable visual styles and cause Windows to ignore our brushes.
+        // Just force a repaint to apply the new colors via WM_CTLCOLOREDIT.
+        RedrawWindow((HWND) text_ctrl->GetHWND(), NULL, NULL, RDW_ERASE | RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN);
+#endif
+    }
+
+    if (this->drop_down_icon.bmp().IsOk())
+        this->drop_down_icon.sys_color_changed();
 }
 
 void TextInput::SetIcon(const wxBitmapBundle &icon_in)
@@ -221,9 +305,14 @@ bool TextInput::SetFont(const wxFont &font)
 bool TextInput::Enable(bool enable)
 {
     // On Windows, disabled native edit controls ignore SetBackgroundColour and use system colors.
-    // Instead of disabling the text_ctrl, we make it read-only and style it to look disabled.
+    // ThemedTextCtrl handles this via WM_CTLCOLOREDIT interception.
+    // We still make it read-only to prevent input while "disabled".
 #ifdef _WIN32
-    bool changed = IsEnabled() != enable;
+    // Use IsThisEnabled() (own state only) rather than IsEnabled() (checks parent chain).
+    // IsEnabled() returns false when a parent is disabled, which would cause EVT_ENABLE_CHANGED
+    // to fire spuriously, toggling the StateHandler's Enabled bit and leaving controls looking
+    // disabled even after the parent is re-enabled.
+    bool changed = wxWindowBase::IsThisEnabled() != enable;
     wxWindow::Enable(enable);
 
     if (changed && text_ctrl)
@@ -231,21 +320,36 @@ bool TextInput::Enable(bool enable)
         text_ctrl->SetEditable(enable);
 
         bool dark = Slic3r::GUI::wxGetApp().dark_mode();
+        wxColour bg_color, fg_color;
         if (enable)
         {
-            text_ctrl->SetBackgroundColour(wxColour(dark ? 0x2B2B2B : 0xFFFFFF));
-            text_ctrl->SetForegroundColour(dark ? wxColour(0xFA, 0xFA, 0xFA) : wxColour(0x26, 0x2E, 0x30));
+            bg_color = dark ? UIColors::InputBackgroundDark() : UIColors::InputBackgroundLight();
+            fg_color = dark ? UIColors::InputForegroundDark() : UIColors::InputForegroundLight();
         }
         else
         {
-            text_ctrl->SetBackgroundColour(wxColour(dark ? 0x404040 : 0xD9D9D9));
-            text_ctrl->SetForegroundColour(wxColour(dark ? 0x808080 : 0x909090));
+            bg_color = dark ? UIColors::InputBackgroundDisabledDark() : UIColors::InputBackgroundDisabledLight();
+            fg_color = dark ? UIColors::InputForegroundDisabledDark() : UIColors::InputForegroundDisabledLight();
         }
-        text_ctrl->Refresh();
 
+        // Invalidate cached brush so it gets recreated with new colors
+        if (m_hEditBgBrush != NULL)
+        {
+            DeleteObject(m_hEditBgBrush);
+            m_hEditBgBrush = NULL;
+        }
+
+        // Use ThemedTextCtrl's themed colors for reliable Windows color handling
+        text_ctrl->SetThemedColors(bg_color, fg_color);
+
+        // Send EVT_ENABLE_CHANGED FIRST so state_handler updates before refresh
         wxCommandEvent e(EVT_ENABLE_CHANGED);
         e.SetEventObject(this);
         GetEventHandler()->ProcessEvent(e);
+
+        // Force the edit control to repaint - RedrawWindow triggers WM_CTLCOLOREDIT
+        RedrawWindow((HWND) text_ctrl->GetHWND(), NULL, NULL, RDW_ERASE | RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN);
+        Refresh();
     }
     return changed;
 #else
@@ -281,7 +385,8 @@ void TextInput::DoSetSize(int x, int y, int width, int height, int sizeFlags)
     if (sizeFlags & wxSIZE_USE_EXISTING)
         return;
     wxSize size = GetSize();
-    wxPoint textPos = {5, 0};
+    const int small_margin = GetScaledSmallMargin();
+    wxPoint textPos = {small_margin, 0};
     if (this->icon.IsOk())
     {
         wxSize szIcon = get_preferred_size(icon, m_parent);
@@ -337,8 +442,9 @@ void TextInput::render(wxDC &dc)
     int states = state_handler.states();
     wxSize size = GetSize();
     bool align_right = GetWindowStyle() & wxRIGHT;
+    const int small_margin = GetScaledSmallMargin();
     // start draw
-    wxPoint pt = {5 + text_ctrl->GetMargins().x, 0};
+    wxPoint pt = {small_margin + text_ctrl->GetMargins().x, 0};
     if (icon.IsOk())
     {
         wxSize szIcon = get_preferred_size(icon, m_parent);
@@ -348,7 +454,7 @@ void TextInput::render(wxDC &dc)
 #else
         dc.DrawBitmap(icon.GetBitmapFor(m_parent), pt);
 #endif
-        pt.x += szIcon.x + 5;
+        pt.x += szIcon.x + small_margin;
     }
 
     // drop_down_icon draw
@@ -360,7 +466,7 @@ void TextInput::render(wxDC &dc)
         pt_r.x -= szIcon.x + pt_r.y;
         dd_icon_rect = wxRect(pt_r, szIcon);
         dc.DrawBitmap(drop_down_icon.get_bitmap(), pt_r);
-        pt_r.x -= 5;
+        pt_r.x -= GetScaledSmallMargin();
     }
 
     auto text = wxWindow::GetLabel();
@@ -384,6 +490,57 @@ void TextInput::render(wxDC &dc)
     }
 }
 
+#ifdef _WIN32
+WXLRESULT TextInput::MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam)
+{
+    // Handle WM_CTLCOLOREDIT and WM_CTLCOLORSTATIC from our child ThemedTextCtrl
+    // These messages are sent to the PARENT window when the edit control needs painting
+    if (nMsg == WM_CTLCOLOREDIT || nMsg == WM_CTLCOLORSTATIC)
+    {
+        // Get colors based on current theme AND enabled state
+        bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
+        bool is_enabled = IsEnabled();
+        wxColour bgColor, fgColor;
+        if (is_enabled)
+        {
+            bgColor = is_dark ? UIColors::InputBackgroundDark() : UIColors::InputBackgroundLight();
+            fgColor = is_dark ? UIColors::InputForegroundDark() : UIColors::InputForegroundLight();
+        }
+        else
+        {
+            bgColor = is_dark ? UIColors::InputBackgroundDisabledDark() : UIColors::InputBackgroundDisabledLight();
+            fgColor = is_dark ? UIColors::InputForegroundDisabledDark() : UIColors::InputForegroundDisabledLight();
+        }
+
+        HDC hdc = (HDC) wParam;
+        ::SetBkColor(hdc, RGB(bgColor.Red(), bgColor.Green(), bgColor.Blue()));
+        ::SetTextColor(hdc, RGB(fgColor.Red(), fgColor.Green(), fgColor.Blue()));
+        ::SetBkMode(hdc, OPAQUE);
+
+        // Create native GDI brush directly
+        if (m_hEditBgBrush != NULL)
+        {
+            LOGBRUSH lb;
+            if (GetObject(m_hEditBgBrush, sizeof(lb), &lb) > 0)
+            {
+                COLORREF newColor = RGB(bgColor.Red(), bgColor.Green(), bgColor.Blue());
+                if (lb.lbColor != newColor)
+                {
+                    DeleteObject(m_hEditBgBrush);
+                    m_hEditBgBrush = NULL;
+                }
+            }
+        }
+        if (m_hEditBgBrush == NULL)
+        {
+            m_hEditBgBrush = CreateSolidBrush(RGB(bgColor.Red(), bgColor.Green(), bgColor.Blue()));
+        }
+        return (WXLRESULT) m_hEditBgBrush;
+    }
+    return wxNavigationEnabled<StaticBox>::MSWWindowProc(nMsg, wParam, lParam);
+}
+#endif
+
 void TextInput::messureSize()
 {
     wxSize size = GetSize();
@@ -392,7 +549,8 @@ void TextInput::messureSize()
 
     const wxSize textSize = text_ctrl->GetSize();
     const wxSize iconSize = drop_down_icon.bmp().IsOk() ? drop_down_icon.GetSize() : wxSize(0, 0);
-    size.y = ((textSize.y > iconSize.y) ? textSize.y : iconSize.y) + 8;
+    const int height_padding = GetScaledHeightPadding();
+    size.y = ((textSize.y > iconSize.y) ? textSize.y : iconSize.y) + height_padding;
 
     wxSize minSize = size;
     minSize.x = GetMinWidth();

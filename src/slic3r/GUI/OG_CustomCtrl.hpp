@@ -52,6 +52,7 @@ class OG_CustomCtrl : public wxPanel
         bool draw_mode_bitmap{true};
         bool is_visible{true};
         bool is_focused{false};
+        bool draw_sidebar_checkbox{false}; // Draw checkbox instead of mode bitmap for sidebar visibility
 
         CtrlLine(wxCoord height, OG_CustomCtrl *ctrl, const Line &og_line, bool draw_just_act_buttons = false,
                  bool draw_mode_bitmap = true);
@@ -66,6 +67,7 @@ class OG_CustomCtrl : public wxPanel
 
         void render(wxDC &dc, wxCoord v_pos);
         wxCoord draw_mode_bmp(wxDC &dc, wxCoord v_pos);
+        wxCoord draw_sidebar_visibility_checkbox(wxDC &dc, wxCoord v_pos);
         wxCoord draw_text(wxDC &dc, wxPoint pos, const wxString &text, const wxColour *color, int width,
                           bool is_url = false);
         wxPoint draw_blinking_bmp(wxDC &dc, wxPoint pos, bool is_blinking);
@@ -79,6 +81,14 @@ class OG_CustomCtrl : public wxPanel
         std::vector<wxRect> rects_undo_to_sys_icon;
         std::vector<wxRect> rects_edit_icon;
         wxRect rect_label;
+        wxRect rect_sidebar_checkbox; // Click area for sidebar visibility checkbox
+
+        // Get the option key for this line (first option's key, used for visibility storage)
+        std::string get_first_option_key() const;
+        // Check if this line's options are visible in sidebar
+        bool is_sidebar_visible() const;
+        // Set sidebar visibility for this line's options
+        void set_sidebar_visible(bool visible);
     };
 
     std::vector<CtrlLine> ctrl_lines;
@@ -107,6 +117,11 @@ public:
 
     wxPoint get_pos(const Line &line, Field *field = nullptr);
     int get_height(const Line &line);
+
+    // Enable sidebar visibility checkboxes for all lines (replaces mode bitmap)
+    void enable_sidebar_checkboxes(bool enable = true);
+    // Called when a line's sidebar visibility changes - updates the section checkbox
+    void on_sidebar_visibility_changed();
 
     OptionsGroup *opt_group;
 };

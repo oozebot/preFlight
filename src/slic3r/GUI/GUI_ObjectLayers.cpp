@@ -26,7 +26,9 @@ namespace GUI
 
 ObjectLayers::ObjectLayers(wxWindow *parent) : OG_Settings(parent, true)
 {
-    m_grid_sizer = new wxFlexGridSizer(3, 5, wxGetApp().em_unit()); // "Min Z", "Max Z", "Layer height" & buttons sizer
+    m_grid_sizer =
+        new wxFlexGridSizer(3, wxGetApp().em_unit() / 2,
+                            wxGetApp().em_unit()); // DPI-scaled gaps - "Min Z", "Max Z", "Layer height" & buttons sizer
     m_grid_sizer->SetFlexibleDirection(wxHORIZONTAL);
 
     // Legend for object layers

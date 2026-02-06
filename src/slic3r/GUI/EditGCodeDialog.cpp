@@ -47,8 +47,8 @@ EditGCodeDialog::EditGCodeDialog(wxWindow *parent, const std::string &key, const
     SetFont(wxGetApp().normal_font());
     wxGetApp().UpdateDarkUI(this);
 
-    int border = 10;
     int em = em_unit();
+    int border = em;
 
     // append info line with link on printables.com
     wxHtmlWindow *html_window = new wxHtmlWindow(this, wxID_ANY, wxDefaultPosition, wxSize(60 * em, 5 * em),
@@ -85,8 +85,7 @@ EditGCodeDialog::EditGCodeDialog(wxWindow *parent, const std::string &key, const
 
     wxStaticText *label_top = new wxStaticText(this, wxID_ANY,
                                                _L("Built-in placeholders (Double click item to add to G-code)") + ":");
-
-    auto *grid_sizer = new wxFlexGridSizer(1, 3, 5, 15);
+    auto *grid_sizer = new wxFlexGridSizer(1, 3, em / 2, (em * 15) / 10);
     grid_sizer->SetFlexibleDirection(wxBOTH);
 
     m_params_list = new ParamsViewCtrl(this, wxSize(em * 45, em * 70));

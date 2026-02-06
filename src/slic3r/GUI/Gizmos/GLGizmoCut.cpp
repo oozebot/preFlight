@@ -725,7 +725,8 @@ bool GLGizmoCut3D::render_reset_button(const std::string &label_id, const std::s
 {
     const ImGuiStyle &style = ImGui::GetStyle();
 
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {1, style.ItemSpacing.y});
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing,
+                        {1.0f * wxGetApp().imgui()->get_style_scaling(), style.ItemSpacing.y});
 
     ImGui::PushStyleColor(ImGuiCol_Button, {0.25f, 0.25f, 0.25f, 0.0f});
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, {0.4f, 0.4f, 0.4f, 1.0f});
@@ -2540,7 +2541,7 @@ void GLGizmoCut3D::adjust_window_position(float x, float y, float bottom_limit)
         last_w = win_w; // Save the width once we have it
     }
     // Use saved width or estimate if first frame
-    float x_pos = x - (last_w > 0 ? last_w : 400.0f);
+    float x_pos = x - (last_w > 0 ? last_w : 400.0f * wxGetApp().imgui()->get_style_scaling());
     ImGui::SetWindowPos(ImVec2(x_pos, y), ImGuiCond_Once);
 
     if (!is_approx(last_h, win_h) || !is_approx(last_y, y))

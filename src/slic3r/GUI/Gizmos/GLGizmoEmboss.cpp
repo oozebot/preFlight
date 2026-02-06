@@ -927,7 +927,7 @@ static void draw_mouse_offset(const std::optional<Vec2d> &offset)
     ImVec2 p1 = ImGui::GetMousePos();
     ImVec2 p2(p1.x + offset->x(), p1.y + offset->y());
     ImU32 color = ImGui::GetColorU32(ImGuiPureWrap::COL_ORANGE_LIGHT);
-    float thickness = 3.f;
+    float thickness = 3.f * wxGetApp().imgui()->get_style_scaling();
     draw_list->AddLine(p1, p2, color, thickness);
 }
 #endif // SHOW_OFFSET_DURING_DRAGGING
@@ -984,7 +984,7 @@ void GLGizmoEmboss::on_render_input_window(float x, float y, float bottom_limit)
         ImVec2 center(mouse_pos.x + m_surface_drag->mouse_offset.x(), mouse_pos.y + m_surface_drag->mouse_offset.y());
         ImU32 color = ImGui::GetColorU32(m_surface_drag->exist_hit ? ImVec4(1.f, 1.f, 1.f, .75f) : // transparent white
                                              ImVec4(1.f, .3f, .3f, .75f));                         // Warning color
-        const float radius = 16.f;
+        const float radius = 16.f * static_cast<float>(screen_scale);
         ImGuiPureWrap::draw_cross_hair(center, radius, color);
     }
 
@@ -4450,7 +4450,7 @@ GuiCfg create_gui_configuration()
     float window_title = line_height + 2 * style.FramePadding.y + 2 * style.WindowTitleAlign.y;
     float input_height = line_height_with_spacing + 2 * style.FramePadding.y;
     float tree_header = line_height_with_spacing;
-    float separator_height = 2 + style.FramePadding.y;
+    float separator_height = 0.2f * line_height + style.FramePadding.y; // DPI-scaled (approx 2px at 100%)
 
     // "Text is to object" + radio buttons
     cfg.height_of_volume_type_selector = separator_height + line_height_with_spacing + input_height;
@@ -4466,8 +4466,8 @@ GuiCfg create_gui_configuration()
     cfg.minimal_window_size = ImVec2(window_width, window_height);
 
     // 9 = useSurface, charGap, lineGap, bold, italic, surfDist, rotation, keepUp, textFaceToCamera
-    // 4 = 1px for fix each edit image of drag float
-    float advance_height = input_height * 10 + 9;
+    // DPI-scaled padding (approx 9px at 100% DPI, ~0.6 * line_height)
+    float advance_height = input_height * 10 + 0.6f * line_height;
     cfg.minimal_window_size_with_advance = ImVec2(cfg.minimal_window_size.x,
                                                   cfg.minimal_window_size.y + advance_height);
 

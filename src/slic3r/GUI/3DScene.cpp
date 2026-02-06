@@ -178,7 +178,7 @@ void GLVolume::NonManifoldEdges::render()
 
 #if !SLIC3R_OPENGL_ES
     if (!GUI::OpenGLManager::get_gl_info().is_core_profile())
-        glsafe(::glLineWidth(2.0f));
+        glsafe(::glLineWidth(2.0f * GUI::wxGetApp().imgui()->get_style_scaling()));
 #endif // !SLIC3R_OPENGL_ES
 
     GLShaderProgram *shader = GUI::wxGetApp().get_current_shader();

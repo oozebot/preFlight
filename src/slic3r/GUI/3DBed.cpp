@@ -20,6 +20,7 @@
 #include "GLCanvas3D.hpp"
 #include "Plater.hpp"
 #include "Camera.hpp"
+#include "Widgets/UIColors.hpp"
 
 #if SLIC3R_OPENGL_ES
 #include <glad/gles2.h>
@@ -34,11 +35,27 @@
 #include <numeric>
 
 static const float GROUND_Z = -0.01f;
-static const Slic3r::ColorRGBA DEFAULT_MODEL_COLOR = {92.0f / 255.0f, 92.0f / 255.0f, 92.0f / 255.0f, 1.0f};
 static const Slic3r::ColorRGBA PICKING_MODEL_COLOR = Slic3r::ColorRGBA::BLACK();
-static const Slic3r::ColorRGBA DEFAULT_SOLID_GRID_COLOR = {0.5f, 0.5f, 0.5f, 0.66f};
-static const Slic3r::ColorRGBA DEFAULT_TRANSPARENT_GRID_COLOR = {0.5f, 0.5f, 0.5f, 0.66f};
 static const Slic3r::ColorRGBA DISABLED_MODEL_COLOR = {0.6f, 0.6f, 0.6f, 0.75f};
+
+// Helper to convert wxColour to ColorRGBA
+static Slic3r::ColorRGBA wxColourToColorRGBA(const wxColour &c, float alpha = 1.0f)
+{
+    return {c.Red() / 255.0f, c.Green() / 255.0f, c.Blue() / 255.0f, alpha};
+}
+
+// Bed/platter colors - now using centralized UIColors
+static Slic3r::ColorRGBA get_bed_color()
+{
+    return Slic3r::GUI::IsDarkMode() ? wxColourToColorRGBA(UIColors::BedSurfaceDark())
+                                     : wxColourToColorRGBA(UIColors::BedSurfaceLight());
+}
+
+static Slic3r::ColorRGBA get_grid_color(float alpha = 0.66f)
+{
+    return Slic3r::GUI::IsDarkMode() ? wxColourToColorRGBA(UIColors::BedGridDark(), alpha)
+                                     : wxColourToColorRGBA(UIColors::BedGridLight(), alpha);
+}
 
 namespace Slic3r
 {
@@ -173,7 +190,9 @@ bool Bed3D::set_shape(const Pointfs &bed_shape, const double max_print_height, c
 
     // Set the origin and size for rendering the coordinate system axes.
     m_axes.set_origin({0.0, 0.0, static_cast<double>(GROUND_Z)});
-    m_axes.set_stem_length(0.1f * static_cast<float>(m_build_volume.bounding_volume().max_size()));
+    m_axes.set_stem_length(25.0f); // Fixed 25mm length
+    m_axes.set_tip_length(0.0f);   // No arrow tips
+    m_axes.set_tip_radius(0.0f);   // No arrow tip radius
 
     // Let the calee to update the UI.
     return true;
@@ -283,8 +302,8 @@ void Bed3D::render_internal(GLCanvas3D &canvas, const Transform3d &view_matrix, 
 
     glsafe(::glEnable(GL_DEPTH_TEST));
 
-    m_model.model.set_color(picking ? PICKING_MODEL_COLOR : DEFAULT_MODEL_COLOR);
-    m_triangles.set_color(picking ? PICKING_MODEL_COLOR : DEFAULT_MODEL_COLOR);
+    m_model.model.set_color(picking ? PICKING_MODEL_COLOR : get_bed_color());
+    m_triangles.set_color(picking ? PICKING_MODEL_COLOR : get_bed_color());
     if (!picking && !active)
     {
         m_model.model.set_color(DISABLED_MODEL_COLOR);
@@ -417,16 +436,15 @@ void Bed3D::init_gridlines()
     Polylines intersection_result = intersection_pl(axes_lines, offset_contour);
     Lines gridlines = to_lines(intersection_result);
 
-    // Store contour lines separately - they'll be added later without dash offset
-    Lines contour_lines = to_lines(m_contour);
+    // Contour/border is now rendered separately via render_contour() with solid lines
 
     const float bed_min_x = unscale<float>(bed_bbox.min.x());
     const float bed_min_y = unscale<float>(bed_bbox.min.y());
 
     GLModel::Geometry init_data;
     init_data.format = {GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P4};
-    init_data.reserve_vertices(2 * (gridlines.size() + contour_lines.size()));
-    init_data.reserve_indices(2 * (gridlines.size() + contour_lines.size()));
+    init_data.reserve_vertices(2 * gridlines.size());
+    init_data.reserve_indices(2 * gridlines.size());
 
     // Process grid lines with proper phase offset
     for (const Slic3r::Line &l : gridlines)
@@ -458,19 +476,6 @@ void Bed3D::init_gridlines()
         init_data.add_line(vertices_counter - 2, vertices_counter - 1);
     }
 
-    // Add contour lines without offset
-    for (const Slic3r::Line &l : contour_lines)
-    {
-        Vec3f start(unscale<float>(l.a.x()), unscale<float>(l.a.y()), GROUND_Z);
-        Vec3f end(unscale<float>(l.b.x()), unscale<float>(l.b.y()), GROUND_Z);
-        float distance = (end - start).norm();
-
-        init_data.add_vertex(Vec4f(start.x(), start.y(), start.z(), 0.0f));
-        init_data.add_vertex(Vec4f(end.x(), end.y(), end.z(), distance));
-        const unsigned int vertices_counter = (unsigned int) init_data.vertices_count();
-        init_data.add_line(vertices_counter - 2, vertices_counter - 1);
-    }
-
     m_gridlines.init_from(std::move(init_data));
 }
 
@@ -482,12 +487,8 @@ void Bed3D::init_contourlines()
     if (m_contour.empty())
         return;
 
-    const float line_width_mm = 1.0f;                // 1mm wide line
-    const float inset_amount = line_width_mm * 0.5f; // Inset by half the line width
-    ExPolygon inset_contour = offset_ex(m_contour, -scale_(inset_amount)).empty()
-                                  ? m_contour
-                                  : offset_ex(m_contour, -scale_(inset_amount)).front();
-    const Lines contour_lines = to_lines(inset_contour);
+    // Draw contour at exact bed edge
+    const Lines contour_lines = to_lines(m_contour);
 
     GLModel::Geometry init_data;
     init_data.format = {GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P3};
@@ -688,7 +689,7 @@ void Bed3D::init_internal_model_from_file()
 
     if (m_model.model.get_filename() != m_model_filename && m_model.model.init_from_file(m_model_filename))
     {
-        m_model.model.set_color(DEFAULT_MODEL_COLOR);
+        m_model.model.set_color(get_bed_color());
 
         // move the model so that its origin (0.0, 0.0, 0.0) goes into the bed shape center and a bit down to avoid z-fighting with the texture quad
         m_model_offset = to_3d(m_build_volume.bounding_volume2d().center(), -0.03);
@@ -819,7 +820,7 @@ void Bed3D::render_default(bool bottom, bool picking, bool show_texture, const T
                 glsafe(::glEnable(GL_BLEND));
                 glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
 
-                m_gridlines.set_color(has_model && !bottom ? DEFAULT_SOLID_GRID_COLOR : DEFAULT_TRANSPARENT_GRID_COLOR);
+                m_gridlines.set_color(get_grid_color());
                 m_gridlines.render();
 
                 grid_shader->stop_using();
@@ -829,8 +830,9 @@ void Bed3D::render_default(bool bottom, bool picking, bool show_texture, const T
             shader->set_uniform("view_model_matrix", view_matrix);
             shader->set_uniform("projection_matrix", projection_matrix);
         }
-        else
-            render_contour(view_matrix, projection_matrix);
+
+        // Always render the solid contour border
+        render_contour(view_matrix, projection_matrix);
 
         glsafe(::glDisable(GL_BLEND));
 

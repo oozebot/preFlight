@@ -199,7 +199,8 @@ ImGuiWrapper::ImGuiWrapper()
     ImGui::CreateContext();
 
     init_input();
-    init_style();
+    // Note: init_style() is NOT called here because app_config may not be ready yet.
+    // It will be called later via refresh_style() after the app is fully initialized.
 
     ImGui::GetIO().IniFilename = nullptr;
 
@@ -288,12 +289,16 @@ void ImGuiWrapper::set_scaling(float font_size, float scale_style, float scale_b
     font_size *= scale_both;
     scale_style *= scale_both;
 
+    // Legend sidebar font: 11pt equivalent, scales with DPI via font_size
+    const float legend_font_size = font_size * (11.0f / 9.0f);
+
     if (m_font_size == font_size && m_style_scaling == scale_style)
     {
         return;
     }
 
     m_font_size = font_size;
+    m_legend_font_size = legend_font_size;
 
     ImGui::GetStyle().ScaleAllSizes(scale_style / m_style_scaling);
     m_style_scaling = scale_style;
@@ -511,7 +516,7 @@ bool ImGuiWrapper::slider_float(const char *label, float *v, float v_min, float 
     const ImGuiStyle &style = ImGui::GetStyle();
     if (show_edit_btn)
     {
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {1, style.ItemSpacing.y});
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {1.0f * m_style_scaling, style.ItemSpacing.y});
         ImGui::SameLine();
 
         ImGuiIO &io = ImGui::GetIO();
@@ -559,7 +564,7 @@ bool ImGuiWrapper::slider_float(const char *label, float *v, float v_min, float 
         if (pos != std::string::npos)
             out_label = out_label.substr(0, pos);
 
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {1, style.ItemSpacing.y});
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {1.0f * m_style_scaling, style.ItemSpacing.y});
         ImGui::SameLine();
         ImGuiPureWrap::text(out_label.c_str());
         ImGui::PopStyleVar();
@@ -1194,8 +1199,35 @@ std::vector<unsigned char> ImGuiWrapper::load_svg(const std::string &bitmap_name
 {
     std::vector<unsigned char> empty_vector;
 
+    // Theme-aware color replacement for icons:
+    // - Dark mode: gray (#808080) becomes white (#FFFFFF) for visibility on dark backgrounds
+    // - Light mode: gray (#808080) and white (#FFFFFF) become dark (#262E30) for visibility on light backgrounds
+    // Note: SVGs use various color formats - quoted, unquoted, with/without space after colon
+    std::map<std::string, std::string> color_replaces;
+    if (wxGetApp().dark_mode())
+        color_replaces = {{"\"#808080\"", "\"#FFFFFF\""}};
+    else
+        color_replaces = {
+            // Quoted format (used in some SVGs)
+            {"\"#808080\"", "\"#262E30\""},
+            {"\"#FFFFFF\"", "\"#262E30\""},
+            {"\"#ffffff\"", "\"#262E30\""},
+            {"\"#FFF\"", "\"#262E30\""},
+            {"\"#fff\"", "\"#262E30\""},
+            // Unquoted format: "fill:#ffffff" or "stroke:#ffffff"
+            {":#FFFFFF", ":#262E30"},
+            {":#ffffff", ":#262E30"},
+            {":#FFF", ":#262E30"},
+            {":#fff", ":#262E30"},
+            // Unquoted format with space: "fill: #fff" (used by legend_toolmarker.svg)
+            {": #FFFFFF", ": #262E30"},
+            {": #ffffff", ": #262E30"},
+            {": #FFF", ": #262E30"},
+            {": #fff", ": #262E30"},
+        };
+
     NSVGimage *image = BitmapCache::nsvgParseFromFileWithReplace(Slic3r::var(bitmap_name + ".svg").c_str(), "px", 96.0f,
-                                                                 {{"\"#808080\"", "\"#FFFFFF\""}});
+                                                                 color_replaces);
     if (image == nullptr)
         return empty_vector;
 
@@ -1284,6 +1316,17 @@ void ImGuiWrapper::init_font(bool compress)
         {
             throw Slic3r::RuntimeError("ImGui: Could not load deafult font");
         }
+    }
+
+    // Load a second font at the legend sidebar's native pixel size (11pt) for crisp rendering
+    m_legend_font = io.Fonts->AddFontFromFileTTF((Slic3r::resources_dir() + "/fonts/" + "NotoSans-Regular.ttf").c_str(),
+                                                  m_legend_font_size, nullptr, ranges.Data);
+    if (s_font_cjk)
+    {
+        ImFontConfig config;
+        config.MergeMode = true;
+        io.Fonts->AddFontFromFileTTF((Slic3r::resources_dir() + "/fonts/" + "NotoSansCJK-Regular.ttc").c_str(),
+                                     m_legend_font_size, &config, ranges.Data);
     }
 
     float font_scale = m_font_size / 15;
@@ -1429,56 +1472,117 @@ void ImGuiWrapper::init_input()
 void ImGuiWrapper::init_style()
 {
     ImGuiStyle &style = ImGui::GetStyle();
+    bool is_dark = wxGetApp().dark_mode();
 
     auto set_color = [&](ImGuiCol_ entity, ImVec4 color)
     {
         style.Colors[entity] = color;
     };
 
+    // ========================================================================
+    // Theme-aware color palette
+    // Dark: GitHub-inspired cool blue-gray
+    // Light: Warm white/cream tones matching wxWidgets UI
+    // ========================================================================
+
+    // Background colors
+    ImVec4 col_window_bg = is_dark ? ImVec4(0.086f, 0.106f, 0.133f, 0.95f)  // #161B22
+                                   : ImVec4(0.980f, 0.973f, 0.957f, 0.95f); // Warm white
+
+    ImVec4 col_frame_bg = is_dark ? ImVec4(0.129f, 0.149f, 0.176f, 1.0f)  // #21262D
+                                  : ImVec4(0.922f, 0.910f, 0.894f, 1.0f); // Light gray
+
+    ImVec4 col_frame_hover = is_dark ? ImVec4(0.188f, 0.212f, 0.239f, 1.0f)  // #30363D
+                                     : ImVec4(0.878f, 0.867f, 0.851f, 1.0f); // Slightly darker
+
+    // Text colors
+    ImVec4 col_text = is_dark ? ImVec4(0.788f, 0.820f, 0.851f, 1.0f)  // #C9D1D9
+                              : ImVec4(0.149f, 0.180f, 0.188f, 1.0f); // Dark text
+
+    ImVec4 col_text_disabled = is_dark ? ImVec4(0.431f, 0.463f, 0.506f, 1.0f)  // #6E7681
+                                       : ImVec4(0.565f, 0.565f, 0.565f, 1.0f); // Gray
+
+    // Text on orange backgrounds (for contrast)
+    ImVec4 col_text_on_orange = ImVec4(0.1f, 0.1f, 0.1f, 1.0f); // Dark text for readability
+
+    // Border colors
+    ImVec4 col_border = is_dark ? ImVec4(0.188f, 0.212f, 0.239f, 1.0f)  // #30363D
+                                : ImVec4(0.784f, 0.765f, 0.725f, 1.0f); // Light border
+
     // Window
-    style.WindowRounding = 4.0f;
-    set_color(ImGuiCol_WindowBg, ImGuiPureWrap::COL_WINDOW_BACKGROUND);
+    style.WindowRounding = 4.0f * m_style_scaling;
+    set_color(ImGuiCol_WindowBg, col_window_bg);
+    set_color(ImGuiCol_PopupBg, col_window_bg);
+    set_color(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
     set_color(ImGuiCol_TitleBgActive, ImGuiPureWrap::COL_ORANGE_DARK);
 
-    // Generics
-    set_color(ImGuiCol_FrameBg, ImGuiPureWrap::COL_GREY_DARK);
-    set_color(ImGuiCol_FrameBgHovered, ImGuiPureWrap::COL_GREY_LIGHT);
-    set_color(ImGuiCol_FrameBgActive, ImGuiPureWrap::COL_GREY_LIGHT);
+    // Text
+    set_color(ImGuiCol_Text, col_text);
+    set_color(ImGuiCol_TextDisabled, col_text_disabled);
 
-    // Text selection
-    set_color(ImGuiCol_TextSelectedBg, ImGuiPureWrap::COL_ORANGE_DARK);
+    // Borders
+    set_color(ImGuiCol_Border, col_border);
+    set_color(ImGuiCol_BorderShadow, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
 
-    // Buttons
-    set_color(ImGuiCol_Button, ImGuiPureWrap::COL_BUTTON_BACKGROUND);
-    set_color(ImGuiCol_ButtonHovered, ImGuiPureWrap::COL_BUTTON_HOVERED);
-    set_color(ImGuiCol_ButtonActive, ImGuiPureWrap::COL_BUTTON_ACTIVE);
+    // Frame backgrounds (input fields, etc.)
+    set_color(ImGuiCol_FrameBg, col_frame_bg);
+    set_color(ImGuiCol_FrameBgHovered, col_frame_hover);
+    set_color(ImGuiCol_FrameBgActive, col_frame_hover);
+
+    // Text selection (orange bg needs dark text, but this is just highlight)
+    set_color(ImGuiCol_TextSelectedBg, ImVec4(0.784f, 0.549f, 0.157f, 0.4f)); // Semi-transparent orange
+
+    // Buttons - using frame colors, orange only for special buttons
+    set_color(ImGuiCol_Button, col_frame_bg);
+    set_color(ImGuiCol_ButtonHovered, col_frame_hover);
+    set_color(ImGuiCol_ButtonActive, ImGuiPureWrap::COL_ORANGE_DARK);
 
     // Checkbox (radio buttons use CheckMark)
     set_color(ImGuiCol_CheckMark, Slic3r::GUI::Theme::Primary::GetImGuiColor());
 
-    // ComboBox items (Header is used for menu items, selected items)
-    set_color(ImGuiCol_Header, Slic3r::GUI::Theme::PrimaryDark::GetImGuiColor());
-    set_color(ImGuiCol_HeaderHovered, Slic3r::GUI::Theme::Primary::GetImGuiColor());
-    set_color(ImGuiCol_HeaderActive, Slic3r::GUI::Theme::Primary::GetImGuiColor());
+    // ComboBox items / Headers (orange background = dark text)
+    // Using slightly muted orange for better text contrast
+    ImVec4 col_header = is_dark ? ImVec4(0.588f, 0.412f, 0.118f, 1.0f)  // Darker orange for dark mode
+                                : ImVec4(0.784f, 0.549f, 0.157f, 0.3f); // Semi-transparent for light mode
+    ImVec4 col_header_hover = is_dark ? ImVec4(0.700f, 0.490f, 0.140f, 1.0f) : ImVec4(0.784f, 0.549f, 0.157f, 0.5f);
+
+    set_color(ImGuiCol_Header, col_header);
+    set_color(ImGuiCol_HeaderHovered, col_header_hover);
+    set_color(ImGuiCol_HeaderActive, col_header_hover);
 
     // Slider
     set_color(ImGuiCol_SliderGrab, Slic3r::GUI::Theme::PrimaryDark::GetImGuiColor());
     set_color(ImGuiCol_SliderGrabActive, Slic3r::GUI::Theme::Primary::GetImGuiColor());
 
     // Separator
-    set_color(ImGuiCol_Separator, Slic3r::GUI::Theme::Primary::GetImGuiColor());
+    set_color(ImGuiCol_Separator, col_border);
+    set_color(ImGuiCol_SeparatorHovered, ImGuiPureWrap::COL_ORANGE_LIGHT);
+    set_color(ImGuiCol_SeparatorActive, ImGuiPureWrap::COL_ORANGE_DARK);
 
     // Tabs
-    set_color(ImGuiCol_Tab, Slic3r::GUI::Theme::PrimaryDark::GetImGuiColor());
-    set_color(ImGuiCol_TabHovered, Slic3r::GUI::Theme::Primary::GetImGuiColor());
-    set_color(ImGuiCol_TabActive, Slic3r::GUI::Theme::Primary::GetImGuiColor());
-    set_color(ImGuiCol_TabUnfocused, ImGuiPureWrap::COL_GREY_DARK);
-    set_color(ImGuiCol_TabUnfocusedActive, ImGuiPureWrap::COL_GREY_LIGHT);
+    set_color(ImGuiCol_Tab, col_frame_bg);
+    set_color(ImGuiCol_TabHovered, ImGuiPureWrap::COL_ORANGE_LIGHT);
+    set_color(ImGuiCol_TabActive, ImGuiPureWrap::COL_ORANGE_DARK);
+    set_color(ImGuiCol_TabUnfocused, col_frame_bg);
+    set_color(ImGuiCol_TabUnfocusedActive, col_frame_hover);
 
     // Scrollbars
-    set_color(ImGuiCol_ScrollbarGrab, ImGuiPureWrap::COL_ORANGE_DARK);
+    set_color(ImGuiCol_ScrollbarBg, col_frame_bg);
+    set_color(ImGuiCol_ScrollbarGrab, col_frame_hover);
     set_color(ImGuiCol_ScrollbarGrabHovered, ImGuiPureWrap::COL_ORANGE_LIGHT);
-    set_color(ImGuiCol_ScrollbarGrabActive, ImGuiPureWrap::COL_ORANGE_LIGHT);
+    set_color(ImGuiCol_ScrollbarGrabActive, ImGuiPureWrap::COL_ORANGE_DARK);
+
+    // Title bar (inactive) - also orange since title text is black for contrast
+    set_color(ImGuiCol_TitleBg, ImGuiPureWrap::COL_ORANGE_DARK);
+    set_color(ImGuiCol_TitleBgCollapsed, ImGuiPureWrap::COL_ORANGE_DARK);
+
+    // Resize grip
+    set_color(ImGuiCol_ResizeGrip, col_frame_hover);
+    set_color(ImGuiCol_ResizeGripHovered, ImGuiPureWrap::COL_ORANGE_LIGHT);
+    set_color(ImGuiCol_ResizeGripActive, ImGuiPureWrap::COL_ORANGE_DARK);
+
+    // Menu bar
+    set_color(ImGuiCol_MenuBarBg, col_frame_bg);
 }
 
 void ImGuiWrapper::render_draw_data(ImDrawData *draw_data)
@@ -1726,6 +1830,7 @@ void ImGuiWrapper::destroy_font()
         io.Fonts->TexID = 0;
         glsafe(::glDeleteTextures(1, &m_font_texture));
         m_font_texture = 0;
+        m_legend_font = nullptr;
 
         // We have destroyed current font, including all characters that we may have added dynamically.
         // Move move all characters that we already added into the list of missing chars again,

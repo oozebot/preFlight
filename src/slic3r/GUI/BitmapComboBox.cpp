@@ -49,8 +49,6 @@
 
 using Slic3r::GUI::format_wxstr;
 
-#define BORDER_W 10
-
 // ---------------------------------
 // ***  BitmapComboBox  ***
 // ---------------------------------

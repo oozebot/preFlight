@@ -74,14 +74,14 @@ PrintHostSendDialog::PrintHostSendDialog(const fs::path &path, PrintHostPostUplo
 
     content_sizer->Add(txt_filename, 0, wxEXPAND);
     content_sizer->Add(label_dir_hint);
-    content_sizer->AddSpacer(VERT_SPACING);
+    content_sizer->AddSpacer(GetScaledVertSpacing());
 
     if (combo_groups != nullptr)
     {
         // Repetier specific: Show a selection of file groups.
         auto *label_group = new wxStaticText(this, wxID_ANY, _L("Group"));
         content_sizer->Add(label_group);
-        content_sizer->Add(combo_groups, 0, wxBOTTOM, 2 * VERT_SPACING);
+        content_sizer->Add(combo_groups, 0, wxBOTTOM, 2 * GetScaledVertSpacing());
         wxString recent_group = from_u8(app_config->get("recent", CONFIG_KEY_GROUP));
         if (!recent_group.empty())
             combo_groups->SetValue(recent_group);
@@ -92,7 +92,7 @@ PrintHostSendDialog::PrintHostSendDialog(const fs::path &path, PrintHostPostUplo
         // LocalLink specific: User needs to choose a storage
         auto *label_group = new wxStaticText(this, wxID_ANY, _L("Upload to storage") + ":");
         content_sizer->Add(label_group);
-        content_sizer->Add(combo_storage, 0, wxBOTTOM, 2 * VERT_SPACING);
+        content_sizer->Add(combo_storage, 0, wxBOTTOM, 2 * GetScaledVertSpacing());
         combo_storage->SetValue(storage_names.front());
         wxString recent_storage = from_u8(app_config->get("recent", CONFIG_KEY_STORAGE));
         if (!recent_storage.empty())
@@ -367,12 +367,12 @@ PrintHostQueueDialog::PrintHostQueueDialog(wxWindow *parent)
     btn_error->Disable();
     // Note: The label needs to be present, otherwise we get accelerator bugs on Mac
     auto *btn_close = new wxButton(this, wxID_CANCEL, _L("Close"));
-    btnsizer->Add(btn_cancel, 0, wxRIGHT, SPACING);
+    btnsizer->Add(btn_cancel, 0, wxRIGHT, em / 2);
     btnsizer->Add(btn_error, 0);
     btnsizer->AddStretchSpacer();
     btnsizer->Add(btn_close);
 
-    topsizer->Add(job_list, 1, wxEXPAND | wxBOTTOM, SPACING);
+    topsizer->Add(job_list, 1, wxEXPAND | wxBOTTOM, em / 2);
     topsizer->Add(btnsizer, 0, wxEXPAND);
     SetSizer(topsizer);
 

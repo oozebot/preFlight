@@ -374,6 +374,10 @@ public:
     explicit operator bool() const { return !!event_storage; }
 };
 
+// Show a file dialog with proper theming for light/dark mode.
+// Use this instead of wxFileDialog::ShowModal() directly.
+int ShowFileDialogModal(wxFileDialog &dlg);
+
 class CheckboxFileDialog : public wxFileDialog
 {
 public:
@@ -385,6 +389,9 @@ public:
                        const wxString &name = wxFileDialogNameStr);
 
     bool get_checkbox_value() const;
+
+    // Show the dialog with proper theming
+    int ShowModal() override;
 
 private:
     struct ExtraPanel : public wxPanel

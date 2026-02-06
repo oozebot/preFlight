@@ -64,7 +64,10 @@ public:
     void toggle_field(const std::string &field_key, const bool toggle, int opt_index = -1);
 
     // FFF print
-    void update_print_fff_config(DynamicPrintConfig *config, const bool is_global_config = false);
+    // changed_opt_key: If provided, only validates extrusion widths when the changed key is relevant
+    // (an extrusion width key or nozzle_diameter). Empty string means validate all.
+    void update_print_fff_config(DynamicPrintConfig *config, const bool is_global_config = false,
+                                 const std::string &changed_opt_key = "");
     void toggle_print_fff_options(DynamicPrintConfig *config);
 
     // SLA print

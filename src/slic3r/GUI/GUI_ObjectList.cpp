@@ -345,7 +345,7 @@ void ObjectList::create_objects_ctrl()
      * 1. set a height of the list to some big value 
      * 2. change it to the normal(meaningful) min value after first whole Mainframe updating/layouting
      */
-    SetMinSize(wxSize(-1, 3000));
+    SetMinSize(wxSize(-1, 300 * wxGetApp().em_unit()));
 
     m_sizer = new wxBoxSizer(wxVERTICAL);
     m_sizer->Add(this, 1, wxGROW);
@@ -365,35 +365,65 @@ void ObjectList::create_objects_ctrl()
     BitmapTextRenderer *bmp_text_renderer = new BitmapTextRenderer();
     bmp_text_renderer->set_can_create_editor_ctrl_function(
         [this]() { return m_objects_model->GetItemType(GetSelection()) & (itVolume | itObject); });
-    AppendColumn(
-        new wxDataViewColumn(_L("Name"), bmp_text_renderer, colName, 20 * em, wxALIGN_LEFT, wxDATAVIEW_COL_RESIZABLE));
+    // Name column expands to fill available space
+    AppendColumn(new wxDataViewColumn(_L("Name"), bmp_text_renderer, colName, 20 * em, wxALIGN_LEFT, 0));
 
     // column PrintableProperty (Icon) of the view control:
-    AppendBitmapColumn(" ", colPrint, wxDATAVIEW_CELL_INERT, 3 * em, wxALIGN_CENTER_HORIZONTAL,
-                       wxDATAVIEW_COL_RESIZABLE);
+    AppendBitmapColumn(" ", colPrint, wxDATAVIEW_CELL_INERT, 3 * em, wxALIGN_CENTER_HORIZONTAL, 0);
 
-    // column Extruder of the view control:
+    // column Extruder of the view control - wider to fit content
     BitmapChoiceRenderer *bmp_choice_renderer = new BitmapChoiceRenderer();
     bmp_choice_renderer->set_can_create_editor_ctrl_function(
         [this]() { return m_objects_model->GetItemType(GetSelection()) & (itVolume | itLayer | itObject); });
     bmp_choice_renderer->set_default_extruder_idx([this]()
                                                   { return m_objects_model->GetDefaultExtruderIdx(GetSelection()); });
-    AppendColumn(new wxDataViewColumn(_L("Extruder"), bmp_choice_renderer, colExtruder, 8 * em,
-                                      wxALIGN_CENTER_HORIZONTAL, wxDATAVIEW_COL_RESIZABLE));
+    AppendColumn(
+        new wxDataViewColumn(_L("Extruder"), bmp_choice_renderer, colExtruder, 11 * em, wxALIGN_CENTER_HORIZONTAL, 0));
 
-    // column ItemEditing of the view control:
-    AppendBitmapColumn(_L("Editing"), colEditing, wxDATAVIEW_CELL_INERT, 3 * em, wxALIGN_CENTER_HORIZONTAL,
-                       wxDATAVIEW_COL_RESIZABLE);
+    // column ItemEditing of the view control
+    AppendBitmapColumn(_L("Edit"), colEditing, wxDATAVIEW_CELL_INERT, 4 * em, wxALIGN_CENTER_HORIZONTAL, 0);
 
-    // For some reason under OSX on 4K(5K) monitors in wxDataViewColumn constructor doesn't set width of column.
-    // Therefore, force set column width.
-    if (wxOSX)
-    {
-        GetColumn(colName)->SetWidth(20 * em);
-        GetColumn(colPrint)->SetWidth(3 * em);
-        GetColumn(colExtruder)->SetWidth(8 * em);
-        GetColumn(colEditing)->SetWidth(7 * em);
-    }
+    // Set fixed column widths - these never change
+    const int print_width = 3 * em;
+    const int extruder_width = 9 * em; // Reduced to give more space to Name column
+    const int editing_width = 4 * em;
+
+    GetColumn(colPrint)->SetWidth(print_width);
+    GetColumn(colExtruder)->SetWidth(extruder_width);
+    GetColumn(colExtruder)->SetHidden(false);
+    GetColumn(colEditing)->SetWidth(editing_width);
+
+    // Set initial Name column width
+    int initial_name_width = 15 * em;
+    GetColumn(colName)->SetWidth(initial_name_width);
+
+    // Store fixed widths as member for resize calculation
+    m_fixed_columns_width = print_width + extruder_width + editing_width;
+
+    // Bind size event to adjust Name column width dynamically
+    Bind(wxEVT_SIZE,
+         [this](wxSizeEvent &evt)
+         {
+             evt.Skip();
+             CallAfter(
+                 [this]()
+                 {
+                     int client_width = GetClientSize().GetWidth();
+                     int em = wxGetApp().em_unit();
+                     if (client_width < 5 * em)
+                         return;
+
+                     // Calculate Name column width to fill remaining space
+                     int name_width = client_width - m_fixed_columns_width - 2 * em; // 2em buffer
+                     if (name_width > 5 * em)
+                     {
+                         int current_name_width = GetColumn(colName)->GetWidth();
+                         // Only update if significantly different to avoid loops
+                         if (std::abs(name_width - current_name_width) > em)
+                             GetColumn(colName)->SetWidth(name_width);
+                     }
+                 });
+         });
 }
 
 void ObjectList::get_selected_item_indexes(int &obj_idx, int &vol_idx,
@@ -682,8 +712,9 @@ void ObjectList::update_objects_list_extruder_column(size_t extruders_count)
 
     // set show/hide for this column
     set_extruder_column_hidden(extruders_count <= 1);
-    //a workaround for a wrong last column width updating under OSX
-    GetColumn(colEditing)->SetWidth(25);
+    // DPI-scaled column width (2.5 * em_unit)
+    int em = wxGetApp().em_unit();
+    GetColumn(colEditing)->SetWidth((em * 25) / 10);
 
     m_prevent_update_extruder_in_config = false;
 }
@@ -695,7 +726,8 @@ void ObjectList::update_extruder_colors()
 
 void ObjectList::set_extruder_column_hidden(const bool hide) const
 {
-    GetColumn(colExtruder)->SetHidden(hide);
+    // Force column always visible for now
+    GetColumn(colExtruder)->SetHidden(false);
 }
 
 void ObjectList::update_extruder_in_config(const wxDataViewItem &item)
@@ -1155,9 +1187,11 @@ void ObjectList::extruder_editing()
 
     wxRect rect = this->GetItemRect(item, GetColumn(colExtruder));
     wxPoint pos = rect.GetPosition();
-    pos.y -= 4;
+    // DPI-scaled position offset
+    int em = wxGetApp().em_unit();
+    pos.y -= (em * 4) / 10;
     wxSize size = rect.GetSize();
-    size.SetWidth(size.GetWidth() + 8);
+    size.SetWidth(size.GetWidth() + (em * 8) / 10);
 
     apply_extruder_selector(&m_extruder_editor, this, L("default"), pos, size);
 
@@ -3049,7 +3083,7 @@ void ObjectList::part_selection_changed()
 
     update_min_height();
 
-    Sidebar &panel = wxGetApp().sidebar();
+    auto &panel = wxGetApp().sidebar();
     panel.Freeze();
 
     std::string opt_key;
@@ -3064,7 +3098,13 @@ void ObjectList::part_selection_changed()
     wxGetApp().obj_manipul()->UpdateAndShow(update_and_show_manipulations);
     wxGetApp().obj_settings()->UpdateAndShow(update_and_show_settings);
     wxGetApp().obj_layers()->UpdateAndShow(update_and_show_layers);
-    wxGetApp().sidebar().show_info_sizer();
+
+    // Minimize ObjectList and hide Info panel when Object Settings is shown
+    wxGetApp().sidebar().set_object_settings_mode(update_and_show_settings);
+
+    // Only show info sizer if settings are not visible
+    if (!update_and_show_settings)
+        wxGetApp().sidebar().show_info_sizer();
 
     panel.Layout();
     panel.Thaw();
@@ -4696,11 +4736,13 @@ void ObjectList::update_settings_item_and_selection(wxDataViewItem item, wxDataV
         // If settings item was just updated
         if (old_settings_item == new_settings_item)
         {
-            Sidebar &panel = wxGetApp().sidebar();
+            auto &panel = wxGetApp().sidebar();
             panel.Freeze();
 
             // update settings list
             wxGetApp().obj_settings()->UpdateAndShow(true);
+            // Minimize ObjectList and hide Info panel when Object Settings is shown
+            wxGetApp().sidebar().set_object_settings_mode(true);
 
             panel.Layout();
             panel.Thaw();
@@ -5096,10 +5138,18 @@ void ObjectList::msw_rescale()
 
     const int em = wxGetApp().em_unit();
 
-    GetColumn(colName)->SetWidth(20 * em);
-    GetColumn(colPrint)->SetWidth(3 * em);
-    GetColumn(colExtruder)->SetWidth(8 * em);
-    GetColumn(colEditing)->SetWidth(3 * em);
+    // Update fixed column widths for DPI scaling
+    const int print_width = 3 * em;
+    const int extruder_width = 9 * em;
+    const int editing_width = 4 * em;
+
+    GetColumn(colName)->SetWidth(15 * em);
+    GetColumn(colPrint)->SetWidth(print_width);
+    GetColumn(colExtruder)->SetWidth(extruder_width);
+    GetColumn(colEditing)->SetWidth(editing_width);
+
+    // Update stored fixed width for resize calculation
+    m_fixed_columns_width = print_width + extruder_width + editing_width;
 
     Layout();
 }

@@ -9,6 +9,7 @@
 
 #include "OptionsGroup.hpp"
 #include "GUI_App.hpp"
+#include "Widgets/ScrollablePanel.hpp"
 #include "wxExtensions.hpp"
 #include "Plater.hpp"
 #include "libslic3r/PresetBundle.hpp"
@@ -64,8 +65,17 @@ ObjectSettings::ObjectSettings(wxWindow *parent) : OG_Settings(parent, true)
     m_og->activate();
     m_og->set_name(_(L("Additional Settings")));
 
+    // Create scrollable panel for settings list with max height
+    // This ensures scrollbar appears when settings list grows too long
+    // Note: ObjectList and Info panel are hidden when settings are shown, so we have more room
+    m_scroll_panel = new ScrollablePanel(m_og->ctrl_parent(), wxID_ANY, wxDefaultPosition, wxDefaultSize);
+    m_scroll_panel->SetMaxSize(wxSize(-1, wxGetApp().em_unit() * 50)); // ~500px at 100% DPI
+    m_scroll_panel->sys_color_changed();
+
     m_settings_list_sizer = new wxBoxSizer(wxVERTICAL);
-    m_og->sizer->Add(m_settings_list_sizer, 1, wxEXPAND | wxLEFT, 5);
+    m_scroll_panel->SetSizer(m_settings_list_sizer);
+
+    m_og->sizer->Add(m_scroll_panel, 1, wxEXPAND | wxLEFT, wxGetApp().em_unit() / 2);
 
     m_bmp_delete = ScalableBitmap(parent, "cross");
     m_bmp_delete_focus = ScalableBitmap(parent, "cross_focus");
@@ -124,8 +134,8 @@ bool ObjectSettings::update_settings_list()
         {
             categories.push_back(cat.first);
 
-            auto optgroup = std::make_shared<ConfigOptionsGroup>(m_og->ctrl_parent(), _(cat.first), config, false,
-                                                                 extra_column);
+            auto optgroup = std::make_shared<ConfigOptionsGroup>(m_scroll_panel->GetContentPanel(), _(cat.first),
+                                                                 config, false, extra_column);
             optgroup->label_width = 15;
             optgroup->sidetext_width = 5;
 
@@ -182,6 +192,17 @@ bool ObjectSettings::update_settings_list()
     {
         objects_ctrl->select_item(objects_model->Delete(item));
         return false;
+    }
+
+    // Update scrollbar after content changes (defer to ensure layout is complete)
+    if (m_scroll_panel)
+    {
+        m_scroll_panel->CallAfter(
+            [this]()
+            {
+                if (m_scroll_panel)
+                    m_scroll_panel->UpdateScrollbar();
+            });
     }
 
     return true;
@@ -288,6 +309,9 @@ void ObjectSettings::UpdateAndShow(const bool show)
 void ObjectSettings::sys_color_changed()
 {
     m_og->sys_color_changed();
+
+    if (m_scroll_panel)
+        m_scroll_panel->sys_color_changed();
 
     for (auto group : m_og_settings)
         group->sys_color_changed();

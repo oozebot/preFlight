@@ -30,6 +30,7 @@
 #include "slic3r/Utils/PresetUpdaterWrapper.hpp"
 #include "BedShapeDialog.hpp"
 #include "GUI.hpp"
+#include "GUI_App.hpp"
 #include "SavePresetDialog.hpp"
 #include "wxExtensions.hpp"
 
@@ -42,20 +43,61 @@ namespace Slic3r
 namespace GUI
 {
 
+// Legacy enum values kept for reference - DO NOT USE DIRECTLY
+// Use the GetScaled*() functions below instead
 enum
 {
-    WRAP_WIDTH = 500,
-    MODEL_MIN_WRAP = 150,
-
-    DIALOG_MARGIN = 15,
-    INDEX_MARGIN = 40,
-    BTN_SPACING = 10,
-    INDENT_SPACING = 30,
-    VERTICAL_SPACING = 10,
-
+    // WRAP_WIDTH = 500,       // Use GetScaledWrapWidth()
+    // MODEL_MIN_WRAP = 150,   // Use GetScaledModelMinWrap()
+    // DIALOG_MARGIN = 15,     // Use GetScaledDialogMargin()
+    // INDEX_MARGIN = 40,      // Use GetScaledIndexMargin()
+    // BTN_SPACING = 10,       // Use GetScaledBtnSpacing()
+    // INDENT_SPACING = 30,    // Use GetScaledIndentSpacing()
+    // VERTICAL_SPACING = 10,  // Use GetScaledVerticalSpacing()
+    // ROW_SPACING = 75,       // Use GetScaledRowSpacing()
     MAX_COLS = 4,
-    ROW_SPACING = 75,
 };
+
+// DPI-scaled layout values
+inline int GetScaledWrapWidth()
+{
+    return wxGetApp().em_unit() * 50; // 500px at 100% DPI
+}
+
+inline int GetScaledModelMinWrap()
+{
+    return wxGetApp().em_unit() * 15; // 150px at 100% DPI
+}
+
+inline int GetScaledDialogMargin()
+{
+    return (wxGetApp().em_unit() * 15) / 10; // 15px at 100% DPI
+}
+
+inline int GetScaledIndexMargin()
+{
+    return wxGetApp().em_unit() * 4; // 40px at 100% DPI
+}
+
+inline int GetScaledBtnSpacing()
+{
+    return wxGetApp().em_unit(); // 10px at 100% DPI
+}
+
+inline int GetScaledIndentSpacing()
+{
+    return wxGetApp().em_unit() * 3; // 30px at 100% DPI
+}
+
+inline int GetScaledVerticalSpacing()
+{
+    return wxGetApp().em_unit(); // 10px at 100% DPI
+}
+
+inline int GetScaledRowSpacing()
+{
+    return (wxGetApp().em_unit() * 75) / 10; // 75px at 100% DPI
+}
 
 // Configuration data structures extensions needed for the wizard
 
@@ -194,7 +236,6 @@ struct PageWelcome : ConfigWizardPage
 struct PageUpdateManager : ConfigWizardPage
 {
     std::unique_ptr<RepositoryUpdateUIManager> manager;
-    wxStaticText *warning_text{nullptr};
     bool is_active{false};
 
     PageUpdateManager(ConfigWizard *parent);

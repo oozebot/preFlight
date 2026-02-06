@@ -862,7 +862,7 @@ DesktopIntegrationDialog::DesktopIntegrationDialog(wxWindow *parent)
 
     wxBoxSizer *btn_szr = new wxBoxSizer(wxHORIZONTAL);
     wxButton *btn_perform = new wxButton(this, wxID_ANY, _L("Perform"));
-    btn_szr->Add(btn_perform, 0, wxALL, 10);
+    btn_szr->Add(btn_perform, 0, wxALL, wxGetApp().em_unit());
 
     btn_perform->Bind(wxEVT_BUTTON,
                       [this](wxCommandEvent &)
@@ -874,7 +874,7 @@ DesktopIntegrationDialog::DesktopIntegrationDialog(wxWindow *parent)
     if (can_undo)
     {
         wxButton *btn_undo = new wxButton(this, wxID_ANY, _L("Undo"));
-        btn_szr->Add(btn_undo, 0, wxALL, 10);
+        btn_szr->Add(btn_undo, 0, wxALL, wxGetApp().em_unit());
         btn_undo->Bind(wxEVT_BUTTON,
                        [this](wxCommandEvent &)
                        {
@@ -883,7 +883,7 @@ DesktopIntegrationDialog::DesktopIntegrationDialog(wxWindow *parent)
                        });
     }
     wxButton *btn_cancel = new wxButton(this, wxID_ANY, _L("Cancel"));
-    btn_szr->Add(btn_cancel, 0, wxALL, 10);
+    btn_szr->Add(btn_cancel, 0, wxALL, wxGetApp().em_unit());
     btn_cancel->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { EndModal(wxID_ANY); });
 
     vbox->Add(btn_szr, 0, wxALIGN_CENTER);

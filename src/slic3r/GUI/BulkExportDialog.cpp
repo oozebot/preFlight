@@ -28,7 +28,11 @@ namespace Slic3r
 namespace GUI
 {
 
-constexpr auto BORDER_W = 10;
+// DPI-scaled border width helper
+static int GetScaledBorderW()
+{
+    return wxGetApp().em_unit(); // 10px at 100% DPI
+}
 
 void BulkExportDialog::Item::init_input_name_ctrl(wxFlexGridSizer *row_sizer, const std::string &path)
 {
@@ -73,7 +77,7 @@ BulkExportDialog::Item::Item(wxWindow *parent, wxFlexGridSizer *sizer,
 
     init_selection_ctrl(sizer, bed_index);
     init_input_name_ctrl(sizer, path.filename().string());
-    sizer->Add(m_valid_bmp, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, BORDER_W);
+    sizer->Add(m_valid_bmp, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, GetScaledBorderW());
 
     if (!path_opt)
     {
@@ -203,7 +207,7 @@ BulkExportDialog::BulkExportDialog(const std::vector<std::pair<int, std::optiona
 
     wxBoxSizer *topSizer = new wxBoxSizer(wxVERTICAL);
 
-    m_sizer = new wxFlexGridSizer(paths.size(), 3, wxSize(0.5 * BORDER_W, BORDER_W));
+    m_sizer = new wxFlexGridSizer(paths.size(), 3, wxSize(0.5 * GetScaledBorderW(), GetScaledBorderW()));
 
     for (const auto &[bed_index, path] : paths)
     {
@@ -216,9 +220,9 @@ BulkExportDialog::BulkExportDialog(const std::vector<std::pair<int, std::optiona
     btnOK->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { accept(); });
     btnOK->Bind(wxEVT_UPDATE_UI, [this](wxUpdateUIEvent &evt) { evt.Enable(enable_ok_btn()); });
 
-    topSizer->Add(m_sizer, 0, wxEXPAND | wxALL, BORDER_W);
+    topSizer->Add(m_sizer, 0, wxEXPAND | wxALL, GetScaledBorderW());
 
-    topSizer->Add(btns, 0, wxEXPAND | wxALL, BORDER_W);
+    topSizer->Add(btns, 0, wxEXPAND | wxALL, GetScaledBorderW());
 
     SetSizer(topSizer);
     topSizer->SetSizeHints(this);

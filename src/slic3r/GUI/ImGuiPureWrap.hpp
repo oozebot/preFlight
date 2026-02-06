@@ -159,14 +159,18 @@ void end_menu();
 bool menu_item_with_icon(const char *label, const char *shortcut, ImVec2 icon_size = ImVec2(0, 0), ImU32 icon_color = 0,
                          bool selected = false, bool enabled = true);
 
-const ImVec4 COL_GREY_DARK = {0.33f, 0.33f, 0.33f, 1.0f};
-const ImVec4 COL_GREY_LIGHT = {0.4f, 0.4f, 0.4f, 1.0f};
+// GitHub-inspired cool blue-gray palette for ImGui widgets
+// #21262D = RGB(33, 38, 45) - elevated/frame background
+const ImVec4 COL_GREY_DARK = {0.129f, 0.149f, 0.176f, 1.0f};
+// #30363D = RGB(48, 54, 61) - hover state
+const ImVec4 COL_GREY_LIGHT = {0.188f, 0.212f, 0.239f, 1.0f};
 // Primary brand color #EAA032 (RGB: 234, 160, 50)
 const ImVec4 COL_ORANGE_DARK = {0.784f, 0.549f, 0.157f, 1.0f};  // Theme::PrimaryDark
 const ImVec4 COL_ORANGE_LIGHT = {0.918f, 0.627f, 0.196f, 1.0f}; // Theme::Primary
 // Note: New code should use Theme::Primary::GetImGuiColor() instead
 // These constants maintained for backward compatibility
-const ImVec4 COL_WINDOW_BACKGROUND = {0.13f, 0.13f, 0.13f, 0.8f};
+// #161B22 = RGB(22, 27, 34) - popup/window background
+const ImVec4 COL_WINDOW_BACKGROUND = {0.086f, 0.106f, 0.133f, 0.95f};
 const ImVec4 COL_BUTTON_BACKGROUND = COL_ORANGE_DARK;
 const ImVec4 COL_BUTTON_HOVERED = COL_ORANGE_LIGHT;
 const ImVec4 COL_BUTTON_ACTIVE = COL_BUTTON_HOVERED;

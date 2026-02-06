@@ -50,14 +50,14 @@ struct MsgDialog : wxDialog
     void SetButtonLabel(wxWindowID btn_id, const wxString &label, bool set_focus = false);
 
 protected:
-    enum
-    {
-        CONTENT_WIDTH = 70, //50,
-        CONTENT_MAX_HEIGHT = 60,
-        BORDER = 30,
-        VERT_SPACING = 15,
-        HORIZ_SPACING = 5,
-    };
+    // DPI-scaled layout constants (converted from enum to static methods)
+    static constexpr int CONTENT_WIDTH = 70;
+    static constexpr int CONTENT_MAX_HEIGHT = 60;
+
+    // These methods return DPI-scaled values
+    static int GetScaledBorder();       // 30px at 100% DPI (3 * em)
+    static int GetScaledVertSpacing();  // 15px at 100% DPI (1.5 * em)
+    static int GetScaledHorizSpacing(); // 5px at 100% DPI (0.5 * em)
 
     MsgDialog(wxWindow *parent, const wxString &title, const wxString &headline, long style = wxOK,
               wxBitmap bitmap = wxNullBitmap);

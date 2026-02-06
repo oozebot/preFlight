@@ -180,7 +180,10 @@ void GLGizmoScale3D::on_render()
 
 #if !SLIC3R_OPENGL_ES
     if (!OpenGLManager::get_gl_info().is_core_profile())
-        glsafe(::glLineWidth((m_hover_id != -1) ? 2.0f : 1.5f));
+    {
+        const float scale = wxGetApp().imgui()->get_style_scaling();
+        glsafe(::glLineWidth((m_hover_id != -1) ? 2.0f * scale : 1.5f * scale));
+    }
 #endif // !SLIC3R_OPENGL_ES
 
     const float grabber_mean_size =

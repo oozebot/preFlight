@@ -50,6 +50,8 @@ public:
 
     virtual void Rescale() override;
 
+    void SysColorsChanged();
+
     wxString GetValue() const;
     void SetValue(const wxString &value);
 

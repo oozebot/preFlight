@@ -19,8 +19,10 @@
 #include <wx/statbmp.h>
 #include <wx/checkbox.h>
 #include <wx/dirdlg.h>
+#include <wx/html/htmlwin.h>
 
 #include "libslic3r/libslic3r.h"
+#include "libslic3r/Color.hpp"
 #include "libslic3r/Utils.hpp"
 #include "../Utils/AppUpdater.hpp"
 #include "GUI.hpp"
@@ -35,9 +37,9 @@ namespace Slic3r
 namespace GUI
 {
 
-static const char *URL_CHANGELOG = "http://ooze.bot/preFlight/changelog";
-static const char *URL_DOWNLOAD = "http://ooze.bot/preFlight/download";
-static const char *URL_DEV = "https://github.com/oozebot/preflight/releases/tag/v%1%";
+static const char *URL_CHANGELOG = "https://github.com/oozebot/preFlight/blob/main/CHANGELOG.md";
+static const char *URL_DOWNLOAD = "https://github.com/oozebot/preFlight/releases";
+static const char *URL_DEV = "https://github.com/oozebot/preFlight/releases/tag/v%1%";
 
 // MsgUpdateSlic3r
 
@@ -47,13 +49,13 @@ MsgUpdateSlic3r::MsgUpdateSlic3r(const Semver &ver_current, const Semver &ver_on
 {
     const bool dev_version = ver_online.prerelease() != nullptr;
 
-    auto *versions = new wxFlexGridSizer(2, 0, VERT_SPACING);
+    auto *versions = new wxFlexGridSizer(2, 0, GetScaledVertSpacing());
     versions->Add(new wxStaticText(this, wxID_ANY, _(L("Current version:"))));
     versions->Add(new wxStaticText(this, wxID_ANY, ver_current.to_string()));
     versions->Add(new wxStaticText(this, wxID_ANY, _(L("New version:"))));
     versions->Add(new wxStaticText(this, wxID_ANY, ver_online.to_string()));
     content_sizer->Add(versions);
-    content_sizer->AddSpacer(VERT_SPACING);
+    content_sizer->AddSpacer(GetScaledVertSpacing());
 
     if (dev_version)
     {
@@ -79,11 +81,11 @@ MsgUpdateSlic3r::MsgUpdateSlic3r(const Semver &ver_current, const Semver &ver_on
         content_sizer->Add(link_dw);
     }
 
-    content_sizer->AddSpacer(2 * VERT_SPACING);
+    content_sizer->AddSpacer(2 * GetScaledVertSpacing());
 
     cbox = new wxCheckBox(this, wxID_ANY, _(L("Don't notify about new releases any more")));
     content_sizer->Add(cbox);
-    content_sizer->AddSpacer(VERT_SPACING);
+    content_sizer->AddSpacer(GetScaledVertSpacing());
 
     finalize();
 }
@@ -103,31 +105,55 @@ bool MsgUpdateSlic3r::disable_version_check() const
 wxSize AppUpdateAvailableDialog::AUAD_size;
 // AppUpdater
 AppUpdateAvailableDialog::AppUpdateAvailableDialog(const Semver &ver_current, const Semver &ver_online, bool from_user,
-                                                   bool browser_on_next)
+                                                   bool browser_on_next, const std::string &release_notes)
     : MsgDialog(nullptr, _(L("App Update available")),
                 wxString::Format(_(L("New version of %s is available.\nDo you wish to download it?")), SLIC3R_APP_NAME))
 {
-    auto *versions = new wxFlexGridSizer(1, 0, VERT_SPACING);
+    auto *versions = new wxFlexGridSizer(1, 0, GetScaledVertSpacing());
     versions->Add(new wxStaticText(this, wxID_ANY, _(L("Current version:"))));
     versions->Add(new wxStaticText(this, wxID_ANY, ver_current.to_string()));
     versions->Add(new wxStaticText(this, wxID_ANY, _(L("New version:"))));
     versions->Add(new wxStaticText(this, wxID_ANY, ver_online.to_string()));
     content_sizer->Add(versions);
-    content_sizer->AddSpacer(VERT_SPACING);
+    content_sizer->AddSpacer(GetScaledVertSpacing());
+
+    // Release notes section
+    if (!release_notes.empty())
+    {
+        const int em = wxGetApp().em_unit();
+        auto *html = new wxHtmlWindow(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxHW_SCROLLBAR_AUTO);
+
+        wxColour text_clr = wxGetApp().get_label_clr_default();
+        auto text_clr_str = encode_color(ColorRGB(text_clr.Red(), text_clr.Green(), text_clr.Blue()));
+        auto bgr_clr_str  = wxGetApp().get_html_bg_color(this);
+
+        wxFont font = GetFont();
+        int font_size = font.GetPointSize();
+        int sizes[] = {font_size, font_size, font_size, font_size, font_size, font_size, font_size};
+        html->SetFonts(font.GetFaceName(), wxEmptyString, sizes);
+        html->SetBorders(em / 5);
+
+        html->SetPage(format_wxstr("<html><body bgcolor=%1%><font color=%2%>%3%</font></body></html>",
+                                   bgr_clr_str, text_clr_str, from_u8(release_notes)));
+
+        html->SetMinSize(wxSize(45 * em, 30 * em));
+        content_sizer->Add(html, 1, wxEXPAND);
+        content_sizer->AddSpacer(GetScaledVertSpacing());
+    }
 
     if (!from_user)
     {
         cbox = new wxCheckBox(this, wxID_ANY, _(L("Don't notify about new releases any more")));
         content_sizer->Add(cbox);
     }
-    content_sizer->AddSpacer(VERT_SPACING);
+    content_sizer->AddSpacer(GetScaledVertSpacing());
 
     if (browser_on_next)
     {
         content_sizer->Add(new wxStaticText(
             this, wxID_ANY,
             _L("Clicking \'Next\' will open a browser window where you can select which variant of preFlight you want to download.")));
-        content_sizer->AddSpacer(VERT_SPACING);
+        content_sizer->AddSpacer(GetScaledVertSpacing());
     }
 
     AUAD_size = content_sizer->GetSize();
@@ -156,24 +182,25 @@ AppUpdateDownloadDialog::AppUpdateDownloadDialog(const Semver &ver_online, boost
     : MsgDialog(nullptr, _L("App Update download"),
                 format_wxstr(_L("New version of %1% is available."), SLIC3R_APP_NAME))
 {
-    auto *versions = new wxFlexGridSizer(2, 0, VERT_SPACING);
+    auto *versions = new wxFlexGridSizer(2, 0, GetScaledVertSpacing());
     versions->Add(new wxStaticText(this, wxID_ANY, _L("New version") + ":"));
     versions->Add(new wxStaticText(this, wxID_ANY, ver_online.to_string()));
     content_sizer->Add(versions);
-    content_sizer->AddSpacer(VERT_SPACING);
-#ifndef __linux__
-    cbox_run = new wxCheckBox(this, wxID_ANY,
-                              _(L("Run installer after download. (Otherwise file explorer will be opened)")));
-    content_sizer->Add(cbox_run);
-#endif
-    content_sizer->AddSpacer(VERT_SPACING);
-    content_sizer->AddSpacer(VERT_SPACING);
+    content_sizer->AddSpacer(GetScaledVertSpacing());
+    // preFlight: No installer yet - just a portable zip, so hide "run installer" checkbox
+    // #ifndef __linux__
+    //     cbox_run = new wxCheckBox(this, wxID_ANY,
+    //                               _(L("Run installer after download. (Otherwise file explorer will be opened)")));
+    //     content_sizer->Add(cbox_run);
+    // #endif
+    content_sizer->AddSpacer(GetScaledVertSpacing());
+    content_sizer->AddSpacer(GetScaledVertSpacing());
     content_sizer->Add(new wxStaticText(this, wxID_ANY, _L("Target directory") + ":"));
-    content_sizer->AddSpacer(VERT_SPACING);
+    content_sizer->AddSpacer(GetScaledVertSpacing());
     txtctrl_path = new wxTextCtrl(this, wxID_ANY, GUI::format_wxstr(path.parent_path().string()));
     filename = GUI::format_wxstr(path.filename().string());
     content_sizer->Add(txtctrl_path, 1, wxEXPAND);
-    content_sizer->AddSpacer(VERT_SPACING);
+    content_sizer->AddSpacer(GetScaledVertSpacing());
 
     wxButton *btn = new wxButton(this, wxID_ANY, _L("Select directory"));
     content_sizer->Add(btn /*, 1, wxEXPAND*/);
@@ -292,9 +319,10 @@ AppUpdateDownloadDialog::~AppUpdateDownloadDialog() {}
 
 bool AppUpdateDownloadDialog::run_after_download() const
 {
-#ifndef __linux__
-    return cbox_run->GetValue();
-#endif
+    // preFlight: cbox_run is commented out (no installer yet), always return false
+    // #ifndef __linux__
+    //     return cbox_run->GetValue();
+    // #endif
     return false;
 }
 
@@ -329,14 +357,14 @@ MsgUpdateConfig::MsgUpdateConfig(const std::vector<Update> &updates, PresetUpdat
             "Updated configuration bundles:")));
     text->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
     content_sizer->Add(text);
-    content_sizer->AddSpacer(VERT_SPACING);
+    content_sizer->AddSpacer(GetScaledVertSpacing());
 
     const auto lang_code = wxGetApp().current_language_code_safe().ToStdString();
 
     auto *versions = new wxBoxSizer(wxVERTICAL);
     for (const auto &update : updates)
     {
-        auto *flex = new wxFlexGridSizer(2, 0, VERT_SPACING);
+        auto *flex = new wxFlexGridSizer(2, 0, GetScaledVertSpacing());
 
         auto *text_vendor = new wxStaticText(this, wxID_ANY, update.vendor);
         text_vendor->SetFont(boldfont);
@@ -369,7 +397,7 @@ MsgUpdateConfig::MsgUpdateConfig(const std::vector<Update> &updates, PresetUpdat
         {
             auto *line = new wxBoxSizer(wxHORIZONTAL);
             auto changelog_url = (boost::format(update.changelog_url) % lang_code).str();
-            line->AddSpacer(3 * VERT_SPACING);
+            line->AddSpacer(3 * GetScaledVertSpacing());
             line->Add(new wxHyperlinkCtrl(this, wxID_ANY, _(L("Open changelog page")), changelog_url));
             versions->Add(line);
             versions->AddSpacer(1); // empty value for the correct alignment inside a GridSizer
@@ -377,7 +405,7 @@ MsgUpdateConfig::MsgUpdateConfig(const std::vector<Update> &updates, PresetUpdat
     }
 
     content_sizer->Add(versions);
-    content_sizer->AddSpacer(2 * VERT_SPACING);
+    content_sizer->AddSpacer(2 * GetScaledVertSpacing());
 
     if (update_params == PresetUpdater::UpdateParams::FORCED_BEFORE_WIZARD)
     {
@@ -420,11 +448,11 @@ MsgUpdateForced::MsgUpdateForced(const std::vector<Update> &updates)
 
     text->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
     content_sizer->Add(text);
-    content_sizer->AddSpacer(VERT_SPACING);
+    content_sizer->AddSpacer(GetScaledVertSpacing());
 
     const auto lang_code = wxGetApp().current_language_code_safe().ToStdString();
 
-    auto *versions = new wxFlexGridSizer(2, 0, VERT_SPACING);
+    auto *versions = new wxFlexGridSizer(2, 0, GetScaledVertSpacing());
     for (const auto &update : updates)
     {
         auto *text_vendor = new wxStaticText(this, wxID_ANY, update.vendor);
@@ -457,7 +485,7 @@ MsgUpdateForced::MsgUpdateForced(const std::vector<Update> &updates)
         {
             auto *line = new wxBoxSizer(wxHORIZONTAL);
             auto changelog_url = (boost::format(update.changelog_url) % lang_code).str();
-            line->AddSpacer(3 * VERT_SPACING);
+            line->AddSpacer(3 * GetScaledVertSpacing());
             line->Add(new wxHyperlinkCtrl(this, wxID_ANY, _(L("Open changelog page")), changelog_url));
             versions->Add(line);
             versions->AddSpacer(1); // empty value for the correct alignment inside a GridSizer
@@ -465,7 +493,7 @@ MsgUpdateForced::MsgUpdateForced(const std::vector<Update> &updates)
     }
 
     content_sizer->Add(versions);
-    content_sizer->AddSpacer(2 * VERT_SPACING);
+    content_sizer->AddSpacer(2 * GetScaledVertSpacing());
 
     add_button(wxID_EXIT, false, wxString::Format(_L("Exit %s"), SLIC3R_APP_NAME));
     for (auto ID : {wxID_EXIT, wxID_OK})
@@ -499,14 +527,14 @@ MsgDataIncompatible::MsgDataIncompatible(const std::unordered_map<std::string, w
                                    wxString::Format(_(L("This %s version: %s")), SLIC3R_APP_NAME, SLIC3R_VERSION));
     text2->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
     content_sizer->Add(text2);
-    content_sizer->AddSpacer(VERT_SPACING);
+    content_sizer->AddSpacer(GetScaledVertSpacing());
 
     auto *text3 = new wxStaticText(this, wxID_ANY, _(L("Incompatible bundles:")));
     text3->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
     content_sizer->Add(text3);
-    content_sizer->AddSpacer(VERT_SPACING);
+    content_sizer->AddSpacer(GetScaledVertSpacing());
 
-    auto *versions = new wxFlexGridSizer(2, 0, VERT_SPACING);
+    auto *versions = new wxFlexGridSizer(2, 0, GetScaledVertSpacing());
     for (const auto &incompat : incompats)
     {
         auto *text_vendor = new wxStaticText(this, wxID_ANY, incompat.first);
@@ -516,7 +544,7 @@ MsgDataIncompatible::MsgDataIncompatible(const std::unordered_map<std::string, w
     }
 
     content_sizer->Add(versions);
-    content_sizer->AddSpacer(2 * VERT_SPACING);
+    content_sizer->AddSpacer(2 * GetScaledVertSpacing());
 
     add_button(wxID_REPLACE, true, _L("Re-configure"));
     add_button(wxID_EXIT, false, wxString::Format(_L("Exit %s"), SLIC3R_APP_NAME));
@@ -539,7 +567,7 @@ MsgNoUpdates::MsgNoUpdates()
                                                    SLIC3R_APP_NAME));
     text->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
     content_sizer->Add(text);
-    content_sizer->AddSpacer(VERT_SPACING);
+    content_sizer->AddSpacer(GetScaledVertSpacing());
 
     finalize();
 }
@@ -554,7 +582,7 @@ MsgNoAppUpdates::MsgNoAppUpdates()
     auto *text = new wxStaticText(this, wxID_ANY, format_wxstr(_L("Your %1% is up to date."), SLIC3R_APP_NAME));
     text->Wrap(CONTENT_WIDTH * wxGetApp().em_unit());
     content_sizer->Add(text);
-    content_sizer->AddSpacer(VERT_SPACING);
+    content_sizer->AddSpacer(GetScaledVertSpacing());
 
     finalize();
 }

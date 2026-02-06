@@ -4,11 +4,28 @@
 ///|/
 #include "StaticBox.hpp"
 #include "../GUI.hpp"
+#include "../GUI_App.hpp"
 #include <wx/dcgraph.h>
 #include <wx/dcbuffer.h>
 
 #include "DropDown.hpp"
 #include "UIColors.hpp"
+
+// DPI scaling helpers
+static int GetScaledCornerRadius()
+{
+    return (Slic3r::GUI::wxGetApp().em_unit() * 8) / 10; // 8px at 100%
+}
+
+static int GetScaledBorderWidth()
+{
+    return std::max(1, Slic3r::GUI::wxGetApp().em_unit() / 10); // 1px at 100%, min 1px
+}
+
+static int GetScaledDeflate()
+{
+    return std::max(1, Slic3r::GUI::wxGetApp().em_unit() / 10); // 1px at 100%, min 1px
+}
 
 BEGIN_EVENT_TABLE(StaticBox, wxWindow)
 
@@ -22,8 +39,9 @@ END_EVENT_TABLE()
  * calling Refresh()/Update().
  */
 
-StaticBox::StaticBox() : state_handler(this), radius(8)
+StaticBox::StaticBox() : state_handler(this), radius(GetScaledCornerRadius())
 {
+    border_width = GetScaledBorderWidth(); // Initialize with DPI-scaled value
     border_color = StateColor(std::make_pair(clr_border_disabled, (int) StateColor::Disabled),
 #ifndef __WXMSW__
                               std::make_pair(clr_border_normal, (int) StateColor::Focused),
@@ -115,7 +133,9 @@ wxColor StaticBox::GetParentBackgroundColor(wxWindow *parent)
     }
     if (parent)
         return parent->GetBackgroundColour();
-    return *wxWHITE;
+    // Fallback to themed color instead of pure white
+    bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
+    return is_dark ? UIColors::PanelBackgroundDark() : UIColors::InputBackgroundLight();
 }
 
 void StaticBox::paintEvent(wxPaintEvent &evt)
@@ -145,22 +165,27 @@ void StaticBox::doRender(wxDC &dc)
         {
             wxRect rc(0, 0, size.x, size.y);
 #ifdef __WXOSX__
-            // On Retina displays all controls are cut on 1px
+            // On Retina displays all controls are cut - deflate by scaled amount
             if (dc.GetContentScaleFactor() > 1.)
-                rc.Deflate(1, 1);
+                rc.Deflate(GetScaledDeflate(), GetScaledDeflate());
 #endif //__WXOSX__
 
             if (radius > 0.)
             {
-#if 0
-                DropDown::SetTransparentBG(dc, this);
-#else
 #ifdef __WXMSW__
-                wxColour bg_clr = GetParentBackgroundColor(m_parent);
+                // Fill corners with theme-appropriate background color
+                // Must respect disabled state - use parent's background or state-aware color
+                bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
+                bool is_disabled = (states & (int) StateColor::Disabled) != 0;
+                wxColour bg_clr;
+                if (is_disabled)
+                    bg_clr = is_dark ? UIColors::InputBackgroundDisabledDark()
+                                     : UIColors::InputBackgroundDisabledLight();
+                else
+                    bg_clr = is_dark ? UIColors::ContentBackgroundDark() : UIColors::InputBackgroundLight();
                 dc.SetBrush(wxBrush(bg_clr));
                 dc.SetPen(wxPen(bg_clr));
                 dc.DrawRectangle(rc);
-#endif
 #endif
             }
 
@@ -237,4 +262,11 @@ void StaticBox::doRender(wxDC &dc)
             }
         }
     }
+}
+
+void StaticBox::msw_rescale()
+{
+    radius = GetScaledCornerRadius();
+    border_width = GetScaledBorderWidth();
+    Refresh();
 }

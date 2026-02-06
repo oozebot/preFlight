@@ -1475,7 +1475,7 @@ void GLGizmoMeasure::render_dimensioning()
 #if !SLIC3R_OPENGL_ES
         }
         else
-            glsafe(::glLineWidth(2.0f));
+            glsafe(::glLineWidth(2.0f * wxGetApp().imgui()->get_style_scaling()));
 #endif // !SLIC3R_OPENGL_ES
 
         // stem
@@ -1502,7 +1502,7 @@ void GLGizmoMeasure::render_dimensioning()
 #if !SLIC3R_OPENGL_ES
         }
         else
-            glsafe(::glLineWidth(1.0f));
+            glsafe(::glLineWidth(1.0f * wxGetApp().imgui()->get_style_scaling()));
 #endif // !SLIC3R_OPENGL_ES
 
         // arrow 1
@@ -1521,19 +1521,19 @@ void GLGizmoMeasure::render_dimensioning()
         const double curr_value = use_inches ? ObjectManipulation::mm_to_in * distance : distance;
         const std::string curr_value_str = format_double(curr_value);
         const std::string units = use_inches ? _u8L("in") : _u8L("mm");
-        const float value_str_width = 20.0f + ImGui::CalcTextSize(curr_value_str.c_str()).x;
+        const float im_scale = wxGetApp().imgui()->get_style_scaling();
+        const float value_str_width = 20.0f * im_scale + ImGui::CalcTextSize(curr_value_str.c_str()).x;
         static double edit_value = 0.0;
 
         const Vec2d label_position = 0.5 * (v1ss + v2ss);
         ImGuiPureWrap::set_next_window_pos(label_position.x(), viewport[3] - label_position.y(), ImGuiCond_Always, 0.0f,
                                            1.0f);
         ImGuiPureWrap::set_next_window_bg_alpha(0.0f);
-
         if (!m_editing_distance)
         {
             ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {1.0f, 1.0f});
+            ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {1.0f * im_scale, 1.0f * im_scale});
             ImGuiPureWrap::begin(std::string("distance"),
                                  ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDecoration);
             ImGui::BringWindowToDisplayFront(ImGui::GetCurrentWindow());
@@ -1565,8 +1565,8 @@ void GLGizmoMeasure::render_dimensioning()
 
         ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {1.0f, 1.0f});
-        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {4.0f, 0.0f});
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {1.0f * im_scale, 1.0f * im_scale});
+        ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {4.0f * im_scale, 0.0f});
         if (ImGui::BeginPopupModal("distance_popup", nullptr,
                                    ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoDecoration))
         {
@@ -1821,7 +1821,7 @@ void GLGizmoMeasure::render_dimensioning()
 #if !SLIC3R_OPENGL_ES
         }
         else
-            glsafe(::glLineWidth(2.0f));
+            glsafe(::glLineWidth(2.0f * wxGetApp().imgui()->get_style_scaling()));
 #endif // !SLIC3R_OPENGL_ES
 
         // arc
@@ -1843,7 +1843,7 @@ void GLGizmoMeasure::render_dimensioning()
 #if !SLIC3R_OPENGL_ES
         }
         else
-            glsafe(::glLineWidth(1.0f));
+            glsafe(::glLineWidth(1.0f * wxGetApp().imgui()->get_style_scaling()));
 #endif // !SLIC3R_OPENGL_ES
 
         // arrows
@@ -2244,7 +2244,9 @@ void GLGizmoMeasure::on_render_input_window(float x, float y, float bottom_limit
     }
 
     // Stay off-screen until we have a reasonable height (not 32px fake size)
-    if (m_popup_render_count == 0 || m_popup_height < 100.0f)
+    // DPI-scaled threshold (100px at 100% DPI)
+    const float height_threshold = 100.0f * wxGetApp().imgui()->get_style_scaling();
+    if (m_popup_render_count == 0 || m_popup_height < height_threshold)
     {
         // Position just above visible area to get accurate size
         ImGuiPureWrap::set_next_window_pos(x, -500.0f, ImGuiCond_Always, 0.5f, 0.0f);
@@ -2279,7 +2281,7 @@ void GLGizmoMeasure::on_render_input_window(float x, float y, float bottom_limit
         last_w = win_w; // Save the width once we have it
     }
     // Use saved width or estimate if first frame
-    float x_pos = x - (last_w > 0 ? last_w : 350.0f);
+    float x_pos = x - (last_w > 0 ? last_w : 350.0f * wxGetApp().imgui()->get_style_scaling());
         ImGui::SetWindowPos(ImVec2(x_pos, y), ImGuiCond_Once);
             if (last_h != win_h || last_y != y) {
         // ask canvas for another frame to render the window in the correct position

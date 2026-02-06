@@ -25,6 +25,7 @@
 #include "slic3r/GUI/ImGuiPureWrap.hpp"
 #include "slic3r/GUI/RulerForDoubleSlider.hpp"
 #include "slic3r/GUI/TickCodesManager.hpp"
+#include "slic3r/GUI/Widgets/UIColors.hpp"
 
 #ifndef IMGUI_DEFINE_MATH_OPERATORS
 #define IMGUI_DEFINE_MATH_OPERATORS
@@ -320,7 +321,10 @@ void DSForLayers::draw_ruler(const ImRect &slideable_region)
     const float tick_width = float(int(1.0f * m_scale + 0.5f));
     const float label_height = m_imgui->GetTextureCustomRect(ImGui::PausePrint)->Height;
 
-    constexpr ImU32 tick_clr = IM_COL32(255, 255, 255, 255);
+    // Theme-aware ruler tick color
+    float tick_r, tick_g, tick_b, tick_a;
+    UIColors::RulerTickRGBA(tick_r, tick_g, tick_b, tick_a);
+    const ImU32 tick_clr = ImGui::ColorConvertFloat4ToU32(ImVec4(tick_r, tick_g, tick_b, tick_a));
 
     const float x_center = slideable_region.GetCenter().x;
 
@@ -338,7 +342,10 @@ void DSForLayers::draw_ruler(const ImRect &slideable_region)
         bg_rect.Max.x = m_ctrl.GetCtrlPos().x + GetWidth();
         bg_rect.Min.y = m_ctrl.GetCtrlPos().y + label_height;
         bg_rect.Max.y = m_ctrl.GetCtrlPos().y + GetHeight() - label_height;
-        const ImU32 bg_color = ImGui::ColorConvertFloat4ToU32(ImVec4(0.13f, 0.13f, 0.13f, 0.5f));
+        // Theme-aware ruler background color
+        float r, g, b, a;
+        UIColors::RulerBackgroundRGBA(r, g, b, a);
+        const ImU32 bg_color = ImGui::ColorConvertFloat4ToU32(ImVec4(r, g, b, a));
 
         ImGui::RenderFrame(bg_rect.Min, bg_rect.Max, bg_color, false, 2.f * m_ctrl.rounding());
     }
@@ -357,7 +364,7 @@ void DSForLayers::draw_ruler(const ImRect &slideable_region)
 
     auto draw_text = [max_val, x_center, label_height, long_outer_x, this](const int tick, const float tick_pos)
     {
-        ImVec2 start = ImVec2(x_center + long_outer_x + 1, tick_pos - (0.5f * label_height));
+        ImVec2 start = ImVec2(x_center + long_outer_x + 1.0f * m_scale, tick_pos - (0.5f * label_height));
         // Use m_values[tick] directly for ruler labels since the ruler already finds
         // the correct tick position for the target height.
         std::string label = (tick >= 0 && tick < (int) m_values.size())
@@ -366,7 +373,7 @@ void DSForLayers::draw_ruler(const ImRect &slideable_region)
         ImGui::RenderText(start, label.c_str());
     };
 
-    auto draw_tick = [x_center, tick_width, inner_x](const float tick_pos, const float outer_x)
+    auto draw_tick = [x_center, tick_width, inner_x, tick_clr](const float tick_pos, const float outer_x)
     {
         ImRect tick_right = ImRect(x_center + inner_x, tick_pos - tick_width, x_center + outer_x, tick_pos);
         ImGui::RenderFrame(tick_right.Min, tick_right.Max, tick_clr, false);
@@ -708,7 +715,7 @@ void DSForLayers::render_menu()
 {
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(10.0f, 10.0f) * m_scale);
     ImGui::PushStyleVar(ImGuiStyleVar_PopupRounding, 4.0f * m_scale);
-    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {1, ImGui::GetStyle().ItemSpacing.y});
+    ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, {1.0f * m_scale, ImGui::GetStyle().ItemSpacing.y});
     ImGui::PushStyleVar(ImGuiStyleVar_::ImGuiStyleVar_ChildRounding, 4.0f * m_scale);
 
     ImGui::PushStyleColor(ImGuiCol_::ImGuiCol_WindowBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
@@ -862,7 +869,11 @@ void DSForLayers::render_color_picker()
     const std::string title = ("Select color for Color Change");
     if (m_show_color_picker)
     {
-        ImGuiPureWrap::set_next_window_pos(1200, 200, ImGuiCond_Always, 0.5f, 0.0f);
+        // Position color picker relative to display size (DPI-aware)
+        ImGuiIO &io = ImGui::GetIO();
+        float pos_x = io.DisplaySize.x * 0.65f; // 65% from left
+        float pos_y = io.DisplaySize.y * 0.15f; // 15% from top
+        ImGuiPureWrap::set_next_window_pos(pos_x, pos_y, ImGuiCond_Always, 0.5f, 0.0f);
         ImGuiPureWrap::begin(title, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse |
                                         ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
@@ -883,7 +894,7 @@ void DSForLayers::render_color_picker()
 
 void DSForLayers::render_cog_menu()
 {
-    const ImVec2 icon_sz = ImVec2(14, 14);
+    const ImVec2 icon_sz = ImVec2(14, 14) * m_scale;
     if (ImGui::BeginPopup("cog_menu_popup"))
     {
         if (ImGuiPureWrap::menu_item_with_icon(_u8L("Jump to height").c_str(), "Shift+G"))
@@ -1051,10 +1062,14 @@ bool DSForLayers::render_jump_to_window(const ImVec2 &pos, double *active_value,
     ImGui::SetNextWindowPos(pos, ImGuiCond_Always);
 
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 4.0f);
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {12.0f, 8.0f});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 4.0f * m_scale);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(12.0f, 8.0f) * m_scale);
 
-    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(0.13f, 0.13f, 0.13f, 0.8f));
+    // Theme-aware popup background color
+    float popup_r, popup_g, popup_b, popup_a;
+    UIColors::RulerBackgroundRGBA(popup_r, popup_g, popup_b, popup_a);
+    popup_a = 0.9f; // Slightly more opaque for popup
+    ImGui::PushStyleColor(ImGuiCol_WindowBg, ImVec4(popup_r, popup_g, popup_b, popup_a));
     ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_Text));
 
     ImGuiWindowFlags windows_flag = ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize |
@@ -1114,17 +1129,19 @@ void DSForLayers::Render(const int canvas_width, const int canvas_height, float 
 
     ImVec2 pos;
 
-    const float VERTICAL_SLIDER_WIDTH = m_show_ruler ? 125.f : 105.0f;
+    // DPI-scaled slider width (125/105 px at 100% DPI)
+    const float VERTICAL_SLIDER_WIDTH = (m_show_ruler ? 125.f : 105.0f) * m_scale;
 
     // When ruler is shown, use original position (further left)
     // When ruler is hidden, use reduced offset position (further right)
     const float tick_offset = m_show_ruler ? tick_icon_side : (tick_icon_side * 0.285f);
-    pos.x = canvas_width - VERTICAL_SLIDER_WIDTH * m_scale - tick_offset;
+    pos.x = canvas_width - VERTICAL_SLIDER_WIDTH - tick_offset;
     pos.y = 1.5f * action_btn_sz + offset;
     if (m_allow_editing)
-        pos.y += 2.f;
+        pos.y += 2.f * m_scale;
 
-    ImVec2 size = ImVec2(VERTICAL_SLIDER_WIDTH * m_scale, canvas_height - 4.f * action_btn_sz - offset);
+    ImVec2 size = ImVec2(VERTICAL_SLIDER_WIDTH,
+                         canvas_height - 4.f * action_btn_sz - offset); // VERTICAL_SLIDER_WIDTH already scaled
 
     m_ctrl.Init(pos, size, m_scale, m_show_ruler);
     if (m_ctrl.render())
@@ -1278,7 +1295,12 @@ std::string DSForLayers::get_label(int pos, LabelType label_type, const std::str
     {
         if (label_type == ltEstimatedTime && m_layers_times.empty())
             return size_t(-1);
-        double layer_print_z = m_values[is_wipe_tower_layer(value) ? std::max<int>(value - 1, 0) : value];
+        // Bounds check: value can be up to m_values.size() due to Layer 0 offset
+        // Use clamped index to avoid out-of-bounds access
+        int idx = is_wipe_tower_layer(value) ? std::max<int>(value - 1, 0) : value;
+        if (idx < 0 || idx >= static_cast<int>(m_values.size()))
+            return size_t(-1);
+        double layer_print_z = m_values[idx];
         auto it = std::lower_bound(m_layers_values.begin(), m_layers_values.end(), layer_print_z - epsilon());
         if (it == m_layers_values.end())
         {
@@ -1312,6 +1334,9 @@ std::string DSForLayers::get_label(int pos, LabelType label_type, const std::str
         // Position 0 = Layer 0 (beginning, blank build plate)
         // Position N = Layer N (end of layer N, renders m_values[N-1])
         size_t layer_number = m_ticks.is_wipe_tower ? get_layer_number(value, label_type) : value;
+        // If get_layer_number failed (returned -1), fall back to using position
+        if (layer_number == size_t(-1))
+            layer_number = value;
         return format("%1%\n(%2%)", str, layer_number);
     }
 

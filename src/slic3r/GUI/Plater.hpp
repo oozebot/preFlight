@@ -69,6 +69,7 @@ class MainFrame;
 class GLCanvas3D;
 class Mouse3DController;
 class NotificationManager;
+class NotesDialog;
 struct Camera;
 class GLToolbar;
 class UserAccount;
@@ -393,6 +394,11 @@ public:
 
     NotificationManager *get_notification_manager();
     const NotificationManager *get_notification_manager() const;
+
+    // Notes dialog methods
+    void show_notes_dialog(int preselect_object_idx = -1);
+    void toggle_notes_dialog();
+    void render_notes_dialog();
 
     UserAccount *get_user_account();
     const UserAccount *get_user_account() const;

@@ -191,7 +191,7 @@ void GLGizmoPainterBase::render_cursor_circle()
 
 #if !SLIC3R_OPENGL_ES
     if (!OpenGLManager::get_gl_info().is_core_profile())
-        glsafe(::glLineWidth(1.5f));
+        glsafe(::glLineWidth(1.5f * wxGetApp().imgui()->get_style_scaling()));
 #endif // !SLIC3R_OPENGL_ES
 
     glsafe(::glDisable(GL_DEPTH_TEST));
@@ -1698,15 +1698,16 @@ void GLGizmoPainterBase::render_line_preview() const
     }
 
     // Make line more opaque and thicker when snap is active
+    const float scale = wxGetApp().imgui()->get_style_scaling();
     if (m_z_snap_active)
     {
-        color.a(1.0f);               // Fully opaque when snapped
-        glsafe(::glLineWidth(6.0f)); // Extra thick line when snapped
+        color.a(1.0f);                       // Fully opaque when snapped
+        glsafe(::glLineWidth(6.0f * scale)); // DPI-scaled extra thick line when snapped
     }
     else
     {
-        color.a(0.9f);               // More opaque for better visibility
-        glsafe(::glLineWidth(5.0f)); // Thicker line for prominence
+        color.a(0.9f);                       // More opaque for better visibility
+        glsafe(::glLineWidth(5.0f * scale)); // DPI-scaled thicker line for prominence
     }
 
     shader->set_uniform("uniform_color", color);
@@ -1714,7 +1715,7 @@ void GLGizmoPainterBase::render_line_preview() const
     m_line_preview.set_color(color);
 
     m_line_preview.render();
-    glsafe(::glLineWidth(1.0f));
+    glsafe(::glLineWidth(1.0f * scale));
 
     shader->stop_using();
 

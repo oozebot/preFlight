@@ -951,7 +951,9 @@ void GLGizmoBrimEars::on_render_input_window(float x, float y, float bottom_limi
     }
 
     // Stay off-screen until we have a reasonable height (not 32px fake size)
-    if (m_popup_render_count == 0 || m_popup_height < 100.0f)
+    // DPI-scaled threshold (100px at 100% DPI)
+    const float height_threshold = 100.0f * wxGetApp().imgui()->get_style_scaling();
+    if (m_popup_render_count == 0 || m_popup_height < height_threshold)
     {
         // Position just above visible area to get accurate size
         ImGuiPureWrap::set_next_window_pos(x, -500.0f, ImGuiCond_Always, 0.5f, 0.0f);

@@ -137,7 +137,7 @@ void Label::SetWindowStyleFlag(long style)
     if (style & LB_HYPERLINK)
     {
         this->color = GetForegroundColour();
-        static wxColor clr_url("#00AE42");
+        static wxColor clr_url("#EAA032"); // preFlight brand orange
         SetForegroundColour(clr_url);
     }
     else

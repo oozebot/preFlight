@@ -66,6 +66,7 @@ Model &Model::assign_copy(const Model &rhs)
     // copy custom code per height
     this->custom_gcode_per_print_z_vector = rhs.custom_gcode_per_print_z_vector;
     this->wipe_tower_vector = rhs.wipe_tower_vector;
+    this->project_notes = rhs.project_notes;
 
     return *this;
 }
@@ -89,6 +90,7 @@ Model &Model::assign_copy(Model &&rhs)
     // copy custom code per height
     this->custom_gcode_per_print_z_vector = std::move(rhs.custom_gcode_per_print_z_vector);
     this->wipe_tower_vector = rhs.wipe_tower_vector;
+    this->project_notes = std::move(rhs.project_notes);
 
     return *this;
 }
@@ -461,6 +463,7 @@ ModelObject &ModelObject::assign_copy(const ModelObject &rhs)
 
     this->name = rhs.name;
     this->input_file = rhs.input_file;
+    this->notes = rhs.notes;
     // Copies the config's ID
     this->config = rhs.config;
     assert(this->config.id() == rhs.config.id());
@@ -502,6 +505,7 @@ ModelObject &ModelObject::assign_copy(ModelObject &&rhs)
 
     this->name = std::move(rhs.name);
     this->input_file = std::move(rhs.input_file);
+    this->notes = std::move(rhs.notes);
     // Moves the config's ID
     this->config = std::move(rhs.config);
     assert(this->config.id() == rhs.config.id());

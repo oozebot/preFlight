@@ -6,7 +6,13 @@
 #define slic3r_GUI_TextInput_hpp_
 
 #include <wx/textctrl.h>
+#include <wx/brush.h>
 #include "StaticBox.hpp"
+#include "ThemedTextCtrl.hpp"
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 class TextInput : public wxNavigationEnabled<StaticBox>
 {
@@ -15,7 +21,10 @@ class TextInput : public wxNavigationEnabled<StaticBox>
     ScalableBitmap drop_down_icon;
     StateColor label_color;
     StateColor text_color;
-    wxTextCtrl *text_ctrl{nullptr};
+    Slic3r::GUI::ThemedTextCtrl *text_ctrl{nullptr};
+#ifdef _WIN32
+    HBRUSH m_hEditBgBrush = NULL; // Native GDI brush for WM_CTLCOLOREDIT response
+#endif
 
     static const int TextInputWidth = 200;
     static const int TextInputHeight = 50;
@@ -25,6 +34,7 @@ class TextInput : public wxNavigationEnabled<StaticBox>
 
 public:
     TextInput();
+    virtual ~TextInput();
 
     TextInput(wxWindow *parent, wxString text, wxString label = "", wxString icon = "",
               const wxPoint &pos = wxDefaultPosition, const wxSize &size = wxDefaultSize, long style = 0);
@@ -76,6 +86,11 @@ public:
 
 protected:
     virtual void OnEdit() {}
+
+#ifdef _WIN32
+    // Handle WM_CTLCOLOREDIT from child ThemedTextCtrl
+    virtual WXLRESULT MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam) wxOVERRIDE;
+#endif
 
     void DoSetSize(int x, int y, int width, int height, int sizeFlags = wxSIZE_AUTO) wxOVERRIDE;
 

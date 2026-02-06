@@ -85,7 +85,7 @@ void GLSelectionRectangle::render(const GLCanvas3D &canvas)
 
 #if !SLIC3R_OPENGL_ES
     if (!OpenGLManager::get_gl_info().is_core_profile())
-        glsafe(::glLineWidth(1.5f));
+        glsafe(::glLineWidth(1.5f * wxGetApp().imgui()->get_style_scaling()));
 #endif // !SLIC3R_OPENGL_ES
 
     glsafe(::glDisable(GL_DEPTH_TEST));

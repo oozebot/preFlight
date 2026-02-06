@@ -456,6 +456,7 @@ wxBitmapBundle *BitmapCache::from_svg(const std::string &bitmap_name, unsigned t
     if (dark_mode)
     {
         replaces["#808080"] = "#FFFFFF";
+        replaces["#000000"] = "#FFFFFF"; // Black icons -> white for dark mode
         // The disabled checkbox/control icons use #C8C8C8 as background which is too light for dark mode
         replaces["#C8C8C8"] = "#404040"; // Light gray disabled bg -> dark gray
         replaces["#c8c8c8"] = "#404040"; // lowercase variant
@@ -512,7 +513,10 @@ wxBitmap *BitmapCache::load_svg(const std::string &bitmap_name, unsigned target_
     // map of color replaces
     std::map<std::string, std::string> replaces;
     if (dark_mode)
+    {
         replaces["#808080"] = "#FFFFFF";
+        replaces["#000000"] = "#FFFFFF"; // Black icons -> white for dark mode
+    }
 
     NSVGimage *image = nsvgParseFromFileWithReplace(Slic3r::var(bitmap_name + ".svg").c_str(), "px", 96.0f, replaces);
     if (image == nullptr)

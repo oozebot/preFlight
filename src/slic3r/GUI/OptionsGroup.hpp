@@ -115,10 +115,15 @@ using column_t = std::function<wxWindow *(wxWindow *parent, const Line &)>;
 using t_optionfield_map = std::map<t_config_option_key, t_field>;
 using t_opt_map = std::map<std::string, std::pair<std::string, int>>;
 
+class CheckBox; // Forward declaration for sidebar checkbox
+
 class OptionsGroup
 {
 protected:
     wxStaticBox *stb{nullptr};
+    wxPanel *m_header_panel{nullptr};        // Panel containing checkbox + label for sidebar visibility
+    ::CheckBox *m_sidebar_checkbox{nullptr}; // Checkbox for showing/hiding in sidebar
+    bool m_enable_sidebar_checkbox{false};   // Whether to show sidebar visibility checkbox
 
 public:
     const bool staticbox{true};
@@ -224,6 +229,15 @@ public:
     void clear_fields_except_of(const std::vector<std::string> left_fields);
 
     void hide_labels() { label_width = 0; }
+
+    // Enable sidebar visibility checkbox in the section header
+    void enable_sidebar_checkbox(bool enable = true) { m_enable_sidebar_checkbox = enable; }
+    bool is_sidebar_checkbox_enabled() const { return m_enable_sidebar_checkbox; }
+    ::CheckBox *get_sidebar_checkbox() const { return m_sidebar_checkbox; }
+    // Set sidebar visibility for all rows in this optgroup
+    void set_all_rows_sidebar_visible(bool visible);
+    // Update section checkbox state based on row visibility (called by OG_CustomCtrl)
+    void update_section_checkbox_from_rows();
 
     OptionsGroup(wxWindow *_parent, const wxString &title, bool is_tab_opt = false, column_t extra_clmn = nullptr);
     virtual ~OptionsGroup() { clear(true); }

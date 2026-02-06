@@ -25,6 +25,7 @@ public:
     void SetToolTip(const wxString &tip);
 
     void sys_color_changed() { Refresh(); }
+    void msw_rescale();
 
 private:
     void OnPaint(wxPaintEvent &event);

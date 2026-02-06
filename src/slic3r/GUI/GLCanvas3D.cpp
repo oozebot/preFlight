@@ -56,6 +56,7 @@
 #include "slic3r/GUI/BitmapCache.hpp"
 #include "slic3r/GUI/Gizmos/GLGizmoPainterBase.hpp"
 #include "slic3r/Utils/UndoRedo.hpp"
+#include "Widgets/UIColors.hpp"
 
 #if ENABLE_RETINA_GL
 #include "slic3r/Utils/RetinaHelper.hpp"
@@ -105,8 +106,26 @@ extern std::vector<GLuint> s_th_tex_id;
 
 static constexpr const float TRACKBALLSIZE = 0.8f;
 
-static const Slic3r::ColorRGBA DEFAULT_BG_DARK_COLOR = {0.478f, 0.478f, 0.478f, 1.0f};
-static const Slic3r::ColorRGBA DEFAULT_BG_LIGHT_COLOR = {0.753f, 0.753f, 0.753f, 1.0f};
+// Helper to convert wxColour to ColorRGBA
+static Slic3r::ColorRGBA wxColourToColorRGBA(const wxColour &c, float alpha = 1.0f)
+{
+    return {c.Red() / 255.0f, c.Green() / 255.0f, c.Blue() / 255.0f, alpha};
+}
+
+// Canvas background colors - now using centralized UIColors
+static Slic3r::ColorRGBA get_bg_color(bool dark_mode)
+{
+    return dark_mode ? wxColourToColorRGBA(UIColors::CanvasBackgroundDark())
+                     : wxColourToColorRGBA(UIColors::CanvasBackgroundLight());
+}
+
+static Slic3r::ColorRGBA get_gradient_top_color(bool dark_mode)
+{
+    return dark_mode ? wxColourToColorRGBA(UIColors::CanvasGradientTopDark())
+                     : wxColourToColorRGBA(UIColors::CanvasGradientTopLight());
+}
+
+// Error colors (orange-tinted versions of background)
 static const Slic3r::ColorRGBA ERROR_BG_DARK_COLOR = {0.478f, 0.192f, 0.039f, 1.0f};
 static const Slic3r::ColorRGBA ERROR_BG_LIGHT_COLOR = {0.753f, 0.192f, 0.039f, 1.0f};
 
@@ -324,7 +343,8 @@ void GLCanvas3D::LayersEditing::render_overlay(const GLCanvas3D &canvas)
 
     auto button_pos = canvas.get_layersediting_button_position();
     float menu_x = button_pos.first;
-    float menu_y = canvas.get_main_toolbar_height() + 5.0f; // 5px below toolbar bottom
+    const float style_scaling = wxGetApp().imgui()->get_style_scaling();
+    float menu_y = canvas.get_main_toolbar_height() + 5.0f * style_scaling;
     ImGuiPureWrap::set_next_window_pos(menu_x, menu_y, ImGuiCond_Always, 0.5f, 0.0f);
 
     ImGuiPureWrap::begin(_u8L("Variable layer height"), ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize |
@@ -368,7 +388,6 @@ void GLCanvas3D::LayersEditing::render_overlay(const GLCanvas3D &canvas)
 
     ImGui::SameLine();
     float widget_align = ImGui::GetCursorPosX();
-    const float style_scaling = wxGetApp().imgui()->get_style_scaling();
     ImGui::PushItemWidth(style_scaling * 120.0f);
     m_adaptive_quality = std::clamp(m_adaptive_quality, 0.0f, 1.f);
     wxGetApp().imgui()->slider_float("", &m_adaptive_quality, 0.0f, 1.f, "%.2f");
@@ -832,6 +851,9 @@ float GLCanvas3D::LayersEditing::thickness_bar_width(const GLCanvas3D &canvas)
 
 const Point GLCanvas3D::Mouse::Drag::Invalid_2D_Point(INT_MAX, INT_MAX);
 const Vec3d GLCanvas3D::Mouse::Drag::Invalid_3D_Point(DBL_MAX, DBL_MAX, DBL_MAX);
+// Note - MoveThresholdPx is intentionally kept as a small fixed value (5px)
+// because it's a mouse drag threshold that should remain consistent regardless of DPI.
+// The physical screen distance matters for detecting intentional drags vs accidental clicks.
 const int GLCanvas3D::Mouse::Drag::MoveThresholdPx = 5;
 
 void GLCanvas3D::Labels::render(const std::vector<const ModelInstance *> &sorted_instances) const
@@ -947,7 +969,8 @@ void GLCanvas3D::Labels::render(const std::vector<const ModelInstance *> &sorted
         if (x < 0.0f || viewport[2] < x || y < 0.0f || viewport[3] < y)
             continue;
 
-        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, owner.selected ? 3.0f : 1.5f);
+        const float scale = wxGetApp().imgui()->get_style_scaling();
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, (owner.selected ? 3.0f : 1.5f) * scale);
         ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
         ImGui::PushStyleColor(ImGuiCol_Border, owner.selected ? ImVec4(0.757f, 0.404f, 0.216f, 1.0f)
                                                               : ImVec4(0.75f, 0.75f, 0.75f, 1.0f));
@@ -1945,7 +1968,8 @@ void render_print_statistics(float scale)
 
 void render_autoslicing_wait()
 {
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(20.f, 30.f));
+    const float scale = wxGetApp().imgui()->get_style_scaling();
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(20.f * scale, 30.f * scale));
     begin_statistics((_u8L("Generating statistics") + " ...").c_str());
     ImGui::Text("%s", _u8L("Statistics will be available once all beds are sliced").c_str());
     ImGui::PopStyleVar();
@@ -2214,6 +2238,7 @@ void GLCanvas3D::render()
     wxGetApp().plater()->get_mouse3d_controller().render_settings_dialog(*this);
 
     wxGetApp().plater()->get_notification_manager()->render_notifications(*this, get_overlay_window_width());
+    wxGetApp().plater()->render_notes_dialog();
 
     if (!s_multiple_beds.is_autoslicing())
         wxGetApp().plater()->render_sliders(*this);
@@ -5142,8 +5167,11 @@ void GLCanvas3D::_render_thumbnail_internal(ThumbnailData &thumbnail_data, const
     const bool is_enabled_painted_thumbnail = !model_objects.empty() && !extruders_colors.empty();
 
     if (thumbnail_params.transparent_background)
-        //        glsafe(::glClearColor(0.0f, 0.0f, 0.0f, 0.0f));
-        glsafe(::glClearColor(0.4f, 0.4f, 0.4f, 0.0f));
+    {
+        // Use themed canvas background color for transparent thumbnails
+        const ColorRGBA bg = get_bg_color(wxGetApp().dark_mode());
+        glsafe(::glClearColor(bg.r(), bg.g(), bg.b(), 0.0f));
+    }
 
     glsafe(::glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
     glsafe(::glEnable(GL_DEPTH_TEST));
@@ -6406,8 +6434,10 @@ void GLCanvas3D::_render_background()
     // Draws a bottom to top gradient over the complete screen.
     glsafe(::glDisable(GL_DEPTH_TEST));
 
-    const ColorRGBA top_color = use_error_color ? ERROR_BG_LIGHT_COLOR : DEFAULT_BG_LIGHT_COLOR;
-    const ColorRGBA bottom_color = use_error_color ? ERROR_BG_DARK_COLOR : DEFAULT_BG_DARK_COLOR;
+    // Use centralized UIColors for themed canvas background
+    const bool dark_mode = wxGetApp().dark_mode();
+    const ColorRGBA top_color = use_error_color ? ERROR_BG_LIGHT_COLOR : get_gradient_top_color(dark_mode);
+    const ColorRGBA bottom_color = use_error_color ? ERROR_BG_DARK_COLOR : get_bg_color(dark_mode);
 
     if (!m_background.is_initialized())
     {
@@ -6534,9 +6564,10 @@ void GLCanvas3D::_render_gcode()
                     post_event(wxKeyEvent(EVT_GLCANVAS_SLIDERS_MANIPULATION, layer_evt));
                     stuck_count = 0;
                 }
-                else if (scroll_request > 0 && !at_last_layer)
+                else if (scroll_request > 0 && !at_last_layer && !at_first_layer)
                 {
-                    // Scrolling forward and stuck but NOT at last layer - go to next layer
+                    // Scrolling forward and stuck but NOT at first/last layer - go to next layer
+                    // Skip when at first layer - move_slider_by_key handles the layer 0 skip
                     wxKeyEvent layer_evt(wxEVT_KEY_DOWN);
                     layer_evt.m_keyCode = WXK_UP;
                     layer_evt.m_controlDown = true; // Signal this is from scrubbing
@@ -6809,9 +6840,9 @@ void GLCanvas3D::_render_overlays()
 
     _render_main_toolbar();
     _render_undoredo_toolbar();
-    _render_collapse_toolbar();
     _render_view_toolbar();
 
+    // Hamburger menu button in top-left of 3D view (already skips Preview internally)
     _render_sidebar_toggle_imgui();
 
     if (m_layers_editing.last_object_id >= 0 && m_layers_editing.object_max_z() > 0.0f)
@@ -7133,7 +7164,7 @@ void Slic3r::GUI::GLCanvas3D::_render_bed_selector()
         {
             width = win_x_pos - 5.f * scale;
 
-            v_pos = ImGui::GetCurrentWindow()->CalcFontSize() + GImGui->Style.FramePadding.y * 2.f + 5.f;
+            v_pos = ImGui::GetCurrentWindow()->CalcFontSize() + GImGui->Style.FramePadding.y * 2.f + 5.f * scale;
             extra_frame = true;
         }
         else
@@ -7418,7 +7449,7 @@ void GLCanvas3D::_render_camera_target()
     glsafe(::glDisable(GL_DEPTH_TEST));
 #if !SLIC3R_OPENGL_ES
     if (!OpenGLManager::get_gl_info().is_core_profile())
-        glsafe(::glLineWidth(2.0f));
+        glsafe(::glLineWidth(2.0f * wxGetApp().imgui()->get_style_scaling()));
 #endif // !SLIC3R_OPENGL_ES
 
     m_camera_target.target = wxGetApp().plater()->get_camera().get_target();
@@ -7539,7 +7570,7 @@ void GLCanvas3D::_render_camera_target_validation_box()
     GLShaderProgram *shader = wxGetApp().get_shader("dashed_lines");
 #else
     if (!OpenGLManager::get_gl_info().is_core_profile())
-        glsafe(::glLineWidth(2.0f));
+        glsafe(::glLineWidth(2.0f * wxGetApp().imgui()->get_style_scaling()));
 
     GLShaderProgram *shader = OpenGLManager::get_gl_info().is_core_profile()
                                   ? wxGetApp().get_shader("dashed_thick_lines")

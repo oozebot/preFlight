@@ -40,11 +40,10 @@ ComboBox::ComboBox(wxWindow *parent, wxWindowID id, const wxString &value, const
         GetTextCtrl()->Bind(wxEVT_KEY_DOWN, &ComboBox::keyDown, this);
 
     SetBorderColor(TextInput::GetBorderColor());
-    if (parent)
-    {
-        SetBackgroundColour(parent->GetBackgroundColour());
-        SetForegroundColour(parent->GetForegroundColour());
-    }
+    // Use UIColors to ensure correct theme colors on startup
+    bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
+    SetBackgroundColour(is_dark ? UIColors::InputBackgroundDark() : UIColors::InputBackgroundLight());
+    SetForegroundColour(is_dark ? UIColors::InputForegroundDark() : UIColors::InputForegroundLight());
 
     drop.Bind(wxEVT_COMBOBOX,
               [this](wxCommandEvent &e)
@@ -94,6 +93,25 @@ void ComboBox::Rescale()
 
     TextInput::Rescale();
     drop.Rescale();
+}
+
+void ComboBox::SysColorsChanged()
+{
+    // Call parent implementation first
+    TextInput::SysColorsChanged();
+
+    // Explicitly update DropDown colors for theme change
+    bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
+    wxColour bg_color = is_dark ? UIColors::InputBackgroundDark() : UIColors::InputBackgroundLight();
+    wxColour fg_color = is_dark ? UIColors::InputForegroundDark() : UIColors::InputForegroundLight();
+
+    drop.SetBackgroundColour(bg_color);
+    drop.SetTextColor(StateColor(fg_color));
+
+    // Update selector colors for the dropdown items
+    StateColor selector_bg(std::make_pair(0xFDF2E3, (int) StateColor::Checked), // preFlight warm cream for selected
+                           std::make_pair(bg_color, (int) StateColor::Normal));
+    drop.SetSelectorBackgroundColor(selector_bg);
 }
 
 wxString ComboBox::GetValue() const
@@ -148,13 +166,13 @@ bool ComboBox::SetBackgroundColour(const wxColour &colour)
     TextInput::SetBackgroundColour(colour);
 
     drop.SetBackgroundColour(colour);
+    // Use UIColors for disabled background - NOT legacy constants!
+    bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
+    wxColour disabled_bg = is_dark ? UIColors::InputBackgroundDisabledDark() : UIColors::InputBackgroundDisabledLight();
+    wxColour normal_bg = is_dark ? UIColors::InputBackgroundDark() : UIColors::InputBackgroundLight();
     StateColor selector_colors(std::make_pair(clr_background_focused, (int) StateColor::Checked),
-                               Slic3r::GUI::wxGetApp().dark_mode()
-                                   ? std::make_pair(clr_background_disabled_dark, (int) StateColor::Disabled)
-                                   : std::make_pair(clr_background_disabled_light, (int) StateColor::Disabled),
-                               Slic3r::GUI::wxGetApp().dark_mode()
-                                   ? std::make_pair(clr_background_normal_dark, (int) StateColor::Normal)
-                                   : std::make_pair(clr_background_normal_light, (int) StateColor::Normal));
+                               std::make_pair(disabled_bg, (int) StateColor::Disabled),
+                               std::make_pair(normal_bg, (int) StateColor::Normal));
     drop.SetSelectorBackgroundColor(selector_colors);
 
     return true;
@@ -164,7 +182,9 @@ bool ComboBox::SetForegroundColour(const wxColour &colour)
 {
     TextInput::SetForegroundColour(colour);
 
-    drop.SetTextColor(TextInput::GetTextColor());
+    // DropDowns are never disabled, so just pass the normal color directly
+    // Don't use TextInput::GetTextColor() which includes a Disabled state
+    drop.SetTextColor(StateColor(colour));
 
     return true;
 }
@@ -307,15 +327,9 @@ void ComboBox::mouseDown(wxMouseEvent &event)
 
 void ComboBox::mouseWheelMoved(wxMouseEvent &event)
 {
-    if (drop_down)
-        return;
-    auto delta = ((event.GetWheelRotation() < 0) == event.IsWheelInverted()) ? -1 : 1;
-    unsigned int n = GetSelection() + delta;
-    if (n < GetCount())
-    {
-        SetSelection((int) n);
-        sendComboBoxEvent();
-    }
+    // Don't change selection on mouse wheel - too easy to accidentally change settings while scrolling
+    // Pass the event to parent for page scrolling
+    event.Skip();
 }
 
 void ComboBox::keyDown(wxKeyEvent &event)

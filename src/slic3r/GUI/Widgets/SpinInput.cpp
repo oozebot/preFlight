@@ -9,10 +9,44 @@
 
 #include "../GUI_App.hpp"
 
+// Height padding scales with DPI (matches TextInput)
+static int GetScaledHeightPadding()
+{
+    return (Slic3r::GUI::wxGetApp().em_unit() * 8) / 10; // 8px at 100% DPI
+}
+
+// Fixed base sizes for button layout - wxBitmapBundle handles icon DPI scaling
+
+static int GetButtonBaseWidth()
+{
+    return 14;
+}
+
+static int GetButtonHeightOffset()
+{
+    return 4;
+}
+
+static int GetTextMargin()
+{
+    return 16;
+}
+
+static int GetSmallOffset()
+{
+    return 1;
+}
+
 #include <wx/dcgraph.h>
 #include <wx/panel.h>
 #include <wx/spinctrl.h>
 #include <wx/valtext.h>
+
+#ifdef _WIN32
+#include <windows.h>
+#include <uxtheme.h>
+#pragma comment(lib, "uxtheme.lib")
+#endif
 
 BEGIN_EVENT_TABLE(SpinInputBase, wxPanel)
 
@@ -40,11 +74,26 @@ SpinInputBase::SpinInputBase()
     border_width = 1;
 }
 
+SpinInputBase::~SpinInputBase()
+{
+#ifdef _WIN32
+    if (m_hEditBgBrush != NULL)
+    {
+        DeleteObject(m_hEditBgBrush);
+        m_hEditBgBrush = NULL;
+    }
+#endif
+}
+
 Button *SpinInputBase::create_button(ButtonId id)
 {
+    // Fixed base icon size (12x7), wxBitmapBundle handles DPI scaling
     auto btn = new Button(this, "", id == ButtonId::btnIncrease ? "spin_inc_act" : "spin_dec_act", wxBORDER_NONE,
                           wxSize(12, 7));
     btn->SetCornerRadius(0);
+    btn->SetBorderWidth(0);
+    btn->SetBorderColor(StateColor());
+    btn->SetBackgroundColor(StateColor());
     btn->SetInactiveIcon(id == ButtonId::btnIncrease ? "spin_inc" : "spin_dec");
     btn->DisableFocusFromKeyboard();
     btn->SetSelected(false);
@@ -111,9 +160,10 @@ bool SpinInputBase::SetFont(wxFont const &font)
 
 bool SpinInputBase::SetBackgroundColour(const wxColour &colour)
 {
-    const int clr_background_disabled = Slic3r::GUI::wxGetApp().dark_mode() ? clr_background_disabled_dark
-                                                                            : clr_background_disabled_light;
-    StateColor clr_state(std::make_pair(clr_background_disabled, (int) StateColor::Disabled),
+    // Use UIColors for disabled background - NOT legacy constants!
+    bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
+    wxColour disabled_bg = is_dark ? UIColors::InputBackgroundDisabledDark() : UIColors::InputBackgroundDisabledLight();
+    StateColor clr_state(std::make_pair(disabled_bg, (int) StateColor::Disabled),
                          std::make_pair(clr_background_focused, (int) StateColor::Checked),
                          std::make_pair(colour, (int) StateColor::Focused),
                          std::make_pair(colour, (int) StateColor::Normal));
@@ -131,9 +181,10 @@ bool SpinInputBase::SetBackgroundColour(const wxColour &colour)
 
 bool SpinInputBase::SetForegroundColour(const wxColour &colour)
 {
-    const int disabled_color = Slic3r::GUI::wxGetApp().dark_mode() ? clr_foreground_disabled_dark
-                                                                   : clr_foreground_disabled_light;
-    StateColor clr_state(std::make_pair(disabled_color, (int) StateColor::Disabled),
+    // Use UIColors for disabled foreground - NOT legacy constants!
+    bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
+    wxColour disabled_fg = is_dark ? UIColors::InputForegroundDisabledDark() : UIColors::InputForegroundDisabledLight();
+    StateColor clr_state(std::make_pair(disabled_fg, (int) StateColor::Disabled),
                          std::make_pair(colour, (int) StateColor::Normal));
 
     SetLabelColor(clr_state);
@@ -151,11 +202,39 @@ bool SpinInputBase::SetForegroundColour(const wxColour &colour)
 
 void SpinInputBase::SysColorsChanged()
 {
-    if (auto parent = this->GetParent())
+    bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
+
+    // Use UIColors namespace for centralized color management
+    wxColour bg_normal = is_dark ? UIColors::InputBackgroundDark() : UIColors::InputBackgroundLight();
+    wxColour fg_normal = is_dark ? UIColors::InputForegroundDark() : UIColors::InputForegroundLight();
+
+#ifdef _WIN32
+    // Invalidate the cached brush so it gets recreated with new color on next WM_CTLCOLOR
+    if (m_hEditBgBrush != NULL)
     {
-        SetBackgroundColour(parent->GetBackgroundColour());
-        SetForegroundColour(parent->GetForegroundColour());
+        DeleteObject(m_hEditBgBrush);
+        m_hEditBgBrush = NULL;
     }
+#endif
+
+    // Set wxWindow background (needed for proper rendering)
+    SetBackgroundColour(bg_normal);
+    SetForegroundColour(fg_normal);
+
+    // Apply to internal text control using ThemedTextCtrl for reliable Windows color handling
+    if (text_ctrl)
+    {
+        text_ctrl->SetThemedColors(bg_normal, fg_normal);
+#ifdef _WIN32
+        // DO NOT call SetDarkExplorerTheme on edit controls!
+        // Edit controls have visual styles disabled at creation via SetWindowTheme(hwnd, L"", L"")
+        // which allows WM_CTLCOLOREDIT brush returns to work. Applying DarkMode_Explorer
+        // would re-enable visual styles and cause Windows to ignore our brushes.
+        // Just force a repaint to apply the new colors via WM_CTLCOLOREDIT.
+        RedrawWindow((HWND) text_ctrl->GetHWND(), NULL, NULL, RDW_ERASE | RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN);
+#endif
+    }
+
     if (button_inc)
         button_inc->Rescale();
     if (button_dec)
@@ -183,8 +262,18 @@ void SpinInputBase::Rescale()
     text_ctrl->SetInitialSize(text_ctrl->GetBestSize());
 
     button_inc->Rescale();
+    button_inc->SetCornerRadius(0);
+    button_inc->SetBorderWidth(0);
     button_dec->Rescale();
+    button_dec->SetCornerRadius(0);
+    button_dec->SetBorderWidth(0);
     messureSize();
+}
+
+void SpinInputBase::msw_rescale()
+{
+    StaticBox::msw_rescale();
+    border_width = 1; // SpinInput uses fixed 1px border, not DPI-scaled
 }
 
 bool SpinInputBase::Enable(bool enable)
@@ -192,7 +281,11 @@ bool SpinInputBase::Enable(bool enable)
     // On Windows, disabled native edit controls ignore SetBackgroundColour and use system colors.
     // Instead of disabling the text_ctrl, we make it read-only and style it to look disabled.
 #ifdef _WIN32
-    bool changed = IsEnabled() != enable;
+    // Use IsThisEnabled() (own state only) rather than IsEnabled() (checks parent chain).
+    // IsEnabled() returns false when a parent is disabled, which would cause EVT_ENABLE_CHANGED
+    // to fire spuriously, toggling the StateHandler's Enabled bit and leaving controls looking
+    // disabled even after the parent is re-enabled.
+    bool changed = wxWindowBase::IsThisEnabled() != enable;
     wxWindow::Enable(enable);
 
     if (changed && text_ctrl)
@@ -200,24 +293,29 @@ bool SpinInputBase::Enable(bool enable)
         text_ctrl->SetEditable(enable);
 
         bool dark = Slic3r::GUI::wxGetApp().dark_mode();
+        wxColour bg_color, fg_color;
         if (enable)
         {
-            text_ctrl->SetBackgroundColour(wxColour(dark ? 0x2B2B2B : 0xFFFFFF));
-            text_ctrl->SetForegroundColour(dark ? wxColour(0xFA, 0xFA, 0xFA) : wxColour(0x26, 0x2E, 0x30));
+            bg_color = dark ? UIColors::InputBackgroundDark() : UIColors::InputBackgroundLight();
+            fg_color = dark ? UIColors::InputForegroundDark() : UIColors::InputForegroundLight();
         }
         else
         {
-            text_ctrl->SetBackgroundColour(wxColour(dark ? 0x404040 : 0xD9D9D9));
-            text_ctrl->SetForegroundColour(wxColour(dark ? 0x808080 : 0x909090));
+            bg_color = dark ? UIColors::InputBackgroundDisabledDark() : UIColors::InputBackgroundDisabledLight();
+            fg_color = dark ? UIColors::InputForegroundDisabledDark() : UIColors::InputForegroundDisabledLight();
         }
-        text_ctrl->Refresh();
+        text_ctrl->SetThemedColors(bg_color, fg_color);
 
         button_inc->Enable(enable);
         button_dec->Enable(enable);
 
+        // Send EVT_ENABLE_CHANGED FIRST so state_handler updates before refresh
         wxCommandEvent e(EVT_ENABLE_CHANGED);
         e.SetEventObject(this);
         GetEventHandler()->ProcessEvent(e);
+
+        // Now refresh with the updated state
+        Refresh();
     }
     return changed;
 #else
@@ -235,6 +333,57 @@ bool SpinInputBase::Enable(bool enable)
     return result;
 #endif
 }
+
+#ifdef _WIN32
+WXLRESULT SpinInputBase::MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam)
+{
+    // Handle WM_CTLCOLOREDIT and WM_CTLCOLORSTATIC from our child ThemedTextCtrl
+    // These messages are sent to the PARENT window when the edit control needs painting
+    if (nMsg == WM_CTLCOLOREDIT || nMsg == WM_CTLCOLORSTATIC)
+    {
+        // Get colors based on current theme AND enabled state
+        bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
+        bool is_enabled = IsEnabled();
+        wxColour bgColor, fgColor;
+        if (is_enabled)
+        {
+            bgColor = is_dark ? UIColors::InputBackgroundDark() : UIColors::InputBackgroundLight();
+            fgColor = is_dark ? UIColors::InputForegroundDark() : UIColors::InputForegroundLight();
+        }
+        else
+        {
+            bgColor = is_dark ? UIColors::InputBackgroundDisabledDark() : UIColors::InputBackgroundDisabledLight();
+            fgColor = is_dark ? UIColors::InputForegroundDisabledDark() : UIColors::InputForegroundDisabledLight();
+        }
+
+        HDC hdc = (HDC) wParam;
+        ::SetBkColor(hdc, RGB(bgColor.Red(), bgColor.Green(), bgColor.Blue()));
+        ::SetTextColor(hdc, RGB(fgColor.Red(), fgColor.Green(), fgColor.Blue()));
+        ::SetBkMode(hdc, OPAQUE);
+
+        // Create native GDI brush directly
+        if (m_hEditBgBrush != NULL)
+        {
+            LOGBRUSH lb;
+            if (GetObject(m_hEditBgBrush, sizeof(lb), &lb) > 0)
+            {
+                COLORREF newColor = RGB(bgColor.Red(), bgColor.Green(), bgColor.Blue());
+                if (lb.lbColor != newColor)
+                {
+                    DeleteObject(m_hEditBgBrush);
+                    m_hEditBgBrush = NULL;
+                }
+            }
+        }
+        if (m_hEditBgBrush == NULL)
+        {
+            m_hEditBgBrush = CreateSolidBrush(RGB(bgColor.Red(), bgColor.Green(), bgColor.Blue()));
+        }
+        return (WXLRESULT) m_hEditBgBrush;
+    }
+    return wxNavigationEnabled<StaticBox>::MSWWindowProc(nMsg, wParam, lParam);
+}
+#endif
 
 void SpinInputBase::paintEvent(wxPaintEvent &evt)
 {
@@ -277,7 +426,9 @@ void SpinInputBase::messureSize()
 {
     wxSize size = GetSize();
     wxSize textSize = text_ctrl->GetSize();
-    int h = textSize.y + 8;
+    // Height padding scales with DPI (matches TextInput)
+    const int height_padding = GetScaledHeightPadding();
+    int h = textSize.y + height_padding;
     if (size.y != h)
     {
         size.y = h;
@@ -285,20 +436,26 @@ void SpinInputBase::messureSize()
         SetMinSize(size);
     }
 
-    wxSize btnSize = {14, (size.y - 4) / 2};
+    // Fixed base button sizing
+    const int btn_base_width = GetButtonBaseWidth();
+    const int btn_height_offset = GetButtonHeightOffset();
+    const int text_margin = GetTextMargin();
+    const int small_offset = GetSmallOffset();
+
+    wxSize btnSize = {btn_base_width, (size.y - btn_height_offset) / 2};
     btnSize.x = btnSize.x * btnSize.y / 10;
 
     const double scale = this->GetContentScaleFactor();
 
     wxClientDC dc(this);
     labelSize = dc.GetMultiLineTextExtent(GetLabel());
-    textSize.x = size.x - labelSize.x - btnSize.x - 16;
+    textSize.x = size.x - labelSize.x - btnSize.x - text_margin;
     text_ctrl->SetSize(textSize);
     text_ctrl->SetPosition({int(3. * scale), (size.y - textSize.y) / 2});
     button_inc->SetSize(btnSize);
     button_dec->SetSize(btnSize);
-    button_inc->SetPosition({size.x - btnSize.x - int(3. * scale), size.y / 2 - btnSize.y /* - 1*/});
-    button_dec->SetPosition({size.x - btnSize.x - int(3. * scale), size.y / 2 + 1});
+    button_inc->SetPosition({size.x - btnSize.x - int(3. * scale), size.y / 2 - btnSize.y});
+    button_dec->SetPosition({size.x - btnSize.x - int(3. * scale), size.y / 2 + small_offset});
 }
 
 void SpinInputBase::onText(wxCommandEvent &event)
@@ -333,11 +490,16 @@ void SpinInput::Create(wxWindow *parent, wxString text, wxString label, const wx
     state_handler.attach({&label_color, &text_color});
     state_handler.update_binds();
 
-    text_ctrl = new wxTextCtrl(this, wxID_ANY, text, {20, 4}, wxDefaultSize, style | wxBORDER_NONE | wxTE_PROCESS_ENTER,
-                               wxTextValidator(wxFILTER_NUMERIC));
+    text_ctrl = new Slic3r::GUI::ThemedTextCtrl(this, wxID_ANY, text, {20, 4}, wxDefaultSize,
+                                                style | wxBORDER_NONE | wxTE_PROCESS_ENTER,
+                                                wxTextValidator(wxFILTER_NUMERIC));
 #ifdef __WXOSX__
     text_ctrl->OSXDisableAllSmartSubstitutions();
 #endif // __WXOSX__
+#ifdef _WIN32
+    // Disable Windows visual styles so WM_CTLCOLOREDIT colors are respected
+    SetWindowTheme((HWND) text_ctrl->GetHWND(), L"", L"");
+#endif
     text_ctrl->SetInitialSize(text_ctrl->GetBestSize());
     state_handler.attach_child(text_ctrl);
 
@@ -352,11 +514,14 @@ void SpinInput::Create(wxWindow *parent, wxString text, wxString label, const wx
     timer.Bind(wxEVT_TIMER, &SpinInput::onTimer, this);
 
     SetFont(Slic3r::GUI::wxGetApp().normal_font());
-    if (parent)
-    {
-        SetBackgroundColour(parent->GetBackgroundColour());
-        SetForegroundColour(parent->GetForegroundColour());
-    }
+    // Use UIColors to ensure correct theme colors on startup
+    bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
+    wxColour bg_color = is_dark ? UIColors::InputBackgroundDark() : UIColors::InputBackgroundLight();
+    wxColour fg_color = is_dark ? UIColors::InputForegroundDark() : UIColors::InputForegroundLight();
+    SetBackgroundColour(bg_color);
+    SetForegroundColour(fg_color);
+    // Set themed colors on internal text control for reliable Windows color handling
+    text_ctrl->SetThemedColors(bg_color, fg_color);
 
     long initialFromText;
     if (text.ToLong(&initialFromText))
@@ -464,10 +629,9 @@ void SpinInput::onTextEnter(wxCommandEvent &event)
 
 void SpinInput::mouseWheelMoved(wxMouseEvent &event)
 {
-    auto delta = ((event.GetWheelRotation() < 0) == event.IsWheelInverted()) ? step : -step;
-    SetValue(val + delta);
-    sendSpinEvent();
-    text_ctrl->SetFocus();
+    // Don't change value on mouse wheel - too easy to accidentally change settings while scrolling
+    // Pass the event to parent for page scrolling
+    event.Skip();
 }
 
 void SpinInput::keyPressed(wxKeyEvent &event)
@@ -519,11 +683,16 @@ void SpinInputDouble::Create(wxWindow *parent, wxString text, wxString label, co
     state_handler.attach({&label_color, &text_color});
     state_handler.update_binds();
 
-    text_ctrl = new wxTextCtrl(this, wxID_ANY, text, {20, 4}, wxDefaultSize, style | wxBORDER_NONE | wxTE_PROCESS_ENTER,
-                               wxTextValidator(wxFILTER_NUMERIC));
+    text_ctrl = new Slic3r::GUI::ThemedTextCtrl(this, wxID_ANY, text, {20, 4}, wxDefaultSize,
+                                                style | wxBORDER_NONE | wxTE_PROCESS_ENTER,
+                                                wxTextValidator(wxFILTER_NUMERIC));
 #ifdef __WXOSX__
     text_ctrl->OSXDisableAllSmartSubstitutions();
 #endif // __WXOSX__
+#ifdef _WIN32
+    // Disable Windows visual styles so WM_CTLCOLOREDIT colors are respected
+    SetWindowTheme((HWND) text_ctrl->GetHWND(), L"", L"");
+#endif
     text_ctrl->SetInitialSize(text_ctrl->GetBestSize());
     state_handler.attach_child(text_ctrl);
 
@@ -538,11 +707,14 @@ void SpinInputDouble::Create(wxWindow *parent, wxString text, wxString label, co
     timer.Bind(wxEVT_TIMER, &SpinInputDouble::onTimer, this);
 
     SetFont(Slic3r::GUI::wxGetApp().normal_font());
-    if (parent)
-    {
-        SetBackgroundColour(parent->GetBackgroundColour());
-        SetForegroundColour(parent->GetForegroundColour());
-    }
+    // Use UIColors to ensure correct theme colors on startup
+    bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
+    wxColour bg_color = is_dark ? UIColors::InputBackgroundDark() : UIColors::InputBackgroundLight();
+    wxColour fg_color = is_dark ? UIColors::InputForegroundDark() : UIColors::InputForegroundLight();
+    SetBackgroundColour(bg_color);
+    SetForegroundColour(fg_color);
+    // Set themed colors on internal text control for reliable Windows color handling
+    text_ctrl->SetThemedColors(bg_color, fg_color);
 
     double initialFromText;
     if (text.ToDouble(&initialFromText))
@@ -671,10 +843,9 @@ void SpinInputDouble::onTextEnter(wxCommandEvent &event)
 
 void SpinInputDouble::mouseWheelMoved(wxMouseEvent &event)
 {
-    auto delta = ((event.GetWheelRotation() < 0) == event.IsWheelInverted()) ? inc : -inc;
-    SetValue(val + delta);
-    sendSpinEvent();
-    text_ctrl->SetFocus();
+    // Don't change value on mouse wheel - too easy to accidentally change settings while scrolling
+    // Pass the event to parent for page scrolling
+    event.Skip();
 }
 
 void SpinInputDouble::keyPressed(wxKeyEvent &event)

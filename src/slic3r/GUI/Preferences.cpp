@@ -166,7 +166,7 @@ void PreferencesDialog::show(const std::string &highlight_opt_key /*= std::strin
                                       app_config->get("default_action_on_dirty_project").empty());
         m_optgroup_gui->set_value("seq_top_layer_only", app_config->get_bool("seq_top_layer_only"));
 
-        // preFlight: Label colors and mode palette are hardcoded
+        // Label colors and mode palette are hardcoded
     }
 
     // invalidate this flag before show preferences
@@ -209,7 +209,7 @@ static void activate_options_tab(std::shared_ptr<ConfigOptionsGroup> optgroup)
     optgroup->activate([]() {}, wxALIGN_RIGHT);
     optgroup->update_visibility(comSimple);
     wxBoxSizer *sizer = static_cast<wxBoxSizer *>(static_cast<wxPanel *>(optgroup->parent())->GetSizer());
-    sizer->Add(optgroup->sizer, 0, wxEXPAND | wxALL, 10);
+    sizer->Add(optgroup->sizer, 0, wxEXPAND | wxALL, wxGetApp().em_unit());
 
     optgroup->parent()->Layout();
 
@@ -329,7 +329,7 @@ void PreferencesDialog::build()
             L("If this is enabled, Slic3r will prompt the last output directory instead of the one containing the input files."),
             app_config->has("remember_output_path") ? app_config->get_bool("remember_output_path") : true);
 
-        // preFlight: Background processing hardcoded to false
+        // Background processing hardcoded to false
 
         append_bool_option(
             m_optgroup_general, "alert_when_supports_needed", L("Alert when supports needed"),
@@ -454,7 +454,7 @@ void PreferencesDialog::build()
 
     m_optgroup_general->append_separator();
 
-    // preFlight: Show splash screen hardcoded to true
+    // Show splash screen hardcoded to true
 
     append_bool_option(m_optgroup_general, "restore_win_position", L("Restore window position on start"),
                        L("If enabled, preFlight will be open at the position it was closed"),
@@ -547,7 +547,7 @@ void PreferencesDialog::build()
 
     if (is_editor)
     {
-        // preFlight: show_collapse_button and color_mapinulation_panel hardcoded to false
+        // show_collapse_button and color_mapinulation_panel hardcoded to false
 
         append_bool_option(
             m_optgroup_gui, "order_volumes", L("Order object volumes by types"),
@@ -585,7 +585,7 @@ void PreferencesDialog::build()
             {{"all", L("All")}, {"release", L("Release only")}, {"none", L("None")}});
 
         m_optgroup_gui->append_separator();
-        // preFlight: use_custom_toolbar_size hardcoded to 100%
+        // use_custom_toolbar_size hardcoded to 100%
     }
 
     activate_options_tab(m_optgroup_gui);
@@ -596,7 +596,7 @@ void PreferencesDialog::build()
         boost::any val = s_keys_map_NotifyReleaseMode.at(app_config->get("notify_release"));
         m_optgroup_gui->get_field("notify_release")->set_value(val, false);
 
-        // preFlight: Removed icon_size_slider, settings_mode_widget, text colors, mode markers
+        // Removed icon_size_slider, settings_mode_widget, text colors, mode markers
         // These are all hardcoded in AppConfig.cpp and GUI_App.cpp
 
         m_optgroup_other = create_options_tab(_L("Other"), tabs);
@@ -705,7 +705,8 @@ void PreferencesDialog::build()
     update_ctrls_alignment();
 
     auto sizer = new wxBoxSizer(wxVERTICAL);
-    sizer->Add(tabs, 1, wxEXPAND | wxTOP | wxLEFT | wxRIGHT, 5);
+    int em = wxGetApp().em_unit();
+    sizer->Add(tabs, 1, wxEXPAND | wxTOP | wxLEFT | wxRIGHT, em / 2);
 
     auto buttons = CreateStdDialogButtonSizer(wxOK | wxCANCEL);
     wxGetApp().SetWindowVariantForButton(buttons->GetAffirmativeButton());
@@ -720,7 +721,7 @@ void PreferencesDialog::build()
             wxGetApp().UpdateDarkUI(static_cast<wxButton *>(btn));
     }
 
-    sizer->Add(buttons, 0, wxALIGN_CENTER_HORIZONTAL | wxBOTTOM | wxTOP, 10);
+    sizer->Add(buttons, 0, wxALIGN_CENTER_HORIZONTAL | wxBOTTOM | wxTOP, em);
 
     SetSizer(sizer);
     sizer->SetSizeHints(this);
@@ -825,7 +826,7 @@ void PreferencesDialog::accept(wxEvent &)
     for (std::map<std::string, std::string>::iterator it = m_values.begin(); it != m_values.end(); ++it)
         app_config->set(it->first, it->second);
 
-    // preFlight: Label colors and mode palette are hardcoded
+    // Label colors and mode palette are hardcoded
 
     EndModal(wxID_OK);
 
@@ -1064,7 +1065,7 @@ void PreferencesDialog::create_settings_mode_widget()
     m_blinkers[opt_key] = new BlinkingBitmap(parent);
 
     auto sizer = new wxBoxSizer(wxHORIZONTAL);
-    sizer->Add(m_blinkers[opt_key], 0, wxRIGHT, 2);
+    sizer->Add(m_blinkers[opt_key], 0, wxRIGHT, wxGetApp().em_unit() / 5);
     sizer->Add(stb_sizer, 1, wxALIGN_CENTER_VERTICAL);
     m_optgroup_gui->sizer->Add(sizer, 0, wxEXPAND | wxTOP, em_unit());
 
@@ -1088,7 +1089,7 @@ void PreferencesDialog::create_settings_text_color_widget()
     GUI_Descriptions::FillSizerWithTextColorDescriptions(stb_sizer, parent, &m_sys_colour, &m_mod_colour);
 
     auto sizer = new wxBoxSizer(wxHORIZONTAL);
-    sizer->Add(m_blinkers[opt_key], 0, wxRIGHT, 2);
+    sizer->Add(m_blinkers[opt_key], 0, wxRIGHT, wxGetApp().em_unit() / 5);
     sizer->Add(stb_sizer, 1, wxALIGN_CENTER_VERTICAL);
 
     m_optgroup_gui->sizer->Add(sizer, 0, wxEXPAND | wxTOP, em_unit());
@@ -1118,7 +1119,7 @@ void PreferencesDialog::create_settings_mode_color_widget()
                                                          m_mode_palette);
 
     auto sizer = new wxBoxSizer(wxHORIZONTAL);
-    sizer->Add(m_blinkers[opt_key], 0, wxRIGHT, 2);
+    sizer->Add(m_blinkers[opt_key], 0, wxRIGHT, wxGetApp().em_unit() / 5);
     sizer->Add(stb_sizer, 1, wxALIGN_CENTER_VERTICAL);
 
     m_optgroup_gui->sizer->Add(sizer, 0, wxEXPAND | wxTOP, em_unit());
@@ -1204,7 +1205,7 @@ void PreferencesDialog::create_settings_font_widget()
     stb_sizer->Add(font_sizer, 1, wxALIGN_CENTER_VERTICAL);
 
     auto sizer = new wxBoxSizer(wxHORIZONTAL);
-    sizer->Add(m_blinkers[opt_key], 0, wxRIGHT, 2);
+    sizer->Add(m_blinkers[opt_key], 0, wxRIGHT, wxGetApp().em_unit() / 5);
     sizer->Add(stb_sizer, 1, wxALIGN_CENTER_VERTICAL);
 
     m_optgroup_other->sizer->Add(sizer, 1, wxEXPAND | wxTOP, em_unit());
@@ -1223,7 +1224,7 @@ void PreferencesDialog::create_downloader_path_sizer()
     downloader = new DownloaderUtils::Worker(parent);
 
     auto sizer = new wxBoxSizer(wxHORIZONTAL);
-    sizer->Add(m_blinkers[opt_key], 0, wxRIGHT, 2);
+    sizer->Add(m_blinkers[opt_key], 0, wxRIGHT, wxGetApp().em_unit() / 5);
     sizer->Add(downloader, 1, wxALIGN_CENTER_VERTICAL);
 
     m_optgroup_other->sizer->Add(sizer, 0, wxEXPAND | wxTOP, em_unit());

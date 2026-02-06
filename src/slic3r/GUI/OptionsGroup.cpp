@@ -14,7 +14,17 @@
 #include "OptionsGroup.hpp"
 #include "Search.hpp"
 #include "GUI_App.hpp"
+#include "Plater.hpp"
+#include "Sidebar.hpp"
+#include "libslic3r/AppConfig.hpp"
+#ifdef _WIN32
+#include "DarkMode.hpp"
+#include <uxtheme.h>
+#pragma comment(lib, "uxtheme.lib")
+#endif
 #include "OG_CustomCtrl.hpp"
+#include "Widgets/FlatStaticBox.hpp"
+#include "Widgets/CheckBox.hpp"
 #include "format.hpp"
 
 #include <utility>
@@ -75,12 +85,18 @@ const t_field &OptionsGroup::build_field(const t_config_option_key &id, const Co
         case coFloatOrPercent:
         case coFloatsOrPercents:
         case coFloat:
-        case coFloats:
         case coPercent:
         case coPercents:
         case coString:
         case coStrings:
             m_fields.emplace(id, TextCtrl::Create<TextCtrl>(this->ctrl_parent(), opt, id));
+            break;
+        case coFloats:
+            // Use SpinCtrlFloatField for nozzle_diameter, TextCtrl for others
+            if (opt.opt_key == "nozzle_diameter")
+                m_fields.emplace(id, SpinCtrlFloatField::Create<SpinCtrlFloatField>(this->ctrl_parent(), opt, id));
+            else
+                m_fields.emplace(id, TextCtrl::Create<TextCtrl>(this->ctrl_parent(), opt, id));
             break;
         case coBool:
         case coBools:
@@ -337,19 +353,14 @@ void Line::clear()
     if (near_label_widget_win)
         near_label_widget_win = nullptr;
 
+    // Note: widget_sizer and extra_widget_sizer are owned by the parent sizer hierarchy.
+    // They get destroyed when m_page_sizer->Clear(true) is called in Tab::clear_pages().
+    // We just need to nullify our pointers here, not delete them (that would cause double-free).
     if (widget_sizer)
-    {
-        widget_sizer->Clear(true);
-        delete widget_sizer;
         widget_sizer = nullptr;
-    }
 
     if (extra_widget_sizer)
-    {
-        extra_widget_sizer->Clear(true);
-        delete extra_widget_sizer;
         extra_widget_sizer = nullptr;
-    }
 }
 
 wxWindow *OptionsGroup::ctrl_parent() const
@@ -455,18 +466,22 @@ void OptionsGroup::activate_line(Line &line)
         if (line.widget != nullptr)
         {
             // description lines
-            sizer->Add(line.widget(this->ctrl_parent()), 0, wxEXPAND | wxALL, wxOSX ? 0 : 15);
+            // Store the widget sizer so sys_color_changed can update it
+            line.widget_sizer = line.widget(this->ctrl_parent());
+            sizer->Add(line.widget_sizer, 0, wxEXPAND | wxALL, wxOSX ? 0 : (3 * wxGetApp().em_unit() / 2));
             return;
         }
         if (!line.get_extra_widgets().empty())
         {
-            const auto h_sizer = new wxBoxSizer(wxHORIZONTAL);
-            sizer->Add(h_sizer, 1, wxEXPAND | wxALL, wxOSX ? 0 : 15);
+            // Store the sizer so sys_color_changed can update it
+            line.extra_widget_sizer = new wxBoxSizer(wxHORIZONTAL);
+            sizer->Add(line.extra_widget_sizer, 1, wxEXPAND | wxALL, wxOSX ? 0 : (3 * wxGetApp().em_unit() / 2));
 
             bool is_first_item = true;
             for (auto extra_widget : line.get_extra_widgets())
             {
-                h_sizer->Add(extra_widget(this->ctrl_parent()), is_first_item ? 1 : 0, wxLEFT, 15);
+                line.extra_widget_sizer->Add(extra_widget(this->ctrl_parent()), is_first_item ? 1 : 0, wxLEFT,
+                                             (3 * wxGetApp().em_unit() / 2));
                 is_first_item = false;
             }
             return;
@@ -483,9 +498,9 @@ void OptionsGroup::activate_line(Line &line)
                                         this);
         wxGetApp().UpdateDarkUI(custom_ctrl);
         if (is_legend_line)
-            sizer->Add(custom_ctrl, 0, wxEXPAND | wxLEFT, wxOSX ? 0 : 10);
+            sizer->Add(custom_ctrl, 0, wxEXPAND | wxLEFT, wxOSX ? 0 : wxGetApp().em_unit());
         else
-            sizer->Add(custom_ctrl, 0, wxEXPAND | wxALL, wxOSX || !staticbox ? 0 : 5);
+            sizer->Add(custom_ctrl, 0, wxEXPAND | wxALL, wxOSX || !staticbox ? 0 : (wxGetApp().em_unit() / 2));
     }
 
     // Set sidetext width for a better alignment of options in line
@@ -504,9 +519,9 @@ void OptionsGroup::activate_line(Line &line)
         const auto &field = build_field(option);
 
         if (is_window_field(field))
-            sizer->Add(field->getWindow(), 0, wxEXPAND | wxALL, wxOSX ? 0 : 5);
+            sizer->Add(field->getWindow(), 0, wxEXPAND | wxALL, wxOSX ? 0 : (wxGetApp().em_unit() / 2));
         if (is_sizer_field(field))
-            sizer->Add(field->getSizer(), 0, wxEXPAND | wxALL, wxOSX ? 0 : 5);
+            sizer->Add(field->getSizer(), 0, wxEXPAND | wxALL, wxOSX ? 0 : (wxGetApp().em_unit() / 2));
         return;
     }
 
@@ -517,7 +532,8 @@ void OptionsGroup::activate_line(Line &line)
     if (extra_column)
     {
         m_extra_column_item_ptrs.push_back(extra_column(this->ctrl_parent(), line));
-        m_grid_sizer->Add(m_extra_column_item_ptrs.back(), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 3);
+        m_grid_sizer->Add(m_extra_column_item_ptrs.back(), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT,
+                          wxGetApp().em_unit() / 3);
     }
 
     // Build a label if we have it
@@ -550,7 +566,7 @@ void OptionsGroup::activate_line(Line &line)
             }
             if (!line.near_label_widget)
                 m_grid_sizer->Add(label, 0, (staticbox ? 0 : wxALIGN_RIGHT | wxRIGHT) | wxALIGN_CENTER_VERTICAL,
-                                  line.label.IsEmpty() ? 0 : 5);
+                                  line.label.IsEmpty() ? 0 : (wxGetApp().em_unit() / 2));
             else if (!line.label.IsEmpty())
             {
                 // If we're here, we have some widget near the label
@@ -558,7 +574,8 @@ void OptionsGroup::activate_line(Line &line)
                 auto sizer = new wxBoxSizer(wxHORIZONTAL);
                 m_grid_sizer->Add(sizer, 0, wxEXPAND | (staticbox ? wxALL : wxBOTTOM | wxTOP | wxLEFT),
                                   staticbox ? 0 : 1);
-                sizer->Add(label, 0, (staticbox ? 0 : wxALIGN_RIGHT | wxRIGHT) | wxALIGN_CENTER_VERTICAL, 5);
+                sizer->Add(label, 0, (staticbox ? 0 : wxALIGN_RIGHT | wxRIGHT) | wxALIGN_CENTER_VERTICAL,
+                           wxGetApp().em_unit() / 2);
             }
             if (label != nullptr && line.label_tooltip != "")
                 label->SetToolTip(line.label_tooltip);
@@ -572,7 +589,8 @@ void OptionsGroup::activate_line(Line &line)
         if (custom_ctrl)
             line.widget_sizer = wgt;
         else
-            m_grid_sizer->Add(wgt, 0, wxEXPAND | wxBOTTOM | wxTOP, (wxOSX || line.label.IsEmpty()) ? 0 : 5);
+            m_grid_sizer->Add(wgt, 0, wxEXPAND | wxBOTTOM | wxTOP,
+                              (wxOSX || line.label.IsEmpty()) ? 0 : (wxGetApp().em_unit() / 2));
         return;
     }
 
@@ -649,7 +667,7 @@ void OptionsGroup::activate_line(Line &line)
                     wxSize(sidetext_width != -1 ? sidetext_width * wxGetApp().em_unit() : -1, -1), wxALIGN_LEFT);
                 sidetext->SetBackgroundStyle(wxBG_STYLE_PAINT);
                 sidetext->SetFont(wxGetApp().normal_font());
-                h_sizer->Add(sidetext, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, 4);
+                h_sizer->Add(sidetext, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, (wxGetApp().em_unit() * 4) / 10);
             }
 
             // add side widget if any
@@ -660,7 +678,7 @@ void OptionsGroup::activate_line(Line &line)
             }
 
             if (opt.opt_id != option_set.back().opt_id) //! istead of (opt != option_set.back())
-                h_sizer->AddSpacer(6);
+                h_sizer->AddSpacer((wxGetApp().em_unit() * 6) / 10);
         }
     }
 
@@ -678,7 +696,7 @@ void OptionsGroup::activate_line(Line &line)
 
         line.extra_widget_sizer = extra_widget(this->ctrl_parent());
         if (!custom_ctrl)
-            h_sizer->Add(line.extra_widget_sizer, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, 4); //! requires verification
+            h_sizer->Add(line.extra_widget_sizer, 0, wxLEFT | wxALIGN_CENTER_VERTICAL, (wxGetApp().em_unit() * 4) / 10);
     }
 }
 
@@ -693,11 +711,99 @@ bool OptionsGroup::activate(std::function<void()> throw_if_canceled /* = [](){}*
     {
         if (staticbox)
         {
-            stb = new wxStaticBox(m_parent, wxID_ANY, _(title));
+            // Use FlatStaticBox for proper flat borders in both light and dark mode
+            // If sidebar checkbox is enabled, use space as title and overlay our own header
+            wxString box_title = m_enable_sidebar_checkbox ? " " : _(title);
+            stb = new FlatStaticBox(m_parent, wxID_ANY, box_title);
             if (!wxOSX)
                 stb->SetBackgroundStyle(wxBG_STYLE_PAINT);
             stb->SetFont(wxOSX ? wxGetApp().normal_font() : wxGetApp().bold_font());
             wxGetApp().UpdateDarkUI(stb);
+
+            // Create checkbox overlay for sidebar visibility if enabled
+            if (m_enable_sidebar_checkbox)
+            {
+                // Use the static box's background color (section interior) for the header
+                // This matches the area inside the border where most of the header sits
+                m_header_panel = new wxPanel(stb, wxID_ANY);
+                m_header_panel->SetBackgroundColour(stb->GetBackgroundColour());
+
+                auto *header_sizer = new wxBoxSizer(wxHORIZONTAL);
+
+                // Create our custom checkbox
+                m_sidebar_checkbox = new ::CheckBox(m_header_panel);
+                m_sidebar_checkbox->SetValue(true); // Default to visible in sidebar
+                m_sidebar_checkbox->SetToolTip(_L("Show this section in the sidebar"));
+
+                // Bind click event to set all row checkboxes
+                m_sidebar_checkbox->Bind(wxEVT_CHECKBOX,
+                                         [this](wxCommandEvent &evt)
+                                         {
+                                             bool checked = m_sidebar_checkbox->GetValue();
+                                             set_all_rows_sidebar_visible(checked);
+                                             evt.Skip();
+                                         });
+
+                // Create label text matching section background
+                auto *label_text = new wxStaticText(m_header_panel, wxID_ANY, _(title));
+                label_text->SetFont(wxOSX ? wxGetApp().normal_font() : wxGetApp().bold_font());
+                label_text->SetBackgroundColour(stb->GetBackgroundColour());
+                wxGetApp().UpdateDarkUI(label_text);
+
+                header_sizer->Add(m_sidebar_checkbox, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT,
+                                  (wxGetApp().em_unit() * 4) / 10);
+                header_sizer->Add(label_text, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT,
+                                  wxGetApp().em_unit() / 3); // DPI-scaled gap after label
+
+                m_header_panel->SetSizer(header_sizer);
+                m_header_panel->Fit();
+
+                // Calculate position to center header on the top border line
+                // The static box border is drawn at approximately textHeight/2 from the top
+                // We want our header centered on that border line
+                int header_height = m_header_panel->GetSize().GetHeight();
+                int label_height = label_text->GetSize().GetHeight();
+                int border_y = label_height / 2;                // Where the top border line is drawn
+                int y_pos = border_y - (header_height / 2) + 1; // +1 for fine tuning
+
+                // Use x offset of 8 to match where static box labels normally appear
+                m_header_panel->SetPosition(wxPoint(8, y_pos));
+
+                // Raise the header panel to ensure it's on top of the static box border
+                m_header_panel->Raise();
+
+                // Bind to paint event to keep header on top when static box redraws
+                // Use CallAfter to ensure Raise happens after paint completes
+                stb->Bind(wxEVT_PAINT,
+                          [this](wxPaintEvent &evt)
+                          {
+                              evt.Skip(); // Let the static box paint first
+                              if (m_header_panel && m_header_panel->IsShownOnScreen())
+                              {
+                                  wxTheApp->CallAfter(
+                                      [this]()
+                                      {
+                                          if (m_header_panel && m_header_panel->IsShownOnScreen())
+                                          {
+                                              m_header_panel->Raise();
+                                              m_header_panel->Refresh();
+                                          }
+                                      });
+                              }
+                          });
+
+                // Bind size event to reposition header when static box is resized
+                stb->Bind(wxEVT_SIZE,
+                          [this, y_pos](wxSizeEvent &evt)
+                          {
+                              if (m_header_panel && m_header_panel->IsShownOnScreen())
+                              {
+                                  m_header_panel->SetPosition(wxPoint(8, y_pos));
+                                  m_header_panel->Raise();
+                              }
+                              evt.Skip();
+                          });
+            }
         }
         else
             stb = nullptr;
@@ -721,7 +827,7 @@ bool OptionsGroup::activate(std::function<void()> throw_if_canceled /* = [](){}*
         static_cast<wxFlexGridSizer *>(m_grid_sizer)->SetFlexibleDirection(wxBOTH);
         static_cast<wxFlexGridSizer *>(m_grid_sizer)->AddGrowableCol(grow_col);
 
-        sizer->Add(m_grid_sizer, 0, wxEXPAND | wxALL, wxOSX || !staticbox ? 0 : 5);
+        sizer->Add(m_grid_sizer, 0, wxEXPAND | wxALL, wxOSX || !staticbox ? 0 : (wxGetApp().em_unit() / 2));
 
         // activate lines
         for (Line &line : m_lines)
@@ -733,6 +839,10 @@ bool OptionsGroup::activate(std::function<void()> throw_if_canceled /* = [](){}*
         ctrl_horiz_alignment = horiz_alignment;
         if (custom_ctrl)
             custom_ctrl->init_max_win_width();
+
+        // Initialize section checkbox state based on stored row visibility
+        if (m_sidebar_checkbox)
+            update_section_checkbox_from_rows();
     }
     catch (UIBuildCanceled &)
     {
@@ -750,6 +860,14 @@ void OptionsGroup::clear(bool destroy_custom_ctrl)
 {
     if (!sizer)
         return;
+
+    // Clean up sidebar checkbox header panel
+    if (m_header_panel)
+    {
+        m_header_panel->Destroy();
+        m_header_panel = nullptr;
+        m_sidebar_checkbox = nullptr; // Destroyed with parent
+    }
 
     m_grid_sizer = nullptr;
     sizer = nullptr;
@@ -800,6 +918,64 @@ void OptionsGroup::on_change_OG(const t_config_option_key &opt_id, const boost::
 {
     if (on_change != nullptr)
         on_change(opt_id, value);
+}
+
+void OptionsGroup::set_all_rows_sidebar_visible(bool visible)
+{
+    if (!custom_ctrl)
+        return;
+
+    // Set visibility for all rows via AppConfig
+    for (const Line &line : m_lines)
+    {
+        const std::vector<Option> &options = line.get_options();
+        if (options.empty())
+            continue;
+
+        // Set visibility for ALL options on this line (handles multi-option rows like "Solid layers")
+        for (const auto &opt : options)
+            get_app_config()->set("sidebar_visibility", opt.opt_id, visible ? "1" : "0");
+    }
+
+    // Save immediately so settings persist even if app crashes
+    get_app_config()->save();
+
+    // Refresh the custom ctrl to update checkbox display
+    custom_ctrl->Refresh();
+
+    // Trigger sidebar rebuild to reflect visibility changes
+    // Use CallAfter to avoid potential issues during event handling
+    wxTheApp->CallAfter(
+        []()
+        {
+            if (wxGetApp().plater())
+                wxGetApp().sidebar().rebuild_settings_panels();
+        });
+}
+
+void OptionsGroup::update_section_checkbox_from_rows()
+{
+    if (!m_sidebar_checkbox || !custom_ctrl)
+        return;
+
+    // Count how many rows are visible
+    int visible_count = 0;
+    int total_count = 0;
+
+    for (const Line &line : m_lines)
+    {
+        const std::vector<Option> &options = line.get_options();
+        if (options.empty())
+            continue;
+
+        total_count++;
+        const std::string &opt_key = options.front().opt_id;
+        if (get_app_config()->get("sidebar_visibility", opt_key) != "0")
+            visible_count++;
+    }
+
+    // If any rows are visible, section checkbox should be checked
+    m_sidebar_checkbox->SetValue(visible_count > 0);
 }
 
 Option ConfigOptionsGroup::get_option(const std::string &opt_key, int opt_index /*= -1*/)
@@ -1047,36 +1223,76 @@ void ConfigOptionsGroup::sys_color_changed()
         // update bitmaps for extra column items (like "delete" buttons on settings panel)
         for (auto extra_col : m_extra_column_item_ptrs)
             wxGetApp().UpdateDarkUI(extra_col);
+
+        // Update FlatStaticBox theme for proper borders
+        if (auto *flat_stb = dynamic_cast<FlatStaticBox *>(stb))
+            flat_stb->SysColorsChanged();
+        else
+            stb->Refresh();
+
+        // Update sidebar checkbox header panel colors to match static box interior
+        if (m_header_panel)
+        {
+            m_header_panel->SetBackgroundColour(stb->GetBackgroundColour());
+            for (wxWindow *child : m_header_panel->GetChildren())
+            {
+                if (auto *checkbox = dynamic_cast<::CheckBox *>(child))
+                    checkbox->sys_color_changed();
+                else
+                {
+                    child->SetBackgroundColour(stb->GetBackgroundColour());
+                    wxGetApp().UpdateDarkUI(child);
+                }
+            }
+            m_header_panel->Refresh();
+        }
     }
 
     if (custom_ctrl)
         wxGetApp().UpdateDarkUI(custom_ctrl);
 #endif
 
-    auto update = [](wxSizer *sizer)
+    // Recursively update all windows in a sizer hierarchy
+    std::function<void(wxSizer *)> update_recursive = [&update_recursive](wxSizer *sizer)
     {
+        if (!sizer)
+            return;
         for (wxSizerItem *item : sizer->GetChildren())
+        {
             if (item->IsWindow())
             {
                 wxWindow *win = item->GetWindow();
                 // check if window is ScalableButton
                 if (ScalableButton *sc_btn = dynamic_cast<ScalableButton *>(win))
-                {
                     sc_btn->sys_color_changed();
-                    return;
+                else
+                {
+                    wxGetApp().UpdateDarkUI(win, dynamic_cast<wxButton *>(win) != nullptr);
+                    win->Refresh();
                 }
-                wxGetApp().UpdateDarkUI(win, dynamic_cast<wxButton *>(win) != nullptr);
             }
+            else if (item->IsSizer())
+            {
+                // Recursively update nested sizers
+                update_recursive(item->GetSizer());
+            }
+        }
     };
 
-    // scale widgets and extra widgets if any exists
+    // Update widgets and extra widgets if any exists
     for (const Line &line : m_lines)
     {
         if (line.widget_sizer)
-            update(line.widget_sizer);
+            update_recursive(line.widget_sizer);
         if (line.extra_widget_sizer)
-            update(line.extra_widget_sizer);
+            update_recursive(line.extra_widget_sizer);
     }
+
+    // Also update m_grid_sizer for non-custom_ctrl cases where widget_sizer wasn't set
+    // Only access m_grid_sizer if the group is still active and has content
+    // (empty m_lines means the group was cleared and m_grid_sizer may be dangling)
+    if (m_grid_sizer && sizer && !m_lines.empty())
+        update_recursive(m_grid_sizer);
 
     // update undo buttons : rescale bitmaps
     for (const auto &field : m_fields)
@@ -1221,9 +1437,16 @@ boost::any ConfigOptionsGroup::get_config_value(const DynamicPrintConfig &config
         break;
     }
     case coStrings:
+    {
+        auto *str_opt = config.option<ConfigOptionStrings>(opt_key);
+        if (!str_opt)
+        {
+            ret = text_value;
+            break;
+        }
         if (opt_key == "compatible_printers" || opt_key == "compatible_prints" || opt_key == "gcode_substitutions")
         {
-            ret = config.option<ConfigOptionStrings>(opt_key)->values;
+            ret = str_opt->values;
             break;
         }
         if (opt_key == "filament_ramming_parameters")
@@ -1231,11 +1454,11 @@ boost::any ConfigOptionsGroup::get_config_value(const DynamicPrintConfig &config
             ret = config.opt_string(opt_key, static_cast<unsigned int>(idx));
             break;
         }
-        if (config.option<ConfigOptionStrings>(opt_key)->values.empty())
+        if (str_opt->values.empty())
             ret = text_value;
         else if (opt->gui_flags == "serialized")
         {
-            std::vector<std::string> values = config.option<ConfigOptionStrings>(opt_key)->values;
+            const std::vector<std::string> &values = str_opt->values;
             if (!values.empty() && !values[0].empty())
                 for (const std::string &el : values)
                     text_value += from_u8(el) + ";";
@@ -1244,6 +1467,7 @@ boost::any ConfigOptionsGroup::get_config_value(const DynamicPrintConfig &config
         else
             ret = from_u8(config.opt_string(opt_key, static_cast<unsigned int>(idx)));
         break;
+    }
     case coBool:
         ret = config.opt_bool(opt_key);
         break;

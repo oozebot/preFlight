@@ -461,6 +461,35 @@ public:
     wxWindow *getWindow() override { return window; }
 };
 
+class SpinCtrlFloatField : public Field
+{
+    using Field::Field;
+
+public:
+    SpinCtrlFloatField(const ConfigOptionDef &opt, const t_config_option_key &id) : Field(opt, id) {}
+    SpinCtrlFloatField(wxWindow *parent, const ConfigOptionDef &opt, const t_config_option_key &id)
+        : Field(parent, opt, id)
+    {
+    }
+    ~SpinCtrlFloatField() {}
+
+    wxWindow *window{nullptr};
+    void BUILD() override;
+    void propagate_value();
+
+    void set_value(const boost::any &value, bool change_event = false) override;
+    void set_last_meaningful_value() override;
+    void set_na_value() override;
+
+    boost::any &get_value() override;
+
+    void msw_rescale() override;
+    void sys_color_changed() override;
+    void enable() override;
+    void disable() override;
+    wxWindow *getWindow() override { return window; }
+};
+
 class Choice : public Field
 {
     using Field::Field;

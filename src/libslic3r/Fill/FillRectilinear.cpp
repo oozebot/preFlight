@@ -2464,6 +2464,28 @@ static std::vector<MonotonicRegion> generate_montonous_regions(std::vector<Segme
                     if (left != right_left)
                         // Left & right draws don't overlap exclusively, right neighbor segment overlaps with multiple segments at its left.
                         break;
+                    // preFlight: Verify at least one horizontal contour link exists from
+                    // the left vertical segment into the right overlap range. Without this,
+                    // polylines_from_paths will get iright=-1 and fail to traverse the region.
+                    {
+                        bool has_contour_link = false;
+                        int right_low_idx = int(right.first - vline_right.intersections.data());
+                        int right_high_idx = int(right.second - vline_right.intersections.data());
+                        for (SegmentIntersection *ip = left.first; ip <= left.second; ++ip)
+                        {
+                            if (ip->has_right_horizontal())
+                            {
+                                int rh = ip->right_horizontal();
+                                if (rh >= right_low_idx && rh <= right_high_idx)
+                                {
+                                    has_contour_link = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (!has_contour_link)
+                            break;
+                    }
                     region.right.vline = i_vline;
                     region.right.low = int(right.first - vline_right.intersections.data());
                     region.right.high = int(right.second - vline_right.intersections.data());
@@ -3205,6 +3227,11 @@ static std::vector<MonotonicRegionLink> chain_monotonic_regions(std::vector<Mono
                             NextCandidate{next, &path2, &path2_flipped, path_probability(path2), true});
                     }
                 }
+                // preFlight: If no candidates from either right_neighbors or queue,
+                // this ant is stuck in a dependency dead-end. Break to avoid UB from
+                // std::max_element on an empty range.
+                if (next_candidates.empty())
+                    break;
                 float dice = float(rng()) / float(rng.max());
                 std::vector<NextCandidate>::iterator take_path;
                 if (dice < probability_take_best)
@@ -3279,6 +3306,11 @@ static std::vector<MonotonicRegionLink> chain_monotonic_regions(std::vector<Mono
                                              pheromone_diversification * pheromone_initial_deposit;
                 assert(validate_unprocessed());
             }
+
+            // preFlight: Skip incomplete paths where an ant got stuck in a dead-end.
+            // An incomplete path would be shorter and incorrectly win best_path selection.
+            if (path.size() != regions.size())
+                continue;
 
             // Perform 3-opt local optimization of the path.
             monotonic_3_opt(path, segs);
@@ -3857,6 +3889,17 @@ bool FillRectilinear::fill_surface_by_lines(const Surface *surface, const FillPa
 
         traverse_graph_generate_polylines(poly_with_offset, params, segs, this->has_consistent_pattern(),
                                           polylines_out);
+    }
+
+    // preFlight: Clip generated polylines against the fill boundary to prevent lines from
+    // escaping through polygon holes. This handles complex multi-hole geometries where
+    // the monotonic region generation creates regions spanning vlines without contour links.
+    if (polylines_out.size() > n_polylines_out_initial && !poly_with_offset.expolygons_outer.empty())
+    {
+        Polylines new_polylines(polylines_out.begin() + n_polylines_out_initial, polylines_out.end());
+        Polylines clipped = intersection_pl(new_polylines, poly_with_offset.expolygons_outer);
+        polylines_out.erase(polylines_out.begin() + n_polylines_out_initial, polylines_out.end());
+        polylines_out.insert(polylines_out.end(), clipped.begin(), clipped.end());
     }
 
 #ifdef SLIC3R_DEBUG

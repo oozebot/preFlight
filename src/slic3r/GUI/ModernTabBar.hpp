@@ -8,9 +8,15 @@
 #include <wx/button.h>
 #include <vector>
 #include <functional>
+#include <memory>
+
+#include "preFlight.PrinterConnectionChecker.hpp"
 
 namespace Slic3r
 {
+
+class DynamicPrintConfig;
+
 namespace GUI
 {
 
@@ -30,11 +36,15 @@ public:
         TAB_PRINT_SETTINGS,
         TAB_FILAMENTS,
         TAB_PRINTERS,
+        TAB_PRINTER_WEBVIEW, // Dynamic printer interface tab
         TAB_COUNT
     };
 
     // Add a button/tab
     void AddButton(TabType type, const wxString &label, std::function<void()> callback);
+
+    // Add Settings dropdown button (replaces individual Print Settings, Filaments, Printers buttons)
+    void AddSettingsDropdownButton(std::function<void(TabType)> callback);
 
     // Select a tab programmatically
     void SelectTab(TabType type);
@@ -56,7 +66,16 @@ public:
     void SetSendToPrinterCallback(std::function<void()> callback); // Set callback for Send to Printer
     void RefreshPrinterConnectionState();                          // Re-evaluate printer connection and update dropdown
 
+    // Printer webview tab methods
+    void ShowPrinterWebViewTab(const wxString &printerName, std::function<void()> callback);
+    void HidePrinterWebViewTab();
+    void UpdatePrinterConnectionState(PrinterConnectionChecker::State state);
+    bool HasPrinterWebViewTab() const { return m_printer_webview_btn != nullptr; }
+    void SelectPrinterWebViewTab();
+    void SetPrinterConfig(const DynamicPrintConfig *config);
+
     void sys_color_changed();
+    void msw_rescale();
 
 private:
     struct TabButton
@@ -92,7 +111,20 @@ private:
     wxColour m_color_text_selected;
     wxColour m_color_text_disabled;
     wxColour m_color_border;
+
+    // Settings dropdown button
+    wxButton *m_settings_dropdown_btn{nullptr};
+    std::function<void(TabType)> m_settings_callback;
+
+    // Printer webview tab members
+    wxButton *m_printer_webview_btn{nullptr};
+    std::unique_ptr<PrinterConnectionChecker> m_connection_checker;
+    PrinterConnectionChecker::State m_connection_state{PrinterConnectionChecker::State::Unknown};
+    wxString m_printer_webview_name;
+    std::function<void()> m_printer_webview_callback;
+    int m_printer_webview_sizer_index{-1}; // Index in sizer for insertion/removal
 };
+
 
 } // namespace GUI
 } // namespace Slic3r

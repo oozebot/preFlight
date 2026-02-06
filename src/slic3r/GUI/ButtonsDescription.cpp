@@ -71,6 +71,8 @@ wxBitmapBundle *ModePaletteComboBox::get_bmp(const std::vector<std::string> &pal
     for (const auto &color : palette)
         bitmap_key += color + "+";
 
+    // Logical pixel sizes - wxBitmapBundle handles DPI scaling automatically.
+    // Do NOT pre-scale with em_unit or these get double-scaled via mksolid/FromSVG.
     const int icon_height = wxOSX ? 10 : 12;
 
     wxBitmapBundle *bmp_bndl = bitmap_cache().find_bndl(bitmap_key);
@@ -95,7 +97,8 @@ namespace GUI_Descriptions
 void FillSizerWithTextColorDescriptions(wxSizer *sizer, wxWindow *parent, wxColourPickerCtrl **sys_colour,
                                         wxColourPickerCtrl **mod_colour)
 {
-    wxFlexGridSizer *grid_sizer = new wxFlexGridSizer(3, 5, 5);
+    int em = Slic3r::GUI::wxGetApp().em_unit();
+    wxFlexGridSizer *grid_sizer = new wxFlexGridSizer(3, em / 2, em / 2);
     sizer->Add(grid_sizer, 0, wxEXPAND);
 
     auto add_color = [grid_sizer, parent](wxColourPickerCtrl **color_picker, const wxColour &color,
@@ -178,7 +181,8 @@ void FillSizerWithModeColorDescriptions(wxSizer *sizer, wxWindow *parent,
 
     sizer->Add(h_sizer, 0, wxEXPAND | wxBOTTOM, margin);
 
-    wxFlexGridSizer *grid_sizer = new wxFlexGridSizer(9, 5, 5);
+    int em = wxGetApp().em_unit();
+    wxFlexGridSizer *grid_sizer = new wxFlexGridSizer(9, em / 2, em / 2);
     sizer->Add(grid_sizer, 0, wxEXPAND);
 
     const std::vector<wxString> names = {_L("Simple"), _CTX("Advanced", "Mode"), _L("Expert")};
@@ -231,10 +235,11 @@ Dialog::Dialog(wxWindow *parent, const std::vector<ButtonEntry> &entries)
 {
     wxGetApp().UpdateDarkUI(this);
 
-    auto grid_sizer = new wxFlexGridSizer(3, 20, 20);
+    int em = wxGetApp().em_unit();
+    auto grid_sizer = new wxFlexGridSizer(3, 2 * em, 2 * em);
 
     auto main_sizer = new wxBoxSizer(wxVERTICAL);
-    main_sizer->Add(grid_sizer, 0, wxEXPAND | wxALL, 20);
+    main_sizer->Add(grid_sizer, 0, wxEXPAND | wxALL, 2 * em);
 
     // Icon description
     for (const ButtonEntry &entry : m_entries)
@@ -250,17 +255,17 @@ Dialog::Dialog(wxWindow *parent, const std::vector<ButtonEntry> &entries)
     // Text color description
     wxSizer *sizer = new wxBoxSizer(wxVERTICAL);
     GUI_Descriptions::FillSizerWithTextColorDescriptions(sizer, this, &sys_colour, &mod_colour);
-    main_sizer->Add(sizer, 0, wxEXPAND | wxALL, 20);
+    main_sizer->Add(sizer, 0, wxEXPAND | wxALL, 2 * em);
 
     // Mode color markers description
     mode_palette = wxGetApp().get_mode_palette();
 
     wxSizer *mode_sizer = new wxBoxSizer(wxVERTICAL);
     GUI_Descriptions::FillSizerWithModeColorDescriptions(mode_sizer, this, {&simple, &advanced, &expert}, mode_palette);
-    main_sizer->Add(mode_sizer, 0, wxEXPAND | wxALL, 20);
+    main_sizer->Add(mode_sizer, 0, wxEXPAND | wxALL, 2 * em);
 
     auto buttons = CreateStdDialogButtonSizer(wxOK | wxCANCEL);
-    main_sizer->Add(buttons, 0, wxALIGN_CENTER_HORIZONTAL | wxBOTTOM, 10);
+    main_sizer->Add(buttons, 0, wxALIGN_CENTER_HORIZONTAL | wxBOTTOM, em);
 
     wxButton *btn = static_cast<wxButton *>(FindWindowById(wxID_OK, this));
     btn->Bind(wxEVT_BUTTON,

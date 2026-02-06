@@ -613,8 +613,9 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L(
         "The maximum detour length for avoid crossing perimeters. "
         "If the detour is longer than this value, avoid crossing perimeters is not applied for this travel path. "
-        "Detour length could be specified either as an absolute value or as percentage (for example 50%) of a direct travel path.");
-    def->sidetext = L("mm or % (zero to disable)");
+        "Detour length could be specified either as an absolute value or as percentage (for example 50%) of a direct travel path. "
+        "Set to zero to disable.");
+    def->sidetext = L("mm or %");
     def->min = 0;
     def->max_literal = 1000;
     def->mode = comExpert;
@@ -1384,7 +1385,7 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloat(20));
 
     def = this->add("extruder_colour", coStrings);
-    def->label = L("Extruder Color");
+    def->label = L("Extruder color");
     def->tooltip = L("This is only used in the Slic3r interface as a visual help.");
     def->gui_type = ConfigOptionDef::GUIType::color;
     // Empty string means no color assigned yet.
@@ -3041,10 +3042,8 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("nozzle_diameter", coFloats);
     def->label = L("Nozzle diameter");
-    def->tooltip = L(
-        "This is the diameter of your extruder nozzle (for example: 0.5, 0.35 etc.)\n\nNote: This value is controlled from Print Settings > Advanced > Tool Configuration");
+    def->tooltip = L("This is the diameter of your extruder nozzle (for example: 0.5, 0.35 etc.)");
     def->sidetext = L("mm");
-    def->readonly = true;
     def->set_default_value(new ConfigOptionFloats{0.4});
 
     def = this->add("host_type", coEnum);
@@ -3188,11 +3187,9 @@ void PrintConfigDef::init_fff_params()
     def = this->add("interlock_perimeters_enabled", coBool);
     def->label = L("Enable interlocking perimeters");
     def->category = L("Layers and Perimeters");
-    def->tooltip = L(
-        "Creates interlocking layers by varying spacing of innermost perimeters across layers. "
-        "When combined with over-extrusion, material compresses into gaps for enhanced layer bonding. "
-        "Expected strength increase: 10-15% with no additional material or time cost.\n\n"
-        "⚠ Experimental feature - uses spacing variation (not height variation) for patent defensibility.");
+    def->tooltip = L("Creates interlocking layers by varying spacing of innermost perimeters across layers. "
+                     "When combined with over-extrusion, material compresses into gaps for enhanced layer bonding. "
+                     "Expected strength increase: 10-15% with no additional material or time cost.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
 
@@ -3227,16 +3224,19 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Adjusts flow for interlocking perimeters to control bead-to-bead bonding. "
                      "Interlocking shells are spaced apart by design; this setting fattens or "
                      "thins beads to fine-tune layer adhesion.\n\n"
-                     "The optimal value is printer-dependent. Start at 0% and adjust as needed.\n\n"
-                     "Negative values = thinner beads, small gaps (less material)\n"
-                     "0% = no adjustment (default)\n"
-                     "Positive values = fatter beads, more overlap (stronger bonding)");
+                     "The default 10.73% is derived from the geometric constant (1 - π/4) / 2, "
+                     "which accounts for the semicircular bead cross-section. The overlap amount "
+                     "is calculated from layer height: at 10.73%, beads bond optimally; at 100%, "
+                     "beads completely overlap.\n\n"
+                     "Smaller values = thinner beads, less overlap / bonding\n"
+                     "10.73% = ideal overlap / bonding\n"
+                     "Larger values = thicker beads, more overlap / bonding");
     def->sidetext = L("mm or %");
     def->ratio_over = "layer_height";
     def->min = -50;
     def->max = 100;
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloatOrPercent(0, true));
+    def->set_default_value(new ConfigOptionFloatOrPercent(10.73, true));
 
     def = this->add("interlocking_perimeter_extruder", coInt);
     def->label = L("Interlocking perimeter extruder");

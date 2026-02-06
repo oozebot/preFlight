@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <utility>
+#include <cstdlib>
 
 #include "libslic3r/Athena/BeadingStrategy/BeadingStrategy.hpp"
 
@@ -51,6 +52,18 @@ WideningBeadingStrategy::Beading WideningBeadingStrategy::compute(coord_t thickn
             coord_t overlap_offset = extrusion_width - bead_spacing;
             coord_t actual_thickness = thickness + overlap_offset;
             coord_t output_width = actual_thickness; // Use actual detected width
+
+            // Snap to nearest 0.01mm if within 5μm to correct floating-point precision errors
+            // from the skeletal trapezoidation geometry processing.
+            // Examples: 0.210356mm → 0.21mm, 0.199987mm → 0.20mm
+            constexpr coord_t snap_precision = 10000; // 0.01mm in nanometers
+            constexpr coord_t snap_threshold = 5000;  // 5 microns
+            coord_t rounded_width = ((output_width + snap_precision / 2) / snap_precision) * snap_precision;
+            if (std::abs(output_width - rounded_width) <= snap_threshold)
+            {
+                output_width = rounded_width;
+            }
+
             ret.bead_widths.emplace_back(output_width);
             ret.toolpath_locations.emplace_back(thickness / 2);
             ret.left_over = 0;

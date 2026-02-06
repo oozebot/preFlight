@@ -100,6 +100,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/GCodeViewer.cpp
     GUI/ModernTabBar.hpp
     GUI/ModernTabBar.cpp
+    GUI/preFlight.PrinterWebViewPanel.hpp
+    GUI/preFlight.PrinterWebViewPanel.cpp
+    GUI/preFlight.PrinterConnectionChecker.hpp
+    GUI/preFlight.PrinterConnectionChecker.cpp
     GUI/Preferences.cpp
     GUI/Preferences.hpp
     GUI/PresetHints.cpp
@@ -207,6 +211,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/ImGuiWrapper.cpp
     GUI/ImGuiPureWrap.hpp
     GUI/ImGuiPureWrap.cpp
+    GUI/NotesDialog.hpp
+    GUI/NotesDialog.cpp
     Config/Snapshot.cpp
     Config/Snapshot.hpp
     Config/Version.cpp
@@ -295,8 +301,16 @@ set(SLIC3R_GUI_SOURCES
     GUI/Widgets/CheckBox.hpp
     GUI/Widgets/Slider.cpp
     GUI/Widgets/Slider.hpp
+    GUI/Widgets/ScrollBar.cpp
+    GUI/Widgets/ScrollBar.hpp
+    GUI/Widgets/ScrollablePanel.cpp
+    GUI/Widgets/ScrollablePanel.hpp
     GUI/Widgets/ComboBox.cpp
     GUI/Widgets/ComboBox.hpp
+    GUI/Widgets/CustomMenu.cpp
+    GUI/Widgets/CustomMenu.hpp
+    GUI/Widgets/CustomMenuBar.cpp
+    GUI/Widgets/CustomMenuBar.hpp
     GUI/Widgets/DropDown.cpp
     GUI/Widgets/DropDown.hpp
     GUI/Widgets/StateColor.cpp
@@ -305,12 +319,20 @@ set(SLIC3R_GUI_SOURCES
     GUI/Widgets/StateHandler.hpp
     GUI/Widgets/StaticBox.cpp
     GUI/Widgets/StaticBox.hpp
+    GUI/Widgets/FlatStaticBox.cpp
+    GUI/Widgets/FlatStaticBox.hpp
+    GUI/Widgets/CollapsibleSection.cpp
+    GUI/Widgets/CollapsibleSection.hpp
+    GUI/Widgets/LabeledBorderPanel.cpp
+    GUI/Widgets/LabeledBorderPanel.hpp
     GUI/Widgets/SpinInput.cpp
     GUI/Widgets/SpinInput.hpp
     GUI/Widgets/SwitchButton.cpp
     GUI/Widgets/SwitchButton.hpp
     GUI/Widgets/TextInput.cpp
     GUI/Widgets/TextInput.hpp
+    GUI/Widgets/ThemedTextCtrl.cpp
+    GUI/Widgets/ThemedTextCtrl.hpp
     GUI/Widgets/UIColors.hpp
     GUI/FileArchiveDialog.cpp
     GUI/FileArchiveDialog.hpp

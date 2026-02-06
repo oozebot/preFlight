@@ -116,6 +116,22 @@ std::vector<std::string> SettingsFactory::get_options(const bool is_part)
         std::vector<std::string> obj_options = obj_config.keys();
         options.insert(options.end(), obj_options.begin(), obj_options.end());
     }
+
+    // preFlight: filter out settings that have been removed from the UI.
+    // These are kept in the config system for compatibility but should not
+    // be user-accessible via the per-object "Add settings" menu.
+    static const std::vector<std::string> suppressed_options = {
+        "thick_bridges",
+        "thin_walls",
+        "support_material_synchronize_layers",
+    };
+    options.erase(std::remove_if(options.begin(), options.end(),
+                                 [](const std::string &opt) {
+                                     return std::find(suppressed_options.begin(), suppressed_options.end(), opt) !=
+                                            suppressed_options.end();
+                                 }),
+                  options.end());
+
     return options;
 }
 
@@ -279,13 +295,14 @@ static int GetSelectedChoices(wxArrayInt &selections, const wxString &message, c
             for (const auto &string : choices)
                 width = std::max(width, dc.GetTextExtent(string).x);
 
-            // calculate best size of ListBox
-            height += 3 * mac_max_scaling_factor(); // extend height by margins
-            width += 3 * height;                    // extend width by checkbox width and margins
+            // DPI-scaled list box sizing
+            int em = wxGetApp().em_unit();
+            height += (em * 3) / 10; // extend height by margins (3px at 100% DPI)
+            width += 3 * height;     // extend width by checkbox width and margins
 
             // don't make the listbox too tall (limit height to around 10 items)
             // but don't make it too small neither
-            int list_height = wxMax(height * wxMin(wxMax(choices.Count(), 3), 10), 70);
+            int list_height = wxMax(height * wxMin(wxMax(choices.Count(), 3), 10), 7 * em); // min 70px at 100% DPI
             wxSize sz_best = wxSize(width, list_height);
 
             wxSize sz = child->GetSize();
@@ -577,7 +594,7 @@ wxMenu *MenuFactory::append_submenu_add_generic(wxMenu *menu, ModelVolumeType ty
             continue;
         append_menu_item(
             sub_menu, wxID_ANY, _(item), "",
-            [type, item](wxCommandEvent &) { obj_list()->load_generic_subobject(item, type); }, "", menu);
+            [type, item](wxCommandEvent &) { obj_list()->load_generic_subobject(item, type); }, "add_part", menu);
     }
 
     append_menu_item_add_text(sub_menu, type);
@@ -588,7 +605,7 @@ wxMenu *MenuFactory::append_submenu_add_generic(wxMenu *menu, ModelVolumeType ty
         sub_menu->AppendSeparator();
         append_menu_item(
             sub_menu, wxID_ANY, _L("Gallery"), "", [type](wxCommandEvent &) { obj_list()->load_subobject(type, true); },
-            "", menu);
+            "shape_gallery", menu);
     }
 
     return sub_menu;
@@ -648,7 +665,16 @@ static void append_menu_itemm_add_(const wxString &name, GLGizmosManager::EType 
     {
         wxString item_name = wxString(is_submenu_item ? "" : _(ADD_VOLUME_MENU_ITEMS[int(type)].first) + ": ") + name;
         menu->AppendSeparator();
-        const std::string icon_name = is_submenu_item ? "" : ADD_VOLUME_MENU_ITEMS[int(type)].second;
+        std::string icon_name;
+        if (is_submenu_item)
+        {
+            // Use appropriate icon for Text/SVG submenu items
+            icon_name = (gizmo_type == GLGizmosManager::Emboss) ? "add_text_part" : "svg_part";
+        }
+        else
+        {
+            icon_name = ADD_VOLUME_MENU_ITEMS[int(type)].second;
+        }
         append_menu_item(menu, wxID_ANY, item_name, "", add_, icon_name, menu);
     }
 }
@@ -1237,9 +1263,27 @@ MenuFactory::MenuFactory()
 
 void MenuFactory::create_default_menu()
 {
+    // Open Project
+    append_menu_item(
+        &m_default_menu, wxID_ANY, _L("Open Project"), _L("Open a project file"),
+        [](wxCommandEvent &) { plater()->load_project(); }, "open", &m_default_menu, []() { return true; }, m_parent);
+
+    // Add object
+    append_menu_item(
+        &m_default_menu, wxID_ANY, _L("Add object"), _L("Add an object to the platter"),
+        [](wxCommandEvent &) { plater()->add_model(); }, "add_part", &m_default_menu, []() { return true; }, m_parent);
+
+    // Add Shape submenu
     wxMenu *sub_menu = append_submenu_add_generic(&m_default_menu, ModelVolumeType::INVALID);
     append_submenu(
-        &m_default_menu, sub_menu, wxID_ANY, _L("Add Shape"), "", "add_part", []() { return true; }, m_parent);
+        &m_default_menu, sub_menu, wxID_ANY, _L("Add Shape"), "", "add_modifier", []() { return true; }, m_parent);
+
+    m_default_menu.AppendSeparator();
+
+    // Notes
+    append_menu_item(
+        &m_default_menu, wxID_ANY, _L("Notes"), _L("Edit project notes"), [](wxCommandEvent &)
+        { plater()->show_notes_dialog(-1); }, "note", &m_default_menu, []() { return true; }, m_parent);
 }
 
 void MenuFactory::create_common_object_menu(wxMenu *menu)
@@ -1254,6 +1298,14 @@ void MenuFactory::create_common_object_menu(wxMenu *menu)
     menu->AppendSeparator();
 
     append_menu_item_printable(menu);
+    append_menu_item(
+        menu, wxID_ANY, _L("Notes"), _L("Edit notes for this object"),
+        [](wxCommandEvent &)
+        {
+            int obj_idx = plater()->get_selected_object_idx();
+            plater()->show_notes_dialog(obj_idx);
+        },
+        "note", menu, []() { return true; }, m_parent);
     menu->AppendSeparator();
 
     append_menu_item_reload_from_disk(menu);
@@ -1542,9 +1594,28 @@ void MenuFactory::update_objects_menu()
 
 void MenuFactory::update_default_menu()
 {
-    const auto menu_item_id = m_default_menu.FindItem(_("Add Shape"));
-    if (menu_item_id != wxNOT_FOUND)
-        m_default_menu.Destroy(menu_item_id);
+    // Destroy existing items before recreating
+    const auto open_project_id = m_default_menu.FindItem(_("Open Project"));
+    if (open_project_id != wxNOT_FOUND)
+        m_default_menu.Destroy(open_project_id);
+    const auto add_object_id = m_default_menu.FindItem(_("Add object"));
+    if (add_object_id != wxNOT_FOUND)
+        m_default_menu.Destroy(add_object_id);
+    const auto add_shape_id = m_default_menu.FindItem(_("Add Shape"));
+    if (add_shape_id != wxNOT_FOUND)
+        m_default_menu.Destroy(add_shape_id);
+    const auto notes_id = m_default_menu.FindItem(_("Notes"));
+    if (notes_id != wxNOT_FOUND)
+        m_default_menu.Destroy(notes_id);
+    // Remove any remaining separators
+    while (m_default_menu.GetMenuItemCount() > 0)
+    {
+        wxMenuItem *item = m_default_menu.FindItemByPosition(0);
+        if (item && item->IsSeparator())
+            m_default_menu.Destroy(item);
+        else
+            break;
+    }
     create_default_menu();
 }
 

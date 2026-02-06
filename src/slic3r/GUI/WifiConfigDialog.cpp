@@ -83,7 +83,7 @@ WifiConfigDialog::WifiConfigDialog(wxWindow *parent, std::string &file_path, Rem
     m_ssid_button_id = NewControlId();
     // TRN Text of button to rescan visible networks in Wifi Config dialog.
     wxButton *ssid_button = new wxButton(panel, m_ssid_button_id, _(L("Rescan")));
-    ssid_sizer->Add(m_ssid_combo, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, 10);
+    ssid_sizer->Add(m_ssid_combo, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, wxGetApp().em_unit());
     ssid_sizer->Add(ssid_button, 0);
 
     auto *pass_sizer = new wxBoxSizer(wxHORIZONTAL);
@@ -91,14 +91,14 @@ WifiConfigDialog::WifiConfigDialog(wxWindow *parent, std::string &file_path, Rem
     wxStaticText *password_label = new wxStaticText(panel, wxID_ANY, GUI::format_wxstr("%1%:", _L("Password")));
     m_pass_textctrl = new ::TextInput(panel, "", "", "", wxDefaultPosition, wxDefaultSize);
 #if __APPLE__
-    pass_sizer->Add(m_pass_textctrl, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, 10);
+    pass_sizer->Add(m_pass_textctrl, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, wxGetApp().em_unit());
     m_pass_button_id = NewControlId();
     // TRN Text of button to retrieve password from keychain in Wifi Config dialog. Only on Mac.
     wxButton *pass_button = new wxButton(panel, m_pass_button_id, _(L("Retrieve")));
     pass_sizer->Add(pass_button, 0);
     pass_button->Bind(wxEVT_BUTTON, &WifiConfigDialog::on_retrieve_password, this);
 #else
-    pass_sizer->Add(m_pass_textctrl, 1, wxALIGN_CENTER_VERTICAL, 10);
+    pass_sizer->Add(m_pass_textctrl, 1, wxALIGN_CENTER_VERTICAL, wxGetApp().em_unit());
 #endif // __APPLE__
     // show password if current ssid was selected already
     fill_password();
@@ -112,14 +112,15 @@ WifiConfigDialog::WifiConfigDialog(wxWindow *parent, std::string &file_path, Rem
     m_drive_button_id = NewControlId();
     // TRN Text of button to rescan connect usb drives in Wifi Config dialog.
     wxButton *drive_button = new wxButton(panel, m_drive_button_id, _(L("Rescan")));
-    drive_sizer->Add(m_drive_combo, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, 10);
+    drive_sizer->Add(m_drive_combo, 1, wxALIGN_CENTER_VERTICAL | wxRIGHT, wxGetApp().em_unit());
     drive_sizer->Add(drive_button, 0);
 
     // TRN Text of button to write config file in Wifi Config dialog.
     wxButton *ok_button = new wxButton(panel, wxID_OK, _L("Write"));
     wxButton *cancel_button = new wxButton(panel, wxID_CANCEL);
 
-    auto *grid = new wxFlexGridSizer(2, 15, 15);
+    int em = wxGetApp().em_unit();
+    auto *grid = new wxFlexGridSizer(2, (3 * em) / 2, (3 * em) / 2);
     grid->AddGrowableCol(1);
 
     grid->Add(ssid_label, 0, wxALIGN_CENTER_VERTICAL);
@@ -135,7 +136,7 @@ WifiConfigDialog::WifiConfigDialog(wxWindow *parent, std::string &file_path, Rem
     vsizer->Add(explain_label2, 0, wxALIGN_CENTER_VERTICAL);
     vsizer->Add(explain_label3, 0, wxALIGN_CENTER_VERTICAL);
     vsizer->Add(explain_label4, 0, wxALIGN_CENTER_VERTICAL);
-    vsizer->Add(grid, 0, wxEXPAND | wxTOP | wxBOTTOM, 15);
+    vsizer->Add(grid, 0, wxEXPAND | wxTOP | wxBOTTOM, (3 * em) / 2);
 
     wxBoxSizer *buttons_sizer = new wxBoxSizer(wxHORIZONTAL);
     buttons_sizer->Add(ok_button, 1, wxLEFT);
@@ -145,7 +146,7 @@ WifiConfigDialog::WifiConfigDialog(wxWindow *parent, std::string &file_path, Rem
     vsizer->Add(buttons_sizer, 0, wxEXPAND);
 
     wxBoxSizer *topsizer = new wxBoxSizer(wxVERTICAL);
-    topsizer->Add(panel, 1, wxEXPAND | wxALL, 15);
+    topsizer->Add(panel, 1, wxEXPAND | wxALL, (3 * wxGetApp().em_unit()) / 2);
     SetSizerAndFit(topsizer);
 
     ok_button->Bind(wxEVT_BUTTON, &WifiConfigDialog::on_ok, this);

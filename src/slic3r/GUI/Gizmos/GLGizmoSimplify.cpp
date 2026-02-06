@@ -856,7 +856,7 @@ void GLGizmoSimplify::on_render()
             glmodel.set_color(ColorRGBA::WHITE());
 #if !SLIC3R_OPENGL_ES
             if (!OpenGLManager::get_gl_info().is_core_profile())
-                glsafe(::glLineWidth(1.0f));
+                glsafe(::glLineWidth(1.0f * wxGetApp().imgui()->get_style_scaling()));
             glsafe(::glPolygonMode(GL_FRONT_AND_BACK, GL_LINE));
 #endif // !SLIC3R_OPENGL_ES
             glmodel.render();

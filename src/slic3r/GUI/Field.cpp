@@ -31,6 +31,8 @@
 #include "BitmapComboBox.hpp"
 
 #include "Widgets/ComboBox.hpp"
+#include "Widgets/SpinInput.hpp"
+#include "Widgets/UIColors.hpp"
 
 #ifdef __WXOSX__
 #define wxOSX true
@@ -789,19 +791,15 @@ void TextCtrl::enable()
 {
     auto *ctrl = dynamic_cast<text_ctrl *>(window);
     ctrl->Enable();
-#ifdef _WIN32
-    if (wxGetApp().dark_mode())
-        ctrl->SetBackgroundColour(wxGetApp().get_window_default_clr());
-#endif
+    ctrl->SetBackgroundColour(UIColors::InputBackground());
+    ctrl->SetForegroundColour(UIColors::InputForeground());
 }
 void TextCtrl::disable()
 {
     auto *ctrl = dynamic_cast<text_ctrl *>(window);
     ctrl->Disable();
-#ifdef _WIN32
-    if (wxGetApp().dark_mode())
-        ctrl->SetBackgroundColour(wxRGBToColour(NppDarkMode::GetSofterBackgroundColor()));
-#endif
+    ctrl->SetBackgroundColour(UIColors::InputBackgroundDisabled());
+    ctrl->SetForegroundColour(UIColors::InputForegroundDisabled());
 }
 
 #ifdef __WXGTK__
@@ -853,7 +851,9 @@ void CheckBox::Rescale(wxWindow *win)
 
 void CheckBox::SysColorChanged(wxWindow *win)
 {
-    if (!wxGetApp().suppress_round_corners())
+    if (wxGetApp().suppress_round_corners())
+        dynamic_cast<::CheckBox *>(win)->sys_color_changed();
+    else
         dynamic_cast<::SwitchButton *>(win)->SysColorChange();
 }
 
@@ -970,6 +970,8 @@ void CheckBox::sys_color_changed()
     Field::sys_color_changed();
     if (auto switch_btn = dynamic_cast<::SwitchButton *>(window))
         switch_btn->SysColorChange();
+    else if (auto checkbox = dynamic_cast<::CheckBox *>(window))
+        checkbox->sys_color_changed();
 }
 
 void CheckBox::enable()
@@ -1192,6 +1194,138 @@ void SpinCtrl::disable()
 {
     // SpinInputBase::Enable(false) handles all color setting directly
     dynamic_cast<::SpinInput *>(window)->Disable();
+}
+
+// SpinCtrlFloatField - Float spin control (for nozzle diameter, etc.)
+void SpinCtrlFloatField::BUILD()
+{
+    auto size = wxSize(def_width() * m_em_unit, wxDefaultCoord);
+    if (m_opt.height >= 0)
+        size.SetHeight(m_opt.height * m_em_unit);
+    if (m_opt.width >= 0)
+        size.SetWidth(m_opt.width * m_em_unit);
+
+    double default_value = 0.4; // sensible default for nozzle diameter
+    switch (m_opt.type)
+    {
+    case coFloat:
+        default_value = m_opt.default_value->getFloat();
+        break;
+    case coFloats:
+        default_value = m_opt.get_default_value<ConfigOptionFloats>()->get_at(m_opt_idx);
+        break;
+    default:
+        break;
+    }
+
+    const double min_val = m_opt.min > -FLT_MAX ? m_opt.min : 0.1;
+    const double max_val = m_opt.max < FLT_MAX ? m_opt.max : 2.0;
+    const double inc_val = 0.10; // 0.1mm increment to match Print Settings
+
+    auto temp = new ::SpinInputDouble(m_parent, wxString::Format("%.1f", default_value), "", wxDefaultPosition, size,
+                                      wxTE_PROCESS_ENTER | wxSP_ARROW_KEYS, min_val, max_val, default_value, inc_val);
+    temp->SetDigits(1); // 1 decimal place (0.6 not 0.60)
+
+    temp->SetFont(Slic3r::GUI::wxGetApp().normal_font());
+    if (!wxOSX)
+        temp->SetBackgroundStyle(wxBG_STYLE_PAINT);
+    wxGetApp().UpdateDarkUI(temp);
+
+    if (m_opt.height < 0 && parent_is_custom_ctrl)
+        opt_height = (double) temp->GetSize().GetHeight() / m_em_unit;
+
+    temp->Bind(wxEVT_KILL_FOCUS,
+               [this](wxEvent &e)
+               {
+                   e.Skip();
+                   propagate_value();
+               });
+
+    temp->Bind(wxEVT_SPINCTRL, [this](wxCommandEvent &e) { propagate_value(); }, temp->GetId());
+
+    temp->Bind(
+        wxEVT_TEXT_ENTER,
+        [this](wxCommandEvent &e)
+        {
+            e.Skip();
+            propagate_value();
+        },
+        temp->GetId());
+
+    temp->SetToolTip(get_tooltip_text(wxString::Format("%.1f", default_value)));
+
+    window = dynamic_cast<wxWindow *>(temp);
+}
+
+void SpinCtrlFloatField::set_value(const boost::any &value, bool change_event)
+{
+    m_disable_change_event = !change_event;
+    double val = 0.4;
+    if (value.type() == typeid(double))
+        val = boost::any_cast<double>(value);
+    else if (value.type() == typeid(float))
+        val = static_cast<double>(boost::any_cast<float>(value));
+    else if (value.type() == typeid(wxString))
+    {
+        wxString str = boost::any_cast<wxString>(value);
+        str.ToDouble(&val);
+    }
+    else if (value.type() == typeid(std::string))
+    {
+        wxString str = wxString::FromUTF8(boost::any_cast<std::string>(value).c_str());
+        str.ToDouble(&val);
+    }
+    m_value = val;
+    dynamic_cast<::SpinInputDouble *>(window)->SetValue(val);
+    m_disable_change_event = false;
+}
+
+void SpinCtrlFloatField::set_last_meaningful_value()
+{
+    // Not implemented for doubles yet
+}
+
+void SpinCtrlFloatField::set_na_value()
+{
+    // Not implemented for doubles yet
+}
+
+void SpinCtrlFloatField::propagate_value()
+{
+    if (m_disable_change_event)
+        return;
+    double value = dynamic_cast<::SpinInputDouble *>(window)->GetValue();
+    m_value = value;
+    on_change_field();
+}
+
+boost::any &SpinCtrlFloatField::get_value()
+{
+    double value = dynamic_cast<::SpinInputDouble *>(window)->GetValue();
+    return m_value = value;
+}
+
+void SpinCtrlFloatField::msw_rescale()
+{
+    Field::msw_rescale();
+    auto spin = dynamic_cast<::SpinInputDouble *>(window);
+    spin->Rescale();
+}
+
+void SpinCtrlFloatField::sys_color_changed()
+{
+    if (window)
+        wxGetApp().UpdateDarkUI(window);
+}
+
+void SpinCtrlFloatField::enable()
+{
+    dynamic_cast<::SpinInputDouble *>(window)->Enable();
+}
+
+void SpinCtrlFloatField::disable()
+{
+    dynamic_cast<::SpinInputDouble *>(window)->Disable();
 }
 
 #if 1
@@ -1559,19 +1693,15 @@ void Choice::enable()
 {
     auto *ctrl = dynamic_cast<choice_ctrl *>(window);
     ctrl->Enable();
-#ifdef _WIN32
-    if (wxGetApp().dark_mode())
-        ctrl->SetBackgroundColour(wxGetApp().get_window_default_clr());
-#endif
+    ctrl->SetBackgroundColour(UIColors::InputBackground());
+    ctrl->SetForegroundColour(UIColors::InputForeground());
 }
 void Choice::disable()
 {
     auto *ctrl = dynamic_cast<choice_ctrl *>(window);
     ctrl->Disable();
-#ifdef _WIN32
-    if (wxGetApp().dark_mode())
-        ctrl->SetBackgroundColour(wxRGBToColour(NppDarkMode::GetSofterBackgroundColor()));
-#endif
+    ctrl->SetBackgroundColour(UIColors::InputBackgroundDisabled());
+    ctrl->SetForegroundColour(UIColors::InputForegroundDisabled());
 }
 
 void Choice::msw_rescale()
@@ -1850,30 +1980,20 @@ void PointCtrl::enable()
 {
     x_textctrl->Enable();
     y_textctrl->Enable();
-#ifdef _WIN32
-    bool dark = wxGetApp().dark_mode();
-    wxColour bg = dark ? wxColour(0x2B, 0x2B, 0x2B) : wxColour(0xFF, 0xFF, 0xFF);
-    wxColour fg = dark ? wxColour(0xFA, 0xFA, 0xFA) : wxColour(0x26, 0x2E, 0x30);
-    x_textctrl->SetBackgroundColour(bg);
-    y_textctrl->SetBackgroundColour(bg);
-    x_textctrl->SetForegroundColour(fg);
-    y_textctrl->SetForegroundColour(fg);
-#endif
+    x_textctrl->SetBackgroundColour(UIColors::InputBackground());
+    y_textctrl->SetBackgroundColour(UIColors::InputBackground());
+    x_textctrl->SetForegroundColour(UIColors::InputForeground());
+    y_textctrl->SetForegroundColour(UIColors::InputForeground());
 }
 
 void PointCtrl::disable()
 {
     x_textctrl->Disable();
     y_textctrl->Disable();
-#ifdef _WIN32
-    bool dark = wxGetApp().dark_mode();
-    wxColour bg = dark ? wxColour(0x40, 0x40, 0x40) : wxColour(0xD9, 0xD9, 0xD9);
-    wxColour fg = dark ? wxColour(0x80, 0x80, 0x80) : wxColour(0x90, 0x90, 0x90);
-    x_textctrl->SetBackgroundColour(bg);
-    y_textctrl->SetBackgroundColour(bg);
-    x_textctrl->SetForegroundColour(fg);
-    y_textctrl->SetForegroundColour(fg);
-#endif
+    x_textctrl->SetBackgroundColour(UIColors::InputBackgroundDisabled());
+    y_textctrl->SetBackgroundColour(UIColors::InputBackgroundDisabled());
+    x_textctrl->SetForegroundColour(UIColors::InputForegroundDisabled());
+    y_textctrl->SetForegroundColour(UIColors::InputForegroundDisabled());
 }
 
 bool PointCtrl::value_was_changed(text_ctrl *win)

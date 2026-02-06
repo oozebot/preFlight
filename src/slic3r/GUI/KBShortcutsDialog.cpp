@@ -36,10 +36,11 @@ KBShortcutsDialog::KBShortcutsDialog()
     const wxFont &font = wxGetApp().normal_font();
     const wxFont &bold_font = wxGetApp().bold_font();
     SetFont(font);
+    int em = wxGetApp().em_unit();
 
     auto main_sizer = new wxBoxSizer(wxVERTICAL);
 
-    main_sizer->Add(create_header(this, bold_font), 0, wxEXPAND | wxALL, 10);
+    main_sizer->Add(create_header(this, bold_font), 0, wxEXPAND | wxALL, em);
 
 #ifdef _MSW_DARK_MODE
     wxBookCtrlBase *book;
@@ -50,7 +51,7 @@ KBShortcutsDialog::KBShortcutsDialog()
 #else
     wxNotebook *book = new wxNotebook(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxNB_TOP);
 #endif
-    main_sizer->Add(book, 1, wxEXPAND | wxALL, 10);
+    main_sizer->Add(book, 1, wxEXPAND | wxALL, em);
 
     fill_shortcuts();
     for (size_t i = 0; i < m_full_shortcuts.size(); ++i)
@@ -64,12 +65,12 @@ KBShortcutsDialog::KBShortcutsDialog()
     wxGetApp().SetWindowVariantForButton(buttons->GetAffirmativeButton());
     wxGetApp().UpdateDarkUI(buttons->GetAffirmativeButton());
     this->SetEscapeId(wxID_OK);
-    main_sizer->Add(buttons, 0, wxEXPAND | wxALL, 5);
+    main_sizer->Add(buttons, 0, wxEXPAND | wxALL, em / 2);
 
     SetSizer(main_sizer);
     main_sizer->SetSizeHints(this);
     wxSize min_size = GetMinSize();
-    min_size.SetHeight(min_size.GetHeight() + 50); // Add extra height for 2 more rows
+    min_size.SetHeight(min_size.GetHeight() + 5 * em); // DPI-scaled extra height for 2 more rows
     SetMinSize(min_size);
     SetSize(GetSize().GetWidth(), min_size.GetHeight());
     this->CenterOnParent();
@@ -86,8 +87,7 @@ KBShortcutsDialog::KBShortcutsDialog()
 
 void KBShortcutsDialog::on_dpi_changed(const wxRect &suggested_rect)
 {
-    //m_logo_bmp.msw_rescale();
-    //m_header_bitmap->SetBitmap(m_logo_bmp.bmp());
+    // Note: m_header_bitmap uses get_bmp_bundle() which auto-scales with DPI
     msw_buttons_rescale(this, em_unit(), {wxID_OK});
 
     Layout();
@@ -318,7 +318,7 @@ wxPanel *KBShortcutsDialog::create_header(wxWindow *parent, const wxFont &bold_f
     // logo
     m_header_bitmap = new wxStaticBitmap(panel, wxID_ANY, *get_bmp_bundle(wxGetApp().logo_name(), 32));
 
-    sizer->Add(m_header_bitmap, 0, wxEXPAND | wxLEFT | wxRIGHT, 10);
+    sizer->Add(m_header_bitmap, 0, wxEXPAND | wxLEFT | wxRIGHT, wxGetApp().em_unit());
 
     // text
     wxStaticText *text = new wxStaticText(panel, wxID_ANY, _L("Keyboard shortcuts"));
@@ -334,19 +334,20 @@ wxPanel *KBShortcutsDialog::create_header(wxWindow *parent, const wxFont &bold_f
 wxPanel *KBShortcutsDialog::create_page(wxWindow *parent, const ShortcutsItem &shortcuts, const wxFont &font,
                                         const wxFont &bold_font)
 {
+    int em = wxGetApp().em_unit();
     wxPanel *main_page = new wxPanel(parent);
     wxGetApp().UpdateDarkUI(main_page);
     wxBoxSizer *main_sizer = new wxBoxSizer(wxVERTICAL);
 
     if (!shortcuts.first.second.empty())
     {
-        main_sizer->AddSpacer(10);
+        main_sizer->AddSpacer(em);
         wxBoxSizer *info_sizer = new wxBoxSizer(wxHORIZONTAL);
         info_sizer->AddStretchSpacer();
         info_sizer->Add(new wxStaticText(main_page, wxID_ANY, shortcuts.first.second), 0);
         info_sizer->AddStretchSpacer();
         main_sizer->Add(info_sizer, 0, wxEXPAND);
-        main_sizer->AddSpacer(10);
+        main_sizer->AddSpacer(em);
     }
 
     static const int max_items_per_column = 22;
@@ -354,11 +355,11 @@ wxPanel *KBShortcutsDialog::create_page(wxWindow *parent, const ShortcutsItem &s
 
     wxScrolledWindow *scrollable_panel = new wxScrolledWindow(main_page);
     wxGetApp().UpdateDarkUI(scrollable_panel);
-    scrollable_panel->SetScrollbars(20, 20, 50, 50);
-    scrollable_panel->SetInitialSize(wxSize(850, 450));
+    scrollable_panel->SetScrollbars(2 * em, 2 * em, 5 * em, 5 * em);
+    scrollable_panel->SetInitialSize(wxSize(85 * em, 45 * em));
 
     wxBoxSizer *scrollable_panel_sizer = new wxBoxSizer(wxVERTICAL);
-    wxFlexGridSizer *grid_sizer = new wxFlexGridSizer(2 * columns_count, 5, 15);
+    wxFlexGridSizer *grid_sizer = new wxFlexGridSizer(2 * columns_count, em / 2, (em * 15) / 10);
 
     int items_count = (int) shortcuts.second.size();
     for (int i = 0; i < max_items_per_column; ++i)
@@ -388,7 +389,7 @@ wxPanel *KBShortcutsDialog::create_page(wxWindow *parent, const ShortcutsItem &s
         }
     }
 
-    scrollable_panel_sizer->Add(grid_sizer, 1, wxEXPAND | wxALL, 10);
+    scrollable_panel_sizer->Add(grid_sizer, 1, wxEXPAND | wxALL, em);
     scrollable_panel->SetSizer(scrollable_panel_sizer);
 
     main_sizer->Add(scrollable_panel, 1, wxEXPAND);

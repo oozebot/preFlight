@@ -5,6 +5,7 @@
 ///|/
 #include "GUI_Utils.hpp"
 #include "GUI_App.hpp"
+#include "Widgets/UIColors.hpp"
 #include "format.hpp"
 
 #include <algorithm>
@@ -208,9 +209,10 @@ void update_dark_ui(wxWindow *window)
 {
     bool is_dark = wxGetApp().app_config->get_bool(
         "dark_color_mode"); // ? true : check_dark_mode();// #ysDarkMSW - Allow it when we deside to support the sustem colors for application
-    window->SetBackgroundColour(is_dark ? wxColour(43, 43, 43) : wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
-    window->SetForegroundColour(is_dark ? wxColour(250, 250, 250)
-                                        : wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT));
+    // UNIFIED THEMING: Use UIColors for ALL themes, not wxSystemSettings
+    // This ensures our custom colors are used instead of Windows system colors
+    window->SetBackgroundColour(is_dark ? UIColors::PanelBackgroundDark() : UIColors::PanelBackgroundLight());
+    window->SetForegroundColour(is_dark ? UIColors::InputForegroundDark() : UIColors::InputForegroundLight());
 
     // Apply dark explorer theme for scrollbars and other controls
     NppDarkMode::SetDarkExplorerTheme(window->GetHWND());
@@ -235,11 +237,12 @@ CheckboxFileDialog::ExtraPanel::ExtraPanel(wxWindow *parent) : wxPanel(parent, w
     const wxString checkbox_label(dlg != nullptr ? dlg->checkbox_label
                                                  : wxString("String long enough to contain dlg->checkbox_label"));
 
+    int em = wxGetApp().em_unit();
     auto *sizer = new wxBoxSizer(wxHORIZONTAL);
     cbox = new wxCheckBox(this, wxID_ANY, checkbox_label);
     cbox->SetValue(true);
-    sizer->AddSpacer(5);
-    sizer->Add(this->cbox, 0, wxEXPAND | wxALL, 5);
+    sizer->AddSpacer(em / 2);
+    sizer->Add(this->cbox, 0, wxEXPAND | wxALL, em / 2);
     SetSizer(sizer);
     sizer->SetSizeHints(this);
 }
@@ -247,6 +250,16 @@ CheckboxFileDialog::ExtraPanel::ExtraPanel(wxWindow *parent) : wxPanel(parent, w
 wxWindow *CheckboxFileDialog::ExtraPanel::ctor(wxWindow *parent)
 {
     return new ExtraPanel(parent);
+}
+
+int ShowFileDialogModal(wxFileDialog &dlg)
+{
+#ifdef _WIN32
+    // CommonDialogScope is a no-op but kept for future compatibility
+    // if Windows adds per-dialog theme control.
+    NppDarkMode::CommonDialogScope scope;
+#endif
+    return dlg.ShowModal();
 }
 
 CheckboxFileDialog::CheckboxFileDialog(wxWindow *parent, const wxString &checkbox_label, bool checkbox_value,
@@ -268,6 +281,14 @@ bool CheckboxFileDialog::get_checkbox_value() const
 {
     auto *extra_panel = dynamic_cast<ExtraPanel *>(GetExtraControl());
     return extra_panel != nullptr ? extra_panel->cbox->GetValue() : false;
+}
+
+int CheckboxFileDialog::ShowModal()
+{
+#ifdef _WIN32
+    NppDarkMode::CommonDialogScope scope;
+#endif
+    return wxFileDialog::ShowModal();
 }
 
 WindowMetrics WindowMetrics::from_window(wxTopLevelWindow *window)

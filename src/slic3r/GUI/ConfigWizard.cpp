@@ -156,7 +156,7 @@ BundleMap BundleMap::load()
         preflight_bundle_path = (rsrc_vendor_dir / PresetBundle::PREFLIGHT_BUNDLE).replace_extension(".ini");
         preflight_bundle_loc = BundleLocation::IN_RESOURCES;
     }
-    // preFlight: Only try to load bundle if the file actually exists
+    // Only try to load bundle if the file actually exists
     if (boost::filesystem::exists(preflight_bundle_path))
     {
         Bundle preflight_bundle;
@@ -275,7 +275,7 @@ BundleMap BundleMap::load()
     return res;
 }
 
-// preFlight: Return empty bundle if preFlight bundle not found
+// Return empty bundle if preFlight bundle not found
 Bundle &BundleMap::preflight_bundle()
 {
     static Bundle empty_bundle;
@@ -392,7 +392,7 @@ PrinterPicker::PrinterPicker(wxWindow *parent, const VendorProfile &vendor, wxSt
         wxStaticText *title = new wxStaticText(this, wxID_ANY, from_u8(model.name), wxDefaultPosition, wxDefaultSize,
                                                wxALIGN_LEFT);
         title->SetFont(font_name);
-        const int wrap_width = std::max((int) MODEL_MIN_WRAP, bitmap_width);
+        const int wrap_width = std::max((int) GetScaledModelMinWrap(), bitmap_width);
         title->Wrap(wrap_width);
 
         current_row_width += wrap_width;
@@ -425,7 +425,8 @@ PrinterPicker::PrinterPicker(wxWindow *parent, const VendorProfile &vendor, wxSt
             {
                 auto *alt_label = new wxStaticText(variants_panel, wxID_ANY, _L("Alternate nozzles:"));
                 alt_label->SetFont(font_alt_nozzle);
-                variants_sizer->Add(alt_label, 0, wxBOTTOM, 3);
+                int em = wxGetApp().em_unit();
+                variants_sizer->Add(alt_label, 0, wxBOTTOM, em / 3);
                 is_variants = true;
             }
 
@@ -435,7 +436,7 @@ PrinterPicker::PrinterPicker(wxWindow *parent, const VendorProfile &vendor, wxSt
             const bool enabled = appconfig.get_variant(vendor.id, model_id, variant.name);
             cbox->SetValue(enabled);
 
-            variants_sizer->Add(cbox, 0, wxBOTTOM, 3);
+            variants_sizer->Add(cbox, 0, wxBOTTOM, wxGetApp().em_unit() / 3);
 
             cbox->Bind(wxEVT_CHECKBOX, [this, cbox](wxCommandEvent &event) { on_checkbox(cbox, event.IsChecked()); });
         }
@@ -447,7 +448,7 @@ PrinterPicker::PrinterPicker(wxWindow *parent, const VendorProfile &vendor, wxSt
 
     const size_t cols = std::min(max_cols, titles.size());
 
-    auto *printer_grid = new wxFlexGridSizer(cols, 0, 20);
+    auto *printer_grid = new wxFlexGridSizer(cols, 0, 2 * wxGetApp().em_unit());
     printer_grid->SetFlexibleDirection(wxVERTICAL | wxHORIZONTAL);
 
     if (titles.size() > 0)
@@ -458,11 +459,11 @@ PrinterPicker::PrinterPicker(wxWindow *parent, const VendorProfile &vendor, wxSt
         {
             for (size_t j = i; j < i + cols; j++)
             {
-                printer_grid->Add(bitmaps[j], 0, wxBOTTOM, 20);
+                printer_grid->Add(bitmaps[j], 0, wxBOTTOM, 2 * wxGetApp().em_unit());
             }
             for (size_t j = i; j < i + cols; j++)
             {
-                printer_grid->Add(titles[j], 0, wxBOTTOM, 3);
+                printer_grid->Add(titles[j], 0, wxBOTTOM, wxGetApp().em_unit() / 3);
             }
             for (size_t j = i; j < i + cols; j++)
             {
@@ -474,7 +475,7 @@ PrinterPicker::PrinterPicker(wxWindow *parent, const VendorProfile &vendor, wxSt
             {
                 for (size_t j = i; j < i + cols; j++)
                 {
-                    printer_grid->Add(1, 30);
+                    printer_grid->Add(1, 3 * wxGetApp().em_unit());
                 }
             }
         }
@@ -484,7 +485,7 @@ PrinterPicker::PrinterPicker(wxWindow *parent, const VendorProfile &vendor, wxSt
 
             for (size_t i = rem; i < titles.size(); i++)
             {
-                printer_grid->Add(bitmaps[i], 0, wxBOTTOM, 20);
+                printer_grid->Add(bitmaps[i], 0, wxBOTTOM, 2 * wxGetApp().em_unit());
             }
             for (size_t i = 0; i < cols - odd_items; i++)
             {
@@ -492,7 +493,7 @@ PrinterPicker::PrinterPicker(wxWindow *parent, const VendorProfile &vendor, wxSt
             }
             for (size_t i = rem; i < titles.size(); i++)
             {
-                printer_grid->Add(titles[i], 0, wxBOTTOM, 3);
+                printer_grid->Add(titles[i], 0, wxBOTTOM, wxGetApp().em_unit() / 3);
             }
             for (size_t i = 0; i < cols - odd_items; i++)
             {
@@ -526,8 +527,8 @@ PrinterPicker::PrinterPicker(wxWindow *parent, const VendorProfile &vendor, wxSt
         sel_all->Bind(wxEVT_BUTTON, [this](const wxCommandEvent &event) { this->select_all(true, true); });
         sel_none->Bind(wxEVT_BUTTON, [this](const wxCommandEvent &event) { this->select_all(false); });
         if (is_variants)
-            title_sizer->Add(sel_all_std, 0, wxRIGHT, BTN_SPACING);
-        title_sizer->Add(sel_all, 0, wxRIGHT, BTN_SPACING);
+            title_sizer->Add(sel_all_std, 0, wxRIGHT, GetScaledBtnSpacing());
+        title_sizer->Add(sel_all, 0, wxRIGHT, GetScaledBtnSpacing());
         title_sizer->Add(sel_none);
 
         wxGetApp().SetWindowVariantForButton(sel_all_std);
@@ -548,7 +549,7 @@ PrinterPicker::PrinterPicker(wxWindow *parent, const VendorProfile &vendor, wxSt
         }
     }
 
-    sizer->Add(title_sizer, 0, wxEXPAND | wxBOTTOM, BTN_SPACING);
+    sizer->Add(title_sizer, 0, wxEXPAND | wxBOTTOM, GetScaledBtnSpacing());
     sizer->Add(printer_grid);
 
     SetSizer(sizer);
@@ -651,7 +652,7 @@ ConfigWizardPage::ConfigWizardPage(ConfigWizard *parent, wxString title, wxStrin
     const auto font = GetFont().MakeBold().Scaled(1.5);
     text->SetFont(font);
     sizer->Add(text, 0, wxALIGN_LEFT, 0);
-    sizer->AddSpacer(10);
+    sizer->AddSpacer(wxGetApp().em_unit());
 
     content = new wxBoxSizer(wxVERTICAL);
     sizer->Add(content, 1, wxEXPAND);
@@ -681,8 +682,8 @@ ConfigWizardPage::~ConfigWizardPage() {}
 wxStaticText *ConfigWizardPage::append_text(wxString text)
 {
     auto *widget = new wxStaticText(this, wxID_ANY, text, wxDefaultPosition, wxDefaultSize, wxALIGN_LEFT);
-    widget->Wrap(WRAP_WIDTH);
-    widget->SetMinSize(wxSize(WRAP_WIDTH, -1));
+    widget->Wrap(GetScaledWrapWidth());
+    widget->SetMinSize(wxSize(GetScaledWrapWidth(), -1));
     append(widget);
     return widget;
 }
@@ -744,23 +745,9 @@ PageUpdateManager::PageUpdateManager(ConfigWizard *parent_in)
 
     manager = std::make_unique<RepositoryUpdateUIManager>(this, wxGetApp().get_preset_updater_wrapper(), em);
 
-    warning_text = new wxStaticText(this, wxID_ANY, _L("WARNING: Select at least one source."));
-    warning_text->SetFont(wxGetApp().bold_font());
-    warning_text->Hide();
-
-    warning_text->Bind(wxEVT_UPDATE_UI,
-                       [this](wxUpdateUIEvent &event)
-                       {
-                           const bool show_warning = !manager->has_selections();
-                           if (warning_text->IsShown() != show_warning)
-                           {
-                               warning_text->Show(show_warning);
-                               this->Layout();
-                           }
-                       });
+    // Removed "WARNING: Select at least one source" - users can set up printers from scratch
 
     auto sizer = manager->get_sizer();
-    sizer->Add(warning_text, 0, wxEXPAND | wxTOP, 2 * em);
 
     append(sizer, 0, wxTOP, 2 * em);
 
@@ -799,7 +786,11 @@ PageUpdateManager::PageUpdateManager(ConfigWizard *parent_in)
                                revert_page_selection();
                        }
                        else
-                           revert_page_selection();
+                       {
+                           // Allow proceeding without selections for custom printer setup
+                           wizard_p()->is_config_from_archive = true;
+                           wizard_p()->set_config_updated_from_archive(false, false);
+                       }
 
                        is_active = false;
                    }
@@ -972,7 +963,7 @@ PageMaterials::PageMaterials(ConfigWizard *parent, Materials *materials, wxStrin
     , list_vendor(new StringList(this))
     , list_profile(new PresetList(this))
 {
-    append_spacer(VERTICAL_SPACING);
+    append_spacer(GetScaledVerticalSpacing());
 
     const int em = parent->em_unit();
     const int list_h = 30 * em;
@@ -1023,7 +1014,7 @@ PageMaterials::PageMaterials(ConfigWizard *parent, Materials *materials, wxStrin
 
     append(grid, 1, wxEXPAND);
 
-    append_spacer(VERTICAL_SPACING);
+    append_spacer(GetScaledVerticalSpacing());
 
     html_window = new wxHtmlWindow(this, wxID_ANY, wxDefaultPosition, wxSize(60 * em, 20 * em), wxHW_SCROLLBAR_AUTO);
     html_window->Bind(wxEVT_HTML_LINK_CLICKED,
@@ -1719,7 +1710,7 @@ PageUpdate::PageUpdate(ConfigWizard *parent)
            "This is only a notification mechanisms, no automatic installation is done."),
         SLIC3R_APP_NAME));
 
-    append_spacer(VERTICAL_SPACING);
+    append_spacer(GetScaledVerticalSpacing());
 
     auto *box_presets = new wxCheckBox(this, wxID_ANY, _L("Update built-in Presets automatically"));
     box_presets->SetValue(app_config->get_bool("preset_update"));
@@ -1733,7 +1724,7 @@ PageUpdate::PageUpdate(ConfigWizard *parent)
         "Updates are never applied without user's consent and never overwrite user's customized settings.");
     auto *label_bold = new wxStaticText(this, wxID_ANY, text_bold);
     label_bold->SetFont(boldfont);
-    label_bold->Wrap(WRAP_WIDTH);
+    label_bold->Wrap(GetScaledWrapWidth());
     append(label_bold);
     append_text(
         _L("Additionally a backup snapshot of the whole configuration is created before an update is applied."));
@@ -1786,12 +1777,13 @@ Worker::Worker(wxWindow *parent) : wxBoxSizer(wxHORIZONTAL), m_parent(parent)
 
     auto *path_label = new wxStaticText(m_parent, wxID_ANY, _L("Download path") + ":");
 
-    this->Add(path_label, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 5);
-    this->Add(m_input_path, 1, wxEXPAND | wxTOP | wxLEFT | wxRIGHT, 5);
+    int em = wxGetApp().em_unit();
+    this->Add(path_label, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, em / 2);
+    this->Add(m_input_path, 1, wxEXPAND | wxTOP | wxLEFT | wxRIGHT, em / 2);
 
     auto *button_path = new wxButton(m_parent, wxID_ANY, _L("Browse"));
     wxGetApp().SetWindowVariantForButton(button_path);
-    this->Add(button_path, 0, wxEXPAND | wxTOP | wxLEFT, 5);
+    this->Add(button_path, 0, wxEXPAND | wxTOP | wxLEFT, em / 2);
     button_path->Bind(wxEVT_BUTTON,
                       [this](wxCommandEvent &event)
                       {
@@ -1843,7 +1835,7 @@ PageDownloader::PageDownloader(ConfigWizard *parent)
     auto boldfont = wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT);
     boldfont.SetWeight(wxFONTWEIGHT_BOLD);
 
-    append_spacer(VERTICAL_SPACING);
+    append_spacer(GetScaledVerticalSpacing());
 
     auto *box_allow_downloads = new wxCheckBox(this, wxID_ANY, _L("Allow built-in downloader"));
     // TODO: Do we want it like this? The downloader is allowed for very first time the wizard is run.
@@ -1964,7 +1956,7 @@ bool DownloaderUtils::Worker::perform_url_register()
     {
         key_full.Create(false);
     }
-    // preFlight: Old PrusaSlicer path removed
+    // Old PrusaSlicer path removed
     key_full = key_string;
 #elif __APPLE__
     // Apple registers for custom url in info.plist thus it has to be already registered since build.
@@ -2382,7 +2374,7 @@ PageBuildVolume::PageBuildVolume(ConfigWizard *parent)
         },
         build_volume->GetId());
 
-    auto *sizer_volume = new wxFlexGridSizer(3, 5, 5);
+    auto *sizer_volume = new wxFlexGridSizer(3, wxGetApp().em_unit() / 2, wxGetApp().em_unit() / 2);
     auto *text_volume = new wxStaticText(this, wxID_ANY, _L("Max print height") + ":");
     auto *unit_volume = new wxStaticText(this, wxID_ANY, _L("mm"));
     sizer_volume->AddGrowableCol(0, 1);
@@ -2421,7 +2413,7 @@ PageDiameters::PageDiameters(ConfigWizard *parent)
 
     append_text(_L("Enter the diameter of your printer's hot end nozzle."));
 
-    auto *sizer_nozzle = new wxFlexGridSizer(3, 5, 5);
+    auto *sizer_nozzle = new wxFlexGridSizer(3, wxGetApp().em_unit() / 2, wxGetApp().em_unit() / 2);
     auto *text_nozzle = new wxStaticText(this, wxID_ANY, _L("Nozzle Diameter") + ":");
     auto *unit_nozzle = new wxStaticText(this, wxID_ANY, _L("mm"));
     sizer_nozzle->AddGrowableCol(0, 1);
@@ -2430,13 +2422,13 @@ PageDiameters::PageDiameters(ConfigWizard *parent)
     sizer_nozzle->Add(unit_nozzle, 0, wxALIGN_CENTRE_VERTICAL);
     append(sizer_nozzle);
 
-    append_spacer(VERTICAL_SPACING);
+    append_spacer(GetScaledVerticalSpacing());
 
     append_text(_L("Enter the diameter of your filament."));
     append_text(_L(
         "Good precision is required, so use a caliper and do multiple measurements along the filament, then compute the average."));
 
-    auto *sizer_filam = new wxFlexGridSizer(3, 5, 5);
+    auto *sizer_filam = new wxFlexGridSizer(3, wxGetApp().em_unit() / 2, wxGetApp().em_unit() / 2);
     auto *text_filam = new wxStaticText(this, wxID_ANY, _L("Filament Diameter") + ":");
     auto *unit_filam = new wxStaticText(this, wxID_ANY, _L("mm"));
     sizer_filam->AddGrowableCol(0, 1);
@@ -2512,7 +2504,7 @@ PageTemperatures::PageTemperatures(ConfigWizard *parent)
     append_text(_L("Enter the temperature needed for extruding your filament."));
     append_text(_L("A rule of thumb is 160 to 230 °C for PLA, and 215 to 250 °C for ABS."));
 
-    auto *sizer_extr = new wxFlexGridSizer(3, 5, 5);
+    auto *sizer_extr = new wxFlexGridSizer(3, wxGetApp().em_unit() / 2, wxGetApp().em_unit() / 2);
     auto *text_extr = new wxStaticText(this, wxID_ANY, _L("Extrusion Temperature:"));
     auto *unit_extr = new wxStaticText(this, wxID_ANY, _L("°C"));
     sizer_extr->AddGrowableCol(0, 1);
@@ -2521,12 +2513,12 @@ PageTemperatures::PageTemperatures(ConfigWizard *parent)
     sizer_extr->Add(unit_extr, 0, wxALIGN_CENTRE_VERTICAL);
     append(sizer_extr);
 
-    append_spacer(VERTICAL_SPACING);
+    append_spacer(GetScaledVerticalSpacing());
 
     append_text(_L("Enter the bed temperature needed for getting your filament to stick to your heated bed."));
     append_text(_L("A rule of thumb is 60 °C for PLA and 110 °C for ABS. Leave zero if you have no heated bed."));
 
-    auto *sizer_bed = new wxFlexGridSizer(3, 5, 5);
+    auto *sizer_bed = new wxFlexGridSizer(3, wxGetApp().em_unit() / 2, wxGetApp().em_unit() / 2);
     auto *text_bed = new wxStaticText(this, wxID_ANY, _L("Bed Temperature") + ":");
     auto *unit_bed = new wxStaticText(this, wxID_ANY, _L("°C"));
     sizer_bed->AddGrowableCol(0, 1);
@@ -2552,7 +2544,7 @@ void PageTemperatures::apply_custom_config(DynamicPrintConfig &config)
 
 ConfigWizardIndex::ConfigWizardIndex(wxWindow *parent)
     : wxPanel(parent)
-    , bg(ScalableBitmap(parent, "preFlight", 192))
+    // Logo size is calculated in constructor body to account for DPI
     , bullet_black(ScalableBitmap(parent, "bullet_black.png"))
     , bullet_blue(ScalableBitmap(parent, "bullet_blue.png"))
     , bullet_white(ScalableBitmap(parent, "bullet_white.png"))
@@ -2563,6 +2555,13 @@ ConfigWizardIndex::ConfigWizardIndex(wxWindow *parent)
 #ifndef __WXOSX__
     SetDoubleBuffered(true); // SetDoubleBuffered exists on Win and Linux/GTK, but is missing on OSX
 #endif                       //__WXOSX__
+
+    // Load logo at fixed 192 physical pixels regardless of DPI scaling
+    // Divide by scale factor so the final rendered size is always 192px
+    const int logo_physical_size = 192;
+    double scale_factor = parent->GetDPIScaleFactor();
+    int logo_dip_size = std::max(1, static_cast<int>(logo_physical_size / scale_factor));
+    bg = ScalableBitmap(parent, "preFlight", logo_dip_size);
 
     {
         wxBitmap bmp = bg.get_bitmap();
@@ -3040,7 +3039,7 @@ void ConfigWizard::priv::load_vendors()
     {
         appconfig_new.set_vendors(*app_config);
     }
-    // preFlight: Legacy datadir migration removed (preFlight does not migrate from PrusaSlicer)
+    // Legacy datadir migration removed (preFlight does not migrate from PrusaSlicer)
 
     for (const auto &printer : wxGetApp().preset_bundle->printers)
     {
@@ -3480,16 +3479,22 @@ void ConfigWizard::priv::on_3rdparty_install(const VendorProfile *vendor, bool i
 
 bool ConfigWizard::priv::can_finish()
 {
-    if (index->active_page() == page_update_manager)
-        return false;
+    // Allow finishing from any page, including PageUpdateManager
+    // Users can set up printers from scratch without selecting any configuration source
+
+    // Allow finishing if no vendor printer pages are shown (fresh install scenario)
+    if (pages_fff.empty() && pages_msla.empty() && repositories.empty())
+        return true;
     // Set enabling fo "Finish" button -> there should to be selected at least one printer
     return any_fff_selected || any_sla_selected || custom_printer_selected || custom_printer_in_bundle;
 }
 
 bool ConfigWizard::priv::can_go_next()
 {
+    // Allow proceeding from PageUpdateManager even without selections
+    // This enables fresh installs to proceed to custom printer setup
     if (index->active_page() == page_update_manager)
-        return page_update_manager->manager->has_selections();
+        return true;
     return true;
 }
 
@@ -4439,6 +4444,12 @@ void ConfigWizard::priv::load_pages_from_archive()
         only_sla_mode = false;
     }
 
+    // If no vendors selected but we got here, allow custom FFF printer setup
+    if (only_sla_mode && repositories.empty())
+    {
+        only_sla_mode = false;
+    }
+
     if (!only_sla_mode)
     {
         add_page(page_custom = new PageCustom(q));
@@ -4506,7 +4517,7 @@ ConfigWizard::ConfigWizard(wxWindow *parent)
     p->hscroll->SetSizer(p->hscroll_sizer);
 
     topsizer->Add(p->index, 0, wxEXPAND);
-    topsizer->AddSpacer(INDEX_MARGIN);
+    topsizer->AddSpacer(GetScaledIndexMargin());
     topsizer->Add(p->hscroll, 1, wxEXPAND);
 
     p->btn_sel_all = new wxButton(this, wxID_ANY, _L("Select all standard printers"));
@@ -4519,10 +4530,10 @@ ConfigWizard::ConfigWizard(wxWindow *parent)
         new wxButton(this, wxID_CANCEL,
                      _L("Cancel")); // Note: The label needs to be present, otherwise we get accelerator bugs on Mac
     p->btnsizer->AddStretchSpacer();
-    p->btnsizer->Add(p->btn_prev, 0, wxLEFT, BTN_SPACING);
-    p->btnsizer->Add(p->btn_next, 0, wxLEFT, BTN_SPACING);
-    p->btnsizer->Add(p->btn_finish, 0, wxLEFT, BTN_SPACING);
-    p->btnsizer->Add(p->btn_cancel, 0, wxLEFT, BTN_SPACING);
+    p->btnsizer->Add(p->btn_prev, 0, wxLEFT, GetScaledBtnSpacing());
+    p->btnsizer->Add(p->btn_next, 0, wxLEFT, GetScaledBtnSpacing());
+    p->btnsizer->Add(p->btn_finish, 0, wxLEFT, GetScaledBtnSpacing());
+    p->btnsizer->Add(p->btn_cancel, 0, wxLEFT, GetScaledBtnSpacing());
 
     wxGetApp().UpdateDarkUI(p->btn_sel_all);
     wxGetApp().UpdateDarkUI(p->btn_prev);
@@ -4557,9 +4568,9 @@ ConfigWizard::ConfigWizard(wxWindow *parent)
     p->add_page(p->page_diams = new PageDiameters(this));
     p->add_page(p->page_temps = new PageTemperatures(this));
 
-    vsizer->Add(topsizer, 1, wxEXPAND | wxALL, DIALOG_MARGIN);
-    vsizer->Add(hline, 0, wxEXPAND | wxLEFT | wxRIGHT, VERTICAL_SPACING);
-    vsizer->Add(p->btnsizer, 0, wxEXPAND | wxALL, DIALOG_MARGIN);
+    vsizer->Add(topsizer, 1, wxEXPAND | wxALL, GetScaledDialogMargin());
+    vsizer->Add(hline, 0, wxEXPAND | wxLEFT | wxRIGHT, GetScaledVerticalSpacing());
+    vsizer->Add(p->btnsizer, 0, wxEXPAND | wxALL, GetScaledDialogMargin());
 
     SetSizer(vsizer);
     SetSizerAndFit(vsizer);

@@ -174,7 +174,7 @@ ConfigSnapshotDialog::ConfigSnapshotDialog(const Config::SnapshotDB &snapshot_db
         int size[] = {11, 11, 11, 11, 14, 14, 14};
 #endif
         html->SetFonts(font.GetFaceName(), font.GetFaceName(), size);
-        html->SetBorders(2);
+        html->SetBorders(wxGetApp().em_unit() / 5); // DPI-scaled (2px at 100%)
         wxString text = generate_html_page(snapshot_db, on_snapshot);
         html->SetPage(text);
         vsizer->Add(html, 1, wxEXPAND | wxALIGN_LEFT | wxRIGHT | wxBOTTOM, 0);
@@ -186,7 +186,7 @@ ConfigSnapshotDialog::ConfigSnapshotDialog(const Config::SnapshotDB &snapshot_db
     wxGetApp().UpdateDarkUI(buttons->GetCancelButton());
     this->SetEscapeId(wxID_CLOSE);
     this->Bind(wxEVT_BUTTON, &ConfigSnapshotDialog::onCloseDialog, this, wxID_CLOSE);
-    vsizer->Add(buttons, 0, wxEXPAND | wxRIGHT | wxBOTTOM, 3);
+    vsizer->Add(buttons, 0, wxEXPAND | wxRIGHT | wxBOTTOM, wxGetApp().em_unit() / 3);
 
 #ifdef _WIN32
     wxGetApp().UpdateDlgDarkUI(this);

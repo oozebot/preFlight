@@ -38,6 +38,20 @@ typename boost::polygon::enable_if<
 VoronoiDiagram::construct_voronoi(const SegmentIterator segment_begin, const SegmentIterator segment_end,
                                   const bool try_to_repair_if_needed)
 {
+    // Reset any stale local copies from a previous repair before constructing a new Voronoi diagram.
+    // Without this, a second call to construct_voronoi on the same object (e.g. MedialAxis retry after
+    // morphological closing) would use stale m_cells from the previous repair instead of the fresh
+    // m_voronoi_diagram cells, causing source_index mismatches with the new segment iterators.
+    if (m_is_modified)
+    {
+        m_cells.clear();
+        m_edges.clear();
+        m_vertices.clear();
+        m_is_modified = false;
+    }
+    m_state = State::UNKNOWN;
+    m_issue_type = IssueType::UNKNOWN;
+
     boost::polygon::construct_voronoi(segment_begin, segment_end, &m_voronoi_diagram);
     if (try_to_repair_if_needed)
     {

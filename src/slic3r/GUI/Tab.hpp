@@ -39,6 +39,8 @@
 #include <wx/bmpbuttn.h>
 #include <wx/treectrl.h>
 #include <wx/imaglist.h>
+#include "Widgets/LabeledBorderPanel.hpp"
+#include "Widgets/ScrollablePanel.hpp"
 
 #include <map>
 #include <vector>
@@ -157,6 +159,8 @@ public:
     Line *get_line(const t_config_option_key &opt_key);
     bool set_value(const t_config_option_key &opt_key, const boost::any &value);
     ConfigOptionsGroupShp new_optgroup(const wxString &title, int noncommon_label_width = -1);
+    // Creates an optgroup with sidebar visibility checkbox enabled
+    ConfigOptionsGroupShp new_optgroup_for_sidebar(const wxString &title, int noncommon_label_width = -1);
     const ConfigOptionsGroupShp get_optgroup(const wxString &title) const;
 
     bool set_item_colour(const wxColour *clr)
@@ -201,8 +205,9 @@ protected:
     wxBoxSizer *m_h_buttons_sizer;
     wxBoxSizer *m_left_sizer;
     wxTreeCtrl *m_treectrl;
+    LabeledBorderPanel *m_tree_panel{nullptr};
 
-    wxScrolledWindow *m_page_view{nullptr};
+    ScrollablePanel *m_page_view{nullptr};
     wxBoxSizer *m_page_sizer{nullptr};
 
     struct PresetDependencies
@@ -290,11 +295,16 @@ protected:
     bool m_is_nonsys_values{true};
     bool m_postpone_update_ui{false};
 
+    // Track which option key triggered update() for selective validation
+    std::string m_last_changed_opt_key;
+
     void set_type();
 
     int m_em_unit;
     // To avoid actions with no-completed Tab
     bool m_completed{false};
+    // Flag set when Tab is being destroyed - used to guard CallAfter lambdas
+    bool m_destroying{false};
     ConfigOptionMode m_mode = comExpert; // to correct first Tab update_visibility() set mode to Expert
 
     HighlighterForWx m_highlighter;
@@ -320,7 +330,7 @@ public:
 
 public:
     Tab(wxBookCtrlBase *parent, const wxString &title, Preset::Type type);
-    ~Tab() {}
+    ~Tab() { m_destroying = true; }
 
     wxWindow *parent() const { return m_parent; }
     wxString title() const { return m_title; }
@@ -467,9 +477,6 @@ public:
     bool supports_printer_technology(const PrinterTechnology tech) const override { return tech == ptFFF; }
     void on_preset_loaded() override;
     void reload_config() override;
-    void update_nozzle_controls_visibility();
-    void update_high_flow_controls();
-    void on_nozzle_diameter_change(size_t extruder_idx, double new_value);
     wxSizer *create_manage_substitution_widget(wxWindow *parent);
     wxSizer *create_substitutions_widget(wxWindow *parent);
 
@@ -479,17 +486,6 @@ private:
     ogStaticText *m_post_process_explanation = nullptr;
     ScalableButton *m_del_all_substitutions_btn{nullptr};
     SubstitutionManager m_subst_manager;
-
-    std::vector<SpinInputDouble *> m_nozzle_spin_ctrls;
-    std::vector<wxStaticBitmap *> m_nozzle_lock_icons; // Lock/unlock icons (wxStaticBitmap for no focus highlight)
-    std::vector<wxStaticBitmap *>
-        m_nozzle_undo_icons;                      // Undo icons - dot/undo arrow (wxStaticBitmap for no focus highlight)
-    std::vector<double> m_nozzle_original_values; // Original values for undo
-    void update_nozzle_undo_ui(size_t idx);       // Update undo icons for one extruder
-    void update_all_nozzle_undo_ui();             // Update all undo icons
-    std::vector<wxCheckBox *> m_high_flow_checks;
-
-    bool m_updating_nozzles = false;
 };
 
 class TabFilament : public Tab

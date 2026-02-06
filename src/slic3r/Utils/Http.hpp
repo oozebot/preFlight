@@ -150,6 +150,10 @@ public:
     // Callback called after succesful HTTP request (after on_complete callback)
     // Called if curl_easy_getinfo resolved just used IP address.
     Http &on_ip_resolve(IPResolveFn fn);
+    // Pre-populate DNS cache with a resolved IP address for a hostname.
+    // Format: "hostname:port:ip" (e.g., "example.com:80:192.168.1.1")
+    // This avoids DNS lookups for subsequent requests to the same host.
+    Http &resolve(const std::string &host, unsigned port, const std::string &ip_address);
 
     Http &on_retry(RetryFn fn);
 

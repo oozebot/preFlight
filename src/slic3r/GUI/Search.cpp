@@ -632,8 +632,8 @@ SearchDialog::SearchDialog(OptionsSearcher *searcher, wxWindow *parent)
     SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
 #endif
 
-    int border = 10;
     int em = em_unit();
+    int border = em;
 
     search_list = new wxDataViewCtrl(this, wxID_ANY, wxDefaultPosition, wxSize(em * 40, em * 30),
                                      wxDV_NO_HEADER | wxDV_SINGLE

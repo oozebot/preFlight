@@ -544,6 +544,8 @@ class ModelObject final : public ObjectBase
 public:
     std::string name;
     std::string input_file; // XXX: consider fs::path
+    // User notes for this object (saved in 3MF project files)
+    std::string notes;
     // Instances of this ModelObject. Each instance defines a shift on the print bed, rotation around the Z axis and a uniform scaling.
     // Instances are owned by this ModelObject.
     ModelInstancePtrs instances;
@@ -855,7 +857,7 @@ private:
         ar(cereal::base_class<ObjectBase>(this));
         Internal::StaticSerializationWrapper<ModelConfigObject> config_wrapper(config);
         Internal::StaticSerializationWrapper<LayerHeightProfile> layer_heigth_profile_wrapper(layer_height_profile);
-        ar(name, input_file, instances, volumes, config_wrapper, layer_config_ranges, layer_heigth_profile_wrapper,
+        ar(name, input_file, notes, instances, volumes, config_wrapper, layer_config_ranges, layer_heigth_profile_wrapper,
            sla_support_points, sla_points_status, sla_drain_holes, printable, origin_translation, m_bounding_box_approx,
            m_bounding_box_approx_valid, m_bounding_box_exact, m_bounding_box_exact_valid, m_min_max_z_valid,
            m_raw_bounding_box, m_raw_bounding_box_valid, m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid,
@@ -1554,6 +1556,8 @@ public:
     ModelMaterialMap materials;
     // Objects are owned by a model. Each model may have multiple instances, each instance having its own transformation (shift, scale, rotation).
     ModelObjectPtrs objects;
+    // User notes for the entire project (saved in 3MF project files)
+    std::string project_notes;
 
     ModelWipeTower &wipe_tower();
     const ModelWipeTower &wipe_tower() const;
@@ -1690,7 +1694,7 @@ private:
     template<class Archive>
     void serialize(Archive &ar)
     {
-        ar(materials, objects, wipe_tower_vector);
+        ar(materials, objects, wipe_tower_vector, project_notes);
     }
 };
 

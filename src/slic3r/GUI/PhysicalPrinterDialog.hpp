@@ -84,7 +84,7 @@ class PhysicalPrinterDialog : public DPIDialog
 
     wxString m_stored_host;
     PrintHostType m_last_host_type;
-    // preFlight: Connect service support removed
+    // Connect service support removed
 
     void build_printhost_settings(ConfigOptionsGroup *optgroup);
     void OnOK(wxEvent &event);

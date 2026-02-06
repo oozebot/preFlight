@@ -66,6 +66,8 @@
 #include "MsgDialog.hpp"
 #include "TopBar.hpp"
 #include "ModernTabBar.hpp"
+#include "Widgets/CustomMenu.hpp"
+#include "preFlight.PrinterWebViewPanel.hpp"
 #include "GUI_Factories.hpp"
 #include "GUI_ObjectList.hpp"
 #include "GalleryDialog.hpp"
@@ -155,6 +157,7 @@ static wxIcon main_frame_icon(GUI_App::EAppMode app_mode)
     }
     return wxIcon(path, wxBITMAP_TYPE_ICO);
 #else  // _WIN32
+    // Window icons intentionally use fixed 128x128 - OS handles DPI scaling for system icons
     wxBitmap bmp = get_bmp_bundle(app_mode == GUI_App::EAppMode::Editor ? "preFlight" : "preFlight-gcodeviewer", 128)
                        ->GetBitmap(wxSize(128, 128));
     wxIcon icon;
@@ -441,6 +444,10 @@ void MainFrame::update_layout()
         m_tabpanel->Hide();
         m_tmp_top_bar->Hide();
         m_plater->Hide();
+#ifdef _WIN32
+        if (m_customMenuBar != nullptr)
+            m_customMenuBar->Hide();
+#endif
 
         Layout();
     };
@@ -493,6 +500,15 @@ void MainFrame::update_layout()
         m_plater->Reparent(this);
         m_plater->Layout();
 
+#ifdef _WIN32
+        // Add custom menu bar at the top (Windows only)
+        if (m_customMenuBar != nullptr)
+        {
+            m_main_sizer->Add(m_customMenuBar, 0, wxEXPAND);
+            m_customMenuBar->Show();
+        }
+#endif // _WIN32
+
         if (m_modern_tabbar != nullptr)
         {
             m_main_sizer->Add(static_cast<wxWindow *>(m_modern_tabbar), 0, wxEXPAND);
@@ -529,6 +545,14 @@ void MainFrame::update_layout()
         const int sel = m_tabpanel->GetSelection();
 
         m_plater->Reparent(this);
+#ifdef _WIN32
+        // Add custom menu bar at the top (Windows only)
+        if (m_customMenuBar != nullptr)
+        {
+            m_main_sizer->Add(m_customMenuBar, 0, wxEXPAND);
+            m_customMenuBar->Show();
+        }
+#endif // _WIN32
         m_main_sizer->Add(m_tmp_top_bar, 0, wxEXPAND | wxTOP, 1);
         m_main_sizer->Add(m_plater, 1, wxEXPAND | wxTOP, 1);
         m_plater->Layout();
@@ -544,6 +568,14 @@ void MainFrame::update_layout()
     }
     case ESettingsLayout::GCodeViewer:
     {
+#ifdef _WIN32
+        // Add custom menu bar at the top (Windows only)
+        if (m_customMenuBar != nullptr)
+        {
+            m_main_sizer->Add(m_customMenuBar, 0, wxEXPAND);
+            m_customMenuBar->Show();
+        }
+#endif // _WIN32
         m_main_sizer->Add(m_plater, 1, wxEXPAND);
         m_plater->set_default_bed_shape();
 #if ENABLE_HACK_GCODEVIEWER_SLOW_ON_MAC
@@ -605,6 +637,9 @@ void MainFrame::update_layout()
 void MainFrame::shutdown()
 {
 #ifdef _WIN32
+    // Clean up custom popup menus before any window destruction starts
+    CustomMenu::CleanupAllMenus();
+
     if (m_hDeviceNotify)
     {
         ::UnregisterDeviceNotification(HDEVNOTIFY(m_hDeviceNotify));
@@ -885,97 +920,55 @@ void MainFrame::init_tabpanel()
                                        }
                                    });
 
-        // Add Print Settings button
-        m_modern_tabbar->AddButton(ModernTabBar::TAB_PRINT_SETTINGS, _L("Print Settings"),
-                                   [this]()
-                                   {
-                                       // Hide plater
-                                       m_plater->Hide();
+        // Add Settings dropdown button (combines Print Settings, Filaments, Printers)
+        m_modern_tabbar->AddSettingsDropdownButton(
+            [this](ModernTabBar::TabType type)
+            {
+                // Hide plater
+                m_plater->Hide();
 
-                                       // Find and show only the print settings tab content
-                                       for (size_t i = 0; i < m_tabpanel->GetPageCount(); ++i)
-                                       {
-                                           wxWindow *page = m_tabpanel->GetPage(i);
-                                           if (Tab *tab = dynamic_cast<Tab *>(page))
-                                           {
-                                               if (tab->type() == Preset::TYPE_PRINT ||
-                                                   tab->type() == Preset::TYPE_SLA_PRINT)
-                                               {
-                                                   // Hide all pages first
-                                                   for (size_t j = 0; j < m_tabpanel->GetPageCount(); ++j)
-                                                   {
-                                                       m_tabpanel->GetPage(j)->Hide();
-                                                   }
-                                                   // Show only this page
-                                                   page->Show();
-                                                   m_tabpanel->SetSelection(i);
-                                                   break;
-                                               }
-                                           }
-                                       }
-                                       Layout();
-                                   });
+                Preset::Type preset_type;
+                Preset::Type preset_type_alt = Preset::TYPE_INVALID;
+                switch (type)
+                {
+                case ModernTabBar::TAB_PRINT_SETTINGS:
+                    preset_type = Preset::TYPE_PRINT;
+                    preset_type_alt = Preset::TYPE_SLA_PRINT;
+                    break;
+                case ModernTabBar::TAB_FILAMENTS:
+                    preset_type = Preset::TYPE_FILAMENT;
+                    preset_type_alt = Preset::TYPE_SLA_MATERIAL;
+                    break;
+                case ModernTabBar::TAB_PRINTERS:
+                    preset_type = Preset::TYPE_PRINTER;
+                    break;
+                default:
+                    return;
+                }
 
-        // Add Filaments button
-        m_modern_tabbar->AddButton(ModernTabBar::TAB_FILAMENTS, _L("Filaments"),
-                                   [this]()
-                                   {
-                                       // Hide plater
-                                       m_plater->Hide();
-
-                                       // Find and show only the filament tab content
-                                       for (size_t i = 0; i < m_tabpanel->GetPageCount(); ++i)
-                                       {
-                                           wxWindow *page = m_tabpanel->GetPage(i);
-                                           if (Tab *tab = dynamic_cast<Tab *>(page))
-                                           {
-                                               if (tab->type() == Preset::TYPE_FILAMENT ||
-                                                   tab->type() == Preset::TYPE_SLA_MATERIAL)
-                                               {
-                                                   // Hide all pages first
-                                                   for (size_t j = 0; j < m_tabpanel->GetPageCount(); ++j)
-                                                   {
-                                                       m_tabpanel->GetPage(j)->Hide();
-                                                   }
-                                                   // Show only this page
-                                                   page->Show();
-                                                   m_tabpanel->SetSelection(i);
-                                                   break;
-                                               }
-                                           }
-                                       }
-                                       Layout();
-                                   });
-
-        // Add Printers button
-        m_modern_tabbar->AddButton(ModernTabBar::TAB_PRINTERS, _L("Printers"),
-                                   [this]()
-                                   {
-                                       // Hide plater
-                                       m_plater->Hide();
-
-                                       // Find and show only the printer tab content
-                                       for (size_t i = 0; i < m_tabpanel->GetPageCount(); ++i)
-                                       {
-                                           wxWindow *page = m_tabpanel->GetPage(i);
-                                           if (Tab *tab = dynamic_cast<Tab *>(page))
-                                           {
-                                               if (tab->type() == Preset::TYPE_PRINTER)
-                                               {
-                                                   // Hide all pages first
-                                                   for (size_t j = 0; j < m_tabpanel->GetPageCount(); ++j)
-                                                   {
-                                                       m_tabpanel->GetPage(j)->Hide();
-                                                   }
-                                                   // Show only this page
-                                                   page->Show();
-                                                   m_tabpanel->SetSelection(i);
-                                                   break;
-                                               }
-                                           }
-                                       }
-                                       Layout();
-                                   });
+                // Find and show only the selected tab content
+                for (size_t i = 0; i < m_tabpanel->GetPageCount(); ++i)
+                {
+                    wxWindow *page = m_tabpanel->GetPage(i);
+                    if (Tab *tab = dynamic_cast<Tab *>(page))
+                    {
+                        if (tab->type() == preset_type ||
+                            (preset_type_alt != Preset::TYPE_INVALID && tab->type() == preset_type_alt))
+                        {
+                            // Hide all pages first
+                            for (size_t j = 0; j < m_tabpanel->GetPageCount(); ++j)
+                            {
+                                m_tabpanel->GetPage(j)->Hide();
+                            }
+                            // Show only this page
+                            page->Show();
+                            m_tabpanel->SetSelection(i);
+                            break;
+                        }
+                    }
+                }
+                Layout();
+            });
 
         // Initially disable Preview button
         m_modern_tabbar->EnableTab(ModernTabBar::TAB_PREVIEW, false);
@@ -1172,18 +1165,151 @@ void MainFrame::show_printer_webview_tab(DynamicPrintConfig *dpc)
     }
 }
 
-void MainFrame::add_printer_webview_tab(const wxString & /*url*/) {}
-void MainFrame::remove_printer_webview_tab() {}
+void MainFrame::add_printer_webview_tab(const wxString &url)
+{
+    if (m_printer_webview_tab_added)
+        return;
 
-void MainFrame::set_printer_webview_api_key(const std::string & /*key*/) {}
-void MainFrame::set_printer_webview_credentials(const std::string & /*usr*/, const std::string & /*psk*/) {}
+    if (!m_content_panel)
+        return;
+
+    // Create the PrinterWebViewPanel
+    m_printer_webview_panel = new PrinterWebViewPanel(m_content_panel);
+    m_content_panel->GetSizer()->Add(m_printer_webview_panel, 1, wxEXPAND);
+    m_printer_webview_panel->Hide(); // Initially hidden
+
+    // Get printer name and config from physical_printers
+    auto &phys_printers = wxGetApp().preset_bundle->physical_printers;
+    wxString printer_name = from_u8(phys_printers.get_selected_printer_name());
+    auto *dpc = phys_printers.get_selected_printer_config();
+
+    // Set authentication on panel before loading URL
+    if (dpc)
+    {
+        auto auth_opt = dpc->option<ConfigOptionEnum<AuthorizationType>>("printhost_authorization_type");
+        if (auth_opt && auth_opt->value == AuthorizationType::atKeyPassword)
+        {
+            m_printer_webview_panel->SetAPIKey(dpc->opt_string("printhost_apikey"));
+        }
+        else
+        {
+            m_printer_webview_panel->SetCredentials(dpc->opt_string("printhost_user"),
+                                                    dpc->opt_string("printhost_password"));
+        }
+    }
+
+    // Add tab to ModernTabBar with callback
+    if (m_modern_tabbar)
+    {
+        m_modern_tabbar->ShowPrinterWebViewTab(printer_name, [this]() { show_printer_webview_content(); });
+
+        // Set up connection checker with printer config
+        m_modern_tabbar->SetPrinterConfig(dpc);
+    }
+
+    // Load URL (after credentials are set)
+    m_printer_webview_panel->LoadURL(url);
+    m_printer_webview_tab_added = true;
+}
+
+void MainFrame::remove_printer_webview_tab()
+{
+    if (!m_printer_webview_tab_added)
+        return;
+
+    // Hide tab from ModernTabBar
+    if (m_modern_tabbar)
+    {
+        m_modern_tabbar->HidePrinterWebViewTab();
+    }
+
+    // Remove and destroy panel
+    if (m_printer_webview_panel)
+    {
+        // If webview was shown, make sure to show something else first
+        if (m_printer_webview_panel->IsShown())
+        {
+            hide_printer_webview_content();
+        }
+
+        if (m_content_panel && m_content_panel->GetSizer())
+        {
+            m_content_panel->GetSizer()->Detach(m_printer_webview_panel);
+        }
+        m_printer_webview_panel->Destroy();
+        m_printer_webview_panel = nullptr;
+    }
+
+    m_printer_webview_tab_added = false;
+}
+
+void MainFrame::set_printer_webview_api_key(const std::string &key)
+{
+    if (m_printer_webview_panel)
+    {
+        m_printer_webview_panel->SetAPIKey(key);
+    }
+}
+
+void MainFrame::set_printer_webview_credentials(const std::string &usr, const std::string &psk)
+{
+    if (m_printer_webview_panel)
+    {
+        m_printer_webview_panel->SetCredentials(usr, psk);
+    }
+}
 
 bool MainFrame::is_any_webview_selected()
 {
+    if (m_modern_tabbar && m_modern_tabbar->HasPrinterWebViewTab())
+    {
+        return m_modern_tabbar->IsSelected(ModernTabBar::TAB_PRINTER_WEBVIEW);
+    }
     return false;
 }
 
-void MainFrame::reload_selected_webview() {}
+void MainFrame::reload_selected_webview()
+{
+    if (is_any_webview_selected() && m_printer_webview_panel)
+    {
+        m_printer_webview_panel->Reload();
+    }
+}
+
+void MainFrame::show_printer_webview_content()
+{
+    if (!m_printer_webview_panel || !m_content_panel)
+        return;
+
+    // Hide all children of m_content_panel except the webview panel
+    wxWindowList &children = m_content_panel->GetChildren();
+    for (wxWindow *child : children)
+    {
+        if (child != m_printer_webview_panel)
+        {
+            child->Hide();
+        }
+    }
+
+    // Show webview panel
+    m_printer_webview_panel->Show();
+    m_content_panel->Layout();
+}
+
+void MainFrame::hide_printer_webview_content()
+{
+    if (!m_printer_webview_panel)
+        return;
+
+    m_printer_webview_panel->Hide();
+
+    // Show plater by default (other tabs will be shown by their respective callbacks)
+    if (m_plater)
+        m_plater->Show();
+
+    if (m_content_panel)
+        m_content_panel->Layout();
+}
 
 void MainFrame::on_tab_change_rename_reload_item(int /*new_tab*/)
 {
@@ -1409,6 +1535,14 @@ void MainFrame::on_dpi_changed(const wxRect &suggested_rect)
     m_tabpanel->Rescale();
 #endif
 
+    // update ModernTabBar for DPI scaling
+    if (m_modern_tabbar)
+        m_modern_tabbar->msw_rescale();
+
+    // update CustomMenuBar for DPI scaling
+    if (m_customMenuBar)
+        m_customMenuBar->msw_rescale();
+
     // update Plater
     wxGetApp().plater()->msw_rescale();
 
@@ -1449,6 +1583,10 @@ void MainFrame::on_sys_color_changed()
 
     // update label colors in respect to the system mode
     wxGetApp().init_ui_colours();
+
+    // Refresh ImGui colors to match new theme
+    if (wxGetApp().imgui())
+        wxGetApp().imgui()->refresh_style();
 
     if (wxGetApp().is_gcode_viewer())
     {
@@ -1537,7 +1675,7 @@ static wxMenu *generate_help_menu()
 
     append_menu_item(helpMenu, wxID_ANY, wxString::Format(_L("%s &Website"), SLIC3R_APP_NAME),
                      wxString::Format(_L("Open the %s website in your browser"), SLIC3R_APP_NAME),
-                     [](wxCommandEvent &) { wxGetApp().open_web_page_localized("http://ooze.bot/preFlight"); });
+                     [](wxCommandEvent &) { wxGetApp().open_web_page_localized("https://github.com/oozebot/preFlight"); });
     // // TRN Item from "Help" menu
     // append_menu_item(helpMenu, wxID_ANY, wxString::Format(_L("&Quick Start"), SLIC3R_APP_NAME),
     //     wxString::Format(_L("Open the %s website in your browser"), SLIC3R_APP_NAME),
@@ -1977,45 +2115,15 @@ void MainFrame::init_menubar_as_editor()
             { m_tabpanel->GetTopBarItemsCtrl()->TriggerSearch(); }, "search", nullptr, []() { return true; }, this);
     }
 
-    // Window menu
-    auto windowMenu = new wxMenu();
+    // View menu
+    wxMenu *viewMenu = nullptr;
+    if (m_plater)
     {
-        if (m_plater)
-        {
-            append_menu_item(
-                windowMenu, wxID_HIGHEST + 1, _L("&Plater Tab") + "\tCtrl+1", _L("Show the plater"),
-                [this](wxCommandEvent &) { select_tab(size_t(0)); }, "plater", nullptr, []() { return true; }, this);
-            windowMenu->AppendSeparator();
-        }
+        viewMenu = new wxMenu();
+        add_common_view_menu_items(viewMenu, this, std::bind(&MainFrame::can_change_view, this));
+        viewMenu->AppendSeparator();
         append_menu_item(
-            windowMenu, wxID_HIGHEST + 2, _L("P&rint Settings Tab") + "\tCtrl+2", _L("Show the print settings"),
-            [this /*, tab_offset*/](wxCommandEvent &) { select_tab(1); }, "cog", nullptr, []() { return true; }, this);
-        wxMenuItem *item_material_tab = append_menu_item(
-            windowMenu, wxID_HIGHEST + 3, _L("&Filament Settings Tab") + "\tCtrl+3", _L("Show the filament settings"),
-            [this /*, tab_offset*/](wxCommandEvent &) { select_tab(2); }, "spool", nullptr, []() { return true; },
-            this);
-        m_changeable_menu_items.push_back(item_material_tab);
-        wxMenuItem *item_printer_tab = append_menu_item(
-            windowMenu, wxID_HIGHEST + 4, _L("Print&er Settings Tab") + "\tCtrl+4", _L("Show the printer settings"),
-            [this /*, tab_offset*/](wxCommandEvent &) { select_tab(3); }, "printer", nullptr, []() { return true; },
-            this);
-        m_changeable_menu_items.push_back(item_printer_tab);
-        if (m_plater)
-        {
-            windowMenu->AppendSeparator();
-            append_menu_item(
-                windowMenu, wxID_HIGHEST + 5, _L("3&D") + "\tCtrl+5", _L("Show the 3D editing view"),
-                [this](wxCommandEvent &) { m_plater->select_view_3D("3D"); }, "editor_menu", nullptr,
-                [this]() { return can_change_view(); }, this);
-            append_menu_item(
-                windowMenu, wxID_HIGHEST + 6, _L("Pre&view") + "\tCtrl+6", _L("Show the 3D slices preview"),
-                [this](wxCommandEvent &) { m_plater->select_view_3D("Preview"); }, "preview_menu", nullptr,
-                [this]() { return can_change_view(); }, this);
-        }
-
-        windowMenu->AppendSeparator();
-        append_menu_item(
-            windowMenu, wxID_ANY, _L("Shape Gallery"), _L("Open the dialog to modify shape gallery"),
+            viewMenu, wxID_ANY, _L("Shape Gallery"), _L("Open the dialog to modify shape gallery"),
             [this](wxCommandEvent &)
             {
                 if (gallery_dialog()->show(true) == wxID_OK)
@@ -2027,31 +2135,10 @@ void MainFrame::init_menubar_as_editor()
                 }
             },
             "shape_gallery", nullptr, []() { return true; }, this);
-
-        windowMenu->AppendSeparator();
         append_menu_item(
-            windowMenu, wxID_ANY, _L("Print &Host Upload Queue") + "\tCtrl+J",
+            viewMenu, wxID_ANY, _L("Print &Host Upload Queue") + "\tCtrl+J",
             _L("Display the Print Host Upload Queue window"), [this](wxCommandEvent &)
             { m_printhost_queue_dlg->Show(); }, "upload_queue", nullptr, []() { return true; }, this);
-
-        windowMenu->AppendSeparator();
-        append_menu_item(
-            windowMenu, wxID_ANY, _L("Open New Instance") + "\tCtrl+Shift+I", _L("Open a new preFlight instance"),
-            [](wxCommandEvent &) { start_new_slicer(); }, "", nullptr,
-            [this]() { return m_plater != nullptr && !wxGetApp().app_config->get_bool("single_instance"); }, this);
-
-        windowMenu->AppendSeparator();
-        append_menu_item(
-            windowMenu, wxID_ANY, _L("Compare Presets") /* + "\tCtrl+F"*/, _L("Compare presets"),
-            [this](wxCommandEvent &) { diff_dialog.show(); }, "compare", nullptr, []() { return true; }, this);
-    }
-
-    // View menu
-    wxMenu *viewMenu = nullptr;
-    if (m_plater)
-    {
-        viewMenu = new wxMenu();
-        add_common_view_menu_items(viewMenu, this, std::bind(&MainFrame::can_change_view, this));
         viewMenu->AppendSeparator();
         append_menu_check_item(
             viewMenu, wxID_ANY, _L("Show &Labels") + "\tCtrl+E", _L("Show object/instance labels in 3D scene"),
@@ -2093,7 +2180,6 @@ void MainFrame::init_menubar_as_editor()
 
     m_bar_menus.AppendMenuSeparaorItem();
 
-    m_bar_menus.AppendMenuItem(windowMenu, _L("&Window"));
     if (viewMenu) 
         m_bar_menus.AppendMenuItem(viewMenu, _L("&View"));
     
@@ -2113,7 +2199,6 @@ void MainFrame::init_menubar_as_editor()
     m_menubar->Append(fileMenu, _L("&File"));
     if (editMenu)
         m_menubar->Append(editMenu, _L("&Edit"));
-    m_menubar->Append(windowMenu, _L("&Window"));
     if (viewMenu)
         m_menubar->Append(viewMenu, _L("&View"));
     // Add additional menus from C++
@@ -2125,6 +2210,23 @@ void MainFrame::init_menubar_as_editor()
 #ifdef __APPLE__
     init_macos_application_menu(m_menubar, this);
 #endif // __APPLE__
+
+#ifdef _WIN32
+    // Hide native menu bar visually but keep it for keyboard accelerators
+    ::SetMenu(GetHWND(), NULL);
+
+    // Create custom menu bar for Windows (fully themed popup menus)
+    m_customMenuBar = new CustomMenuBar(this);
+    m_customMenuBar->SetEventHandler(this);
+    m_customMenuBar->Append(fileMenu, _L("&File"));
+    if (editMenu)
+        m_customMenuBar->Append(editMenu, _L("&Edit"));
+    if (viewMenu)
+        m_customMenuBar->Append(viewMenu, _L("&View"));
+    m_customMenuBar->Append(wxGetApp().get_config_menu(this), _L("&Configuration"));
+    m_customMenuBar->Append(helpMenu, _L("&Help"));
+    m_customMenuBar->Hide(); // Will be shown in update_layout()
+#endif                       // _WIN32
 
 #endif
 
@@ -2247,6 +2349,21 @@ void MainFrame::init_menubar_as_gcodeviewer()
 #ifdef __APPLE__
     init_macos_application_menu(m_menubar, this);
 #endif // __APPLE__
+
+#ifdef _WIN32
+    // Hide native menu bar visually but keep it for keyboard accelerators
+    ::SetMenu(GetHWND(), NULL);
+
+    // Create custom menu bar for Windows (fully themed popup menus)
+    m_customMenuBar = new CustomMenuBar(this);
+    m_customMenuBar->SetEventHandler(this);
+    m_customMenuBar->Append(fileMenu, _L("&File"));
+    if (viewMenu != nullptr)
+        m_customMenuBar->Append(viewMenu, _L("&View"));
+    m_customMenuBar->Append(wxGetApp().get_config_menu(this), _L("&Configuration"));
+    m_customMenuBar->Append(helpMenu, _L("&Help"));
+    m_customMenuBar->Hide(); // Will be shown in update_layout()
+#endif                       // _WIN32
 }
 
 void MainFrame::update_menubar()
@@ -2260,12 +2377,6 @@ void MainFrame::update_menubar()
                                                     "\tCtrl+G");
     m_changeable_menu_items[miSend]->SetItemLabel((is_fff ? _L("S&end G-code") : _L("S&end to print")) + dots +
                                                   "\tCtrl+Shift+G");
-
-    m_changeable_menu_items[miMaterialTab]->SetItemLabel(
-        (is_fff ? _L("&Filament Settings Tab") : _L("Mate&rial Settings Tab")) + "\tCtrl+3");
-    m_changeable_menu_items[miMaterialTab]->SetBitmap(*get_bmp_bundle(is_fff ? "spool" : "resin"));
-
-    m_changeable_menu_items[miPrinterTab]->SetBitmap(*get_bmp_bundle(is_fff ? "printer" : "sla_printer"));
 }
 
 void MainFrame::reslice_now()
@@ -2318,7 +2429,7 @@ void MainFrame::export_config()
                      !m_last_config.IsEmpty() ? get_base_name(m_last_config) : "config.ini", file_wildcards(FT_INI),
                      wxFD_SAVE | wxFD_OVERWRITE_PROMPT);
     wxString file;
-    if (dlg.ShowModal() == wxID_OK)
+    if (ShowFileDialogModal(dlg) == wxID_OK)
         file = dlg.GetPath();
     if (!file.IsEmpty())
     {
@@ -2338,7 +2449,7 @@ void MainFrame::load_config_file()
                      "config.ini", "INI files (*.ini, *.gcode, *.bgcode)|*.ini;*.INI;*.gcode;*.g;*.bgcode;*.bgc",
                      wxFD_OPEN | wxFD_FILE_MUST_EXIST);
     wxString file;
-    if (dlg.ShowModal() == wxID_OK)
+    if (ShowFileDialogModal(dlg) == wxID_OK)
         file = dlg.GetPath();
     if (!file.IsEmpty() && this->load_config_file(file.ToUTF8().data()))
     {

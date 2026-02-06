@@ -10,6 +10,7 @@
 #include "libslic3r/Technologies.hpp"
 #include "GUI_App.hpp"
 #include "GUI_Init.hpp" // IWYU pragma: keep
+#include "Widgets/UIColors.hpp"
 #include "GUI_ObjectList.hpp"
 #include "GUI_ObjectManipulation.hpp"
 #include "GUI_Factories.hpp"
@@ -28,6 +29,7 @@
 #include "slic3r/GUI/I18N.hpp"
 
 #include <algorithm>
+#include <functional>
 #include <iterator>
 #include <exception>
 #include <cstdlib>
@@ -655,6 +657,10 @@ void GUI_App::post_init()
     if (!this->initialized())
         throw Slic3r::RuntimeError("Calling post_init() while not yet initialized");
 
+    // Initialize ImGui style now that app_config is ready
+    if (m_imgui)
+        m_imgui->refresh_style();
+
     if (this->is_gcode_viewer())
     {
         if (!this->init_params->input_files.empty())
@@ -910,7 +916,7 @@ void copy_vendor_ini(const std::vector<std::string> &vendors)
 
 void GUI_App::legacy_app_config_vendor_check()
 {
-    // preFlight: SLA printer migration removed (preFlight does not support SLA printing)
+    // SLA printer migration removed (preFlight does not support SLA printing)
 }
 
 std::array<std::string, 3> get_possible_app_names()
@@ -1284,7 +1290,7 @@ bool GUI_App::on_init_inner()
         if (!older_data_dir_path.empty())
             m_last_app_conf_lower_version = true;
 
-        // preFlight: Force dark mode on fresh install regardless of imported settings
+        // Force dark mode on fresh install regardless of imported settings
         app_config->set("dark_color_mode", "1");
     }
 
@@ -1334,8 +1340,12 @@ bool GUI_App::on_init_inner()
             auto metrics = WindowMetrics::deserialize(app_config->get("window_mainframe"));
             if (metrics != boost::none)
             {
-                wxPoint pos = metrics->get_rect().GetPosition();
-                int display_idx = wxDisplay::GetFromPoint(pos);
+                // Use center of saved rect, not top-left - when maximized on Windows, the extended
+                // frame bounds place the top-left slightly outside the monitor area (e.g. -7,-7),
+                // causing GetFromPoint to fail and default to Monitor 1
+                wxPoint center = metrics->get_rect().GetPosition() +
+                                 wxSize(metrics->get_rect().GetWidth() / 2, metrics->get_rect().GetHeight() / 2);
+                int display_idx = wxDisplay::GetFromPoint(center);
                 if (display_idx != wxNOT_FOUND)
                     target_display_idx = display_idx;
             }
@@ -1433,7 +1443,8 @@ bool GUI_App::on_init_inner()
         }
 
         // Detect position (display) to show the splash screen
-        // Now this position is equal to the mainframe position
+        // Use center of saved rect as hint position - when maximized, the top-left of the extended
+        // frame bounds can fall outside the monitor area, causing wrong-monitor detection
         wxPoint splashscreen_pos = wxDefaultPosition;
         bool default_splashscreen_pos = true;
         if (app_config->has("window_mainframe") && app_config->get_bool("restore_win_position"))
@@ -1441,7 +1452,8 @@ bool GUI_App::on_init_inner()
             auto metrics = WindowMetrics::deserialize(app_config->get("window_mainframe"));
             default_splashscreen_pos = metrics == boost::none;
             if (!default_splashscreen_pos)
-                splashscreen_pos = metrics->get_rect().GetPosition();
+                splashscreen_pos = metrics->get_rect().GetPosition() +
+                                   wxSize(metrics->get_rect().GetWidth() / 2, metrics->get_rect().GetHeight() / 2);
         }
 
         if (!default_splashscreen_pos)
@@ -1749,6 +1761,11 @@ unsigned GUI_App::get_colour_approx_luma(const wxColour &colour)
 
 bool GUI_App::dark_mode()
 {
+    // During early initialization, app_config may not exist yet.
+    // Default to dark mode (preFlight's primary theme).
+    if (!wxGetApp().app_config)
+        return true;
+
 #if __APPLE__
     // The check for dark mode returns false positive on 10.12 and 10.13,
     // which allowed setting dark menu bar and dock area, which is
@@ -1762,21 +1779,27 @@ bool GUI_App::dark_mode()
 #endif
 }
 
+// Global helper for UIColors - allows UIColors.hpp to check theme without including GUI_App.hpp
+bool IsDarkMode()
+{
+    return wxGetApp().dark_mode();
+}
+
 const wxColour GUI_App::get_label_default_clr_system()
 {
-    // preFlight: Hardcoded to #EAA032 (orange) for both modes
-    return wxColour(234, 160, 50);
+    // preFlight brand orange
+    return UIColors::AccentPrimary();
 }
 
 const wxColour GUI_App::get_label_default_clr_modified()
 {
-    // preFlight: Hardcoded to #EAA032 (orange) for both modes
-    return wxColour(234, 160, 50);
+    // preFlight brand orange
+    return UIColors::AccentPrimary();
 }
 
 const std::vector<std::string> GUI_App::get_mode_default_palette()
 {
-    return {"#7DF028", "#FFDC00", "#E70000"};
+    return {"#EAA032", "#32BBED", "#E74C3C"}; // Orange (Simple), Blue (Advanced), Red (Expert)
 }
 
 void GUI_App::init_ui_colours()
@@ -1786,25 +1809,22 @@ void GUI_App::init_ui_colours()
     m_mode_palette = get_mode_default_palette();
 
     bool is_dark_mode = dark_mode();
-    //#ifdef _WIN32
-    m_color_label_default = is_dark_mode ? wxColour(250, 250, 250)
+    m_color_label_default = is_dark_mode ? UIColors::LabelDefaultDark()
                                          : wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
-    m_color_highlight_label_default = is_dark_mode ? wxColour(230, 230, 230)
-                                                   : wxSystemSettings::GetColour(
-                                                         /*wxSYS_COLOUR_HIGHLIGHTTEXT*/ wxSYS_COLOUR_WINDOWTEXT);
-    m_color_highlight_default = is_dark_mode ? wxColour(78, 78, 78) : wxSystemSettings::GetColour(wxSYS_COLOUR_3DLIGHT);
-    m_color_hovered_btn_label = is_dark_mode ? wxColour(253, 111, 40) : wxColour(252, 77, 1);
-    m_color_default_btn_label = is_dark_mode ? wxColour(255, 181, 100) : wxColour(203, 61, 0);
-    m_color_selected_btn_bg = is_dark_mode ? wxColour(95, 73, 62) : wxColour(228, 220, 216);
-    //#else
-    //    m_color_label_default = wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
-    //#endif
-    m_color_window_default = is_dark_mode ? wxColour(43, 43, 43) : wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
+    m_color_highlight_label_default = is_dark_mode ? UIColors::HighlightLabelDark()
+                                                   : wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOWTEXT);
+    m_color_highlight_default = is_dark_mode ? UIColors::HighlightBackgroundDark()
+                                             : UIColors::HighlightBackgroundLight();
+    m_color_hovered_btn_label = is_dark_mode ? UIColors::HoveredBtnLabelDark() : UIColors::HoveredBtnLabelLight();
+    m_color_default_btn_label = is_dark_mode ? UIColors::DefaultBtnLabelDark() : UIColors::DefaultBtnLabelLight();
+    m_color_selected_btn_bg = is_dark_mode ? UIColors::SelectedBtnBackgroundDark()
+                                           : UIColors::SelectedBtnBackgroundLight();
+    m_color_window_default = is_dark_mode ? UIColors::InputBackgroundDark() : UIColors::InputBackgroundLight();
 }
 
 void GUI_App::update_ui_colours_from_appconfig()
 {
-    // preFlight: Label colors are hardcoded - not read from config
+    // Label colors are hardcoded - not read from config
     // See get_label_default_clr_modified() and get_label_default_clr_system()
 
     // load mode markers colors
@@ -1850,13 +1870,16 @@ void GUI_App::UpdateDarkUI(wxWindow *window, bool highlited /* = false*/, bool j
     bool is_default_button = false;
     if (wxButton *btn = dynamic_cast<wxButton *>(window))
     {
+        // Skip background handling for transparent buttons (e.g., mirror buttons)
+        bool is_transparent = (btn->GetWindowStyle() & wxTRANSPARENT_WINDOW) != 0;
+
         if (!(btn->GetWindowStyle() & wxNO_BORDER))
         {
             btn->SetWindowStyle(btn->GetWindowStyle() | wxNO_BORDER);
             highlited = true;
         }
-        // button marking
-        if (!dynamic_cast<TopBarItemsCtrl *>(window->GetParent())) // don't marking the button if it is from TopBar
+        // button marking - skip for transparent buttons
+        if (!dynamic_cast<TopBarItemsCtrl *>(window->GetParent()) && !is_transparent)
         {
             auto mark_button = [this, btn, highlited](const bool mark)
             {
@@ -1925,7 +1948,11 @@ void GUI_App::UpdateDarkUI(wxWindow *window, bool highlited /* = false*/, bool j
     else if (dynamic_cast<wxListBox *>(window))
         window->SetWindowStyle(window->GetWindowStyle() | wxBORDER_SIMPLE);
 
-    if (!just_font)
+    // Skip background color for:
+    // - wxStaticBox: FlatStaticBox handles its own theming by reading parent's background
+    // - Transparent windows: They should inherit parent's background
+    bool is_transparent_window = (window->GetWindowStyle() & wxTRANSPARENT_WINDOW) != 0;
+    if (!just_font && !dynamic_cast<wxStaticBox *>(window) && !is_transparent_window)
         window->SetBackgroundColour(highlited ? m_color_highlight_default : m_color_window_default);
     if (!is_focused_button && !is_default_button)
         window->SetForegroundColour(m_color_label_default);
@@ -2090,7 +2117,7 @@ void GUI_App::UpdateDlgDarkUI(wxDialog *dlg, bool just_buttons_update /* = false
 void GUI_App::UpdateDVCDarkUI(wxDataViewCtrl *dvc, bool highlited /* = false*/)
 {
 #ifdef _WIN32
-    UpdateDarkUI(dvc, highlited ? dark_mode() : false);
+    UpdateDarkUI(dvc, highlited);
     // The upstream wx fork had a custom RefreshHeaderDarkMode() method on wxDataViewCtrl
     // that doesn't exist in upstream wx 3.2.9. We use our own implementation that
     // applies dark theme to the header control and child windows.
@@ -2105,14 +2132,24 @@ void GUI_App::UpdateDVCDarkUI(wxDataViewCtrl *dvc, bool highlited /* = false*/)
 void GUI_App::UpdateAllStaticTextDarkUI(wxWindow *parent)
 {
 #ifdef _WIN32
+    if (!parent)
+        return;
+
+    // Update parent background
     wxGetApp().UpdateDarkUI(parent);
 
-    auto children = parent->GetChildren();
-    for (auto child : children)
+    // Recursively update all wxStaticText children
+    std::function<void(wxWindow *)> update_recursive;
+    update_recursive = [this, &update_recursive](wxWindow *window)
     {
-        if (dynamic_cast<wxStaticText *>(child))
-            child->SetForegroundColour(m_color_label_default);
-    }
+        if (!window)
+            return;
+        if (dynamic_cast<wxStaticText *>(window))
+            window->SetForegroundColour(m_color_label_default);
+        for (wxWindow *child : window->GetChildren())
+            update_recursive(child);
+    };
+    update_recursive(parent);
 #endif
 }
 
@@ -2345,7 +2382,10 @@ void GUI_App::recreate_GUI(const wxString &msg_name)
 
     dlg.Update(80, _L("Loading of current presets") + dots);
     m_printhost_job_queue.reset(new PrintHostJobQueue(mainframe->printhost_queue_dlg()));
+    // Suppress extrusion width warnings during GUI recreation (same as initial load)
+    ConfigManipulation::set_suppress_extrusion_width_warnings(true);
     load_current_presets();
+    ConfigManipulation::set_suppress_extrusion_width_warnings(false);
     mainframe->Show(true);
 
     dlg.Update(90, _L("Loading of a mode view") + dots);
@@ -2454,6 +2494,8 @@ void GUI_App::update_ui_from_settings()
         if (mainframe->preferences_dialog)
             mainframe->preferences_dialog->force_color_changed();
         mainframe->printhost_queue_dlg()->force_color_changed();
+        // Rebuild ImGui font atlas with theme-appropriate icon colors
+        imgui()->invalidate_font();
 #ifdef _MSW_DARK_MODE
         update_scrolls(mainframe);
         if (mainframe->is_dlg_layout())
@@ -2493,7 +2535,7 @@ void GUI_App::load_project(wxWindow *parent, wxString &input_file) const
     wxFileDialog dialog(parent ? parent : GetTopWindow(), _L("Choose one file (3MF/AMF):"), app_config->get_last_dir(),
                         "", file_wildcards(FT_PROJECT), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
 
-    if (dialog.ShowModal() == wxID_OK)
+    if (ShowFileDialogModal(dialog) == wxID_OK)
         input_file = dialog.GetPath();
 }
 
@@ -2504,7 +2546,7 @@ void GUI_App::import_model(wxWindow *parent, wxArrayString &input_files) const
                         from_u8(app_config->get_last_dir()), "", file_wildcards(FT_MODEL),
                         wxFD_OPEN | wxFD_MULTIPLE | wxFD_FILE_MUST_EXIST);
 
-    if (dialog.ShowModal() == wxID_OK)
+    if (ShowFileDialogModal(dialog) == wxID_OK)
         dialog.GetPaths(input_files);
 }
 
@@ -2514,7 +2556,7 @@ void GUI_App::import_zip(wxWindow *parent, wxString &input_file) const
                         from_u8(app_config->get_last_dir()), "", file_wildcards(FT_ZIP),
                         wxFD_OPEN | wxFD_FILE_MUST_EXIST);
 
-    if (dialog.ShowModal() == wxID_OK)
+    if (ShowFileDialogModal(dialog) == wxID_OK)
         input_file = dialog.GetPath();
 }
 
@@ -2524,7 +2566,7 @@ void GUI_App::load_gcode(wxWindow *parent, wxString &input_file) const
     wxFileDialog dialog(parent ? parent : GetTopWindow(), _L("Choose one file (GCODE/GCO/G/BGCODE/BGC/NGC):"),
                         app_config->get_last_dir(), "", file_wildcards(FT_GCODE), wxFD_OPEN | wxFD_FILE_MUST_EXIST);
 
-    if (dialog.ShowModal() == wxID_OK)
+    if (ShowFileDialogModal(dialog) == wxID_OK)
         input_file = dialog.GetPath();
 }
 
@@ -3126,10 +3168,15 @@ void GUI_App::open_preferences(const std::string &highlight_option /*= std::stri
 
     mainframe->preferences_dialog->show(highlight_option, tab_name);
 
-    if (mainframe->preferences_dialog->recreate_GUI())
+    // Capture dialog state before recreate_GUI() potentially destroys it
+    const bool should_recreate = mainframe->preferences_dialog->recreate_GUI();
+    const bool seq_top_changed = mainframe->preferences_dialog->seq_top_layer_only_changed();
+    const bool layout_changed = mainframe->preferences_dialog->settings_layout_changed();
+
+    if (should_recreate)
         recreate_GUI(_L("Restart application") + dots);
 
-    if (mainframe->preferences_dialog->seq_top_layer_only_changed())
+    if (seq_top_changed)
         this->plater_->reload_print();
 
 #ifdef _WIN32
@@ -3149,7 +3196,7 @@ void GUI_App::open_preferences(const std::string &highlight_option /*= std::stri
     }
 #endif // _WIN32
 
-    if (mainframe->preferences_dialog->settings_layout_changed())
+    if (layout_changed)
     {
         // hide full main_sizer for mainFrame
         mainframe->GetSizer()->Show(false);
@@ -4149,7 +4196,7 @@ void GUI_App::on_version_read(wxCommandEvent &evt)
         , NotificationManager::NotificationLevel::ImportantNotificationLevel
         , Slic3r::format(_u8L("New release version %1% is available."), evt.GetString())
         , _u8L("See Download page.")
-        , [](wxEvtHandler* evnthndlr) {wxGetApp().open_web_page_localized("http://ooze.bot/preFlight"); return true; }
+        , [](wxEvtHandler* evnthndlr) {wxGetApp().open_web_page_localized("https://github.com/oozebot/preFlight"); return true; }
     );
     */
     // updater
@@ -4174,7 +4221,8 @@ void GUI_App::app_updater(bool from_user)
 
     // dialog with new version info
     AppUpdateAvailableDialog dialog(*Semver::parse(SLIC3R_VERSION), *app_data.version, from_user,
-                                    app_data.action == AppUpdaterURLAction::AUUA_OPEN_IN_BROWSER);
+                                    app_data.action == AppUpdaterURLAction::AUUA_OPEN_IN_BROWSER,
+                                    app_data.release_notes);
     auto dialog_result = dialog.ShowModal();
     // checkbox "do not show again"
     if (dialog.disable_version_check())

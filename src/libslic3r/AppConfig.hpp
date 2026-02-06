@@ -147,6 +147,8 @@ public:
     // Get the Slic3r version check url.
     // This returns a hardcoded string unless it is overriden by "version_check_url" in the ini file.
     std::string version_check_url() const;
+    // Get the release notes URL for displaying in the update dialog.
+    std::string release_notes_url() const;
     // Get the Slic3r url to vendor index archive zip.
     std::string index_archive_url() const;
     // Get the Slic3r url to folder with vendor profile files.

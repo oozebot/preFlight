@@ -3,10 +3,18 @@
 ///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
 ///|/
 #include "Button.hpp"
+#include "UIColors.hpp"
+#include "../GUI_App.hpp"
 
 #include <wx/dcgraph.h>
 #include <wx/dc.h>
 #include <wx/dcclient.h>
+
+// DPI scaling helper
+static int GetScaledIconTextPadding()
+{
+    return Slic3r::GUI::wxGetApp().em_unit() / 2; // 5px at 100%
+}
 
 BEGIN_EVENT_TABLE(Button, StaticBox)
 
@@ -27,24 +35,26 @@ END_EVENT_TABLE()
  * calling Refresh()/Update().
  */
 
-Button::Button() : paddingSize(10, 8)
+Button::Button()
+    : paddingSize(Slic3r::GUI::wxGetApp().em_unit(), (Slic3r::GUI::wxGetApp().em_unit() * 8) / 10) // 10x8 at 100%
 {
     background_color = StateColor(std::make_pair(0xF0F0F0, (int) StateColor::Disabled),
-                                  std::make_pair(0x37EE7C, (int) StateColor::Hovered | StateColor::Checked),
-                                  std::make_pair(0x00AE42, (int) StateColor::Checked),
+                                  std::make_pair(0xF5B041, (int) StateColor::Hovered |
+                                                               StateColor::Checked),   // preFlight light orange
+                                  std::make_pair(0xEAA032, (int) StateColor::Checked), // preFlight brand orange
                                   std::make_pair(*wxLIGHT_GREY, (int) StateColor::Hovered),
-                                  std::make_pair(*wxWHITE, (int) StateColor::Normal));
+                                  std::make_pair(clr_background_normal_light, (int) StateColor::Normal));
     text_color = StateColor(std::make_pair(*wxLIGHT_GREY, (int) StateColor::Disabled),
                             std::make_pair(*wxBLACK, (int) StateColor::Normal));
 }
 
-Button::Button(wxWindow *parent, wxString text, wxString icon, long style, wxSize iconSize /* = wxSize(16, 16)*/)
+Button::Button(wxWindow *parent, wxString text, wxString icon, long style, wxSize iconSize /* = wxDefaultSize*/)
     : Button()
 {
     Create(parent, text, icon, style, iconSize);
 }
 
-bool Button::Create(wxWindow *parent, wxString text, wxString icon, long style, wxSize iconSize /* = wxSize(16, 16)*/)
+bool Button::Create(wxWindow *parent, wxString text, wxString icon, long style, wxSize iconSize /* = wxDefaultSize*/)
 {
     StaticBox::Create(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, style);
     state_handler.attach({&text_color});
@@ -52,6 +62,12 @@ bool Button::Create(wxWindow *parent, wxString text, wxString icon, long style, 
     wxWindow::SetLabel(text);
     if (!icon.IsEmpty())
     {
+        // DPI-scale the default icon size (16x16 at 100% DPI)
+        if (iconSize == wxDefaultSize)
+        {
+            int em = Slic3r::GUI::wxGetApp().em_unit();
+            iconSize = wxSize((16 * em) / 10, (16 * em) / 10);
+        }
         this->active_icon = ScalableBitmap(this, icon.ToStdString(), iconSize);
     }
     messureSize();
@@ -135,12 +151,10 @@ void Button::SetCanFocus(bool canFocus)
 
 void Button::Rescale()
 {
-    /*    if (this->active_icon.bmp().IsOk())
-        this->active_icon.msw_rescale();
-
-    if (this->inactive_icon.bmp().IsOk())
-        this->inactive_icon.msw_rescale();
-*/
+    // Update paddingSize for new DPI
+    paddingSize = wxSize(Slic3r::GUI::wxGetApp().em_unit(), (Slic3r::GUI::wxGetApp().em_unit() * 8) / 10);
+    // Update corner radius from parent
+    StaticBox::msw_rescale();
     messureSize();
 }
 
@@ -172,7 +186,7 @@ void Button::render(wxDC &dc)
         icon = active_icon;
     else
         icon = inactive_icon;
-    int padding = 5;
+    int padding = GetScaledIconTextPadding();
     if (icon.bmp().IsOk())
     {
         if (szContent.y > 0)
@@ -234,7 +248,7 @@ void Button::messureSize()
         if (szContent.y > 0)
         {
             //BBS norrow size between text and icon
-            szContent.x += 5;
+            szContent.x += GetScaledIconTextPadding();
         }
         wxSize szIcon = this->active_icon.GetSize();
         szContent.x += szIcon.x;

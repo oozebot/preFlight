@@ -39,14 +39,24 @@
 #include "libslic3r/Format/OBJ.hpp"
 #include "libslic3r/MultipleBeds.hpp"
 #include "../Utils/MacDarkMode.hpp"
+#include "Widgets/CustomMenu.hpp"
 
 namespace Slic3r
 {
 namespace GUI
 {
 
-#define BORDER_W 10
-#define IMG_PX_CNT 64
+// DPI-scaled border width helper
+static int GetScaledBorderW()
+{
+    return wxGetApp().em_unit(); // 10px at 100% DPI
+}
+
+// DPI-scaled image size (64px at 100% DPI)
+static int GetScaledImageSize()
+{
+    return (64 * wxGetApp().em_unit()) / 10;
+}
 
 namespace fs = boost::filesystem;
 
@@ -122,7 +132,7 @@ GalleryDialog::GalleryDialog(wxWindow *parent)
         btn->SetToolTip(tooltip);
         wxGetApp().SetWindowVariantForButton(btn);
         btn->Bind(wxEVT_UPDATE_UI, [enable_fn](wxUpdateUIEvent &evt) { evt.Enable(enable_fn()); });
-        buttons->Insert(pos, btn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, BORDER_W);
+        buttons->Insert(pos, btn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, GetScaledBorderW());
         this->Bind(wxEVT_BUTTON, method, this, ID);
     };
 
@@ -133,15 +143,15 @@ GalleryDialog::GalleryDialog(wxWindow *parent)
             _L("Delete one or more custom shape. You can't delete system shapes"), &GalleryDialog::del_custom_shapes,
             [this]() { return can_delete(); });
     //add_btn(btn_pos++, ID_BTN_REPLACE_CUSTOM_PNG, _L("Change thumbnail"),   _L("Replace PNG for custom shape. You can't raplace thimbnail for system shape"),   &GalleryDialog::change_thumbnail, [this](){ return can_change_thumbnail(); });
-    buttons->InsertStretchSpacer(btn_pos, 2 * BORDER_W);
+    buttons->InsertStretchSpacer(btn_pos, 2 * GetScaledBorderW());
 
     load_label_icon_list();
 
     wxBoxSizer *topSizer = new wxBoxSizer(wxVERTICAL);
 
-    topSizer->Add(label_top, 0, wxEXPAND | wxLEFT | wxTOP | wxRIGHT, BORDER_W);
-    topSizer->Add(m_list_ctrl, 1, wxEXPAND | wxLEFT | wxTOP | wxRIGHT, BORDER_W);
-    topSizer->Add(buttons, 0, wxEXPAND | wxALL, BORDER_W);
+    topSizer->Add(label_top, 0, wxEXPAND | wxLEFT | wxTOP | wxRIGHT, GetScaledBorderW());
+    topSizer->Add(m_list_ctrl, 1, wxEXPAND | wxLEFT | wxTOP | wxRIGHT, GetScaledBorderW());
+    topSizer->Add(buttons, 0, wxEXPAND | wxALL, GetScaledBorderW());
 
     SetSizer(topSizer);
     topSizer->SetSizeHints(this);
@@ -250,7 +260,7 @@ static void add_lock(wxImage &image, wxWindow *parent_win)
 
 static void add_default_image(wxImageList *img_list, bool is_system, wxWindow *parent_win)
 {
-    wxBitmapBundle *bmp_bndl = get_bmp_bundle("cog", IMG_PX_CNT);
+    wxBitmapBundle *bmp_bndl = get_bmp_bundle("cog", GetScaledImageSize());
 #ifdef __APPLE__
     wxBitmap bmp = bmp_bndl->GetBitmap(bmp_bndl->GetDefaultSize() * mac_max_scaling_factor());
 #else
@@ -399,11 +409,13 @@ void GalleryDialog::load_label_icon_list()
 
     // Make an image list containing large icons
 
+    // DPI-scaled image list size
+    int img_size = GetScaledImageSize();
 #ifdef __APPLE__
-    m_image_list = new wxImageList(IMG_PX_CNT, IMG_PX_CNT);
-    int px_cnt = IMG_PX_CNT * mac_max_scaling_factor();
+    m_image_list = new wxImageList(img_size, img_size);
+    int px_cnt = static_cast<int>(img_size * mac_max_scaling_factor());
 #else
-    int px_cnt = (int) (em_unit() * IMG_PX_CNT * 0.1f + 0.5f);
+    int px_cnt = img_size;
     m_image_list = new wxImageList(px_cnt, px_cnt);
 #endif
 
@@ -587,7 +599,23 @@ void GalleryDialog::show_context_menu(wxListEvent &event)
     if (can_change_thumbnail())
         append_menu_item(menu, wxID_ANY, _L("Change thumbnail"), "", [this](wxCommandEvent &) { change_thumbnail(); });
 
-    this->PopupMenu(menu);
+    // Use CustomMenu for consistent theming
+    auto customMenu = CustomMenu::FromWxMenu(menu, this);
+    if (customMenu)
+    {
+        // Note: menu is deleted in dismiss callback since FromWxMenu's callbacks reference it
+        customMenu->SetDismissCallback([menu]() { delete menu; });
+        customMenu->KeepAliveUntilDismissed(customMenu);
+        if (!customMenu->GetParent())
+            customMenu->Create(this);
+        wxPoint screenPos = wxGetMousePosition();
+        customMenu->ShowAt(screenPos, this);
+    }
+    else
+    {
+        this->PopupMenu(menu);
+        delete menu;
+    }
 }
 
 void GalleryDialog::key_down(wxListEvent &event)
