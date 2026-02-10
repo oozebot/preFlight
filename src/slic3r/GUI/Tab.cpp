@@ -49,10 +49,11 @@
 #include <wx/bmpbuttn.h>
 #include <wx/treectrl.h>
 
-#ifdef _WIN32
-#include "DarkMode.hpp"
 #include "Widgets/LabeledBorderPanel.hpp"
 #include "Widgets/ScrollablePanel.hpp"
+#include "Widgets/UIColors.hpp"
+#ifdef _WIN32
+#include "DarkMode.hpp"
 #endif
 #include <wx/imaglist.h>
 #include <wx/spinctrl.h>
@@ -106,7 +107,8 @@ Tab::Tab(wxBookCtrlBase *parent, const wxString &title, Preset::Type type)
 #elif __WXOSX__
     SetBackgroundColour(parent->GetBackgroundColour());
 #elif __WXGTK3__
-    SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+    // preFlight: use theme color instead of GTK system color so sidebar matches settings area
+    SetBackgroundColour(::UIColors::InputBackground());
 #endif
 
     m_compatible_printers.type = Preset::TYPE_PRINTER;
@@ -346,7 +348,8 @@ void Tab::create_preset_tab()
                                     wxWANTS_CHARS);
     m_treectrl->SetFont(wxGetApp().normal_font());
 #ifdef __linux__
-    m_treectrl->SetBackgroundColour(m_parent->GetBackgroundColour());
+    // preFlight: use theme color so tree background matches the settings area
+    m_treectrl->SetBackgroundColour(::UIColors::InputBackground());
 #endif
     m_tree_panel->GetInnerSizer()->Add(m_treectrl, 1, wxEXPAND);
     m_left_sizer->Add(m_tree_panel, 0, wxEXPAND | wxTOP,
@@ -390,6 +393,19 @@ void Tab::create_preset_tab()
                              }
                          }
                      });
+
+#ifdef __linux__
+    // preFlight: On GTK, rapid tree selection changes can crash during page builds
+    // because widget destruction from the previous page switch (via Destroy()) may
+    // still be pending. Veto selection changes while a page switch is in progress
+    // to prevent use-after-free crashes in activate_line().
+    m_treectrl->Bind(wxEVT_TREE_SEL_CHANGING,
+                     [this](wxTreeEvent &evt)
+                     {
+                         if (m_page_switch_running)
+                             evt.Veto();
+                     });
+#endif
 
     m_treectrl->Bind(wxEVT_KEY_DOWN, &Tab::OnKeyDown, this);
 
@@ -4378,8 +4394,7 @@ void TabPrinter::build_extruder_pages(size_t n_before_extruders)
                 auto dirty_options = m_presets->current_dirty_options(true);
 #if 1
                 dirty_options.erase(std::remove_if(dirty_options.begin(), dirty_options.end(),
-                                                   [](const std::string &opt)
-                                                   {
+                                                   [](const std::string &opt) {
                                                        return opt.find("extruder_colour") != std::string::npos ||
                                                               opt.find("nozzle_diameter") != std::string::npos;
                                                    }),
@@ -5018,7 +5033,13 @@ void Tab::rebuild_page_tree()
     if (item_count > 0)
     {
         int item_height = m_treectrl->GetCharHeight() + (em_unit(this) * 4) / 10;
+#ifdef __linux__
+        // preFlight: GTK tree items have more internal padding than reported by GetCharHeight.
+        // Add 1.5x item_height so the last item is fully visible without scrolling.
+        int tree_height = item_count * item_height + (item_height * 3) / 2;
+#else
         int tree_height = item_count * item_height + 8; // Add small padding
+#endif
         m_treectrl->SetMinSize(wxSize(-1, tree_height));
         if (m_tree_panel)
         {
@@ -5510,14 +5531,25 @@ bool Tab::tree_sel_change_delayed()
             CheckForInterrupt(m_treectrl);
             if (m_page_switch_planned)
                 throw UIBuildCanceled();
-#else // WIN32
-            (void) this; // silence warning
+#elif defined(__linux__)
+            // preFlight: On GTK, events may be processed during widget creation,
+            // setting m_page_switch_planned. Check and abort the build to prevent
+            // crashes from rapid tab switching.
+            if (m_page_switch_planned)
+                throw UIBuildCanceled();
 #endif
         });
 
     try
     {
         clear_pages();
+#ifdef __linux__
+        // preFlight: Flush pending window deletions from clear_pages() before building
+        // the new page. On GTK, Destroy() defers actual deletion to idle time. Without
+        // this flush, rapid tab switching can cause use-after-free crashes because old
+        // widgets haven't been fully cleaned up when new ones are created.
+        wxGetApp().ProcessIdle();
+#endif
         throw_if_canceled();
 
         if (wxGetApp().mainframe != nullptr && wxGetApp().mainframe->is_active_and_shown_tab(this))

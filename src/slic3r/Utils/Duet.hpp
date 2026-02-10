@@ -59,8 +59,8 @@ private:
     bool start_print(wxString &msg, const std::string &filename, ConnectionType connectionType,
                      bool simulationMode) const;
     int get_err_code_from_body(const std::string &body) const;
-    bool send_gcode(const std::string &gcode, std::string &response, wxString &error_msg,
-                    ConnectionType connectionType) const;
+    bool send_gcode(const std::string &gcode, std::string &response, wxString &error_msg, ConnectionType connectionType,
+                    const std::string &session_key = "") const;
     std::string parse_mcode_response(const std::string &response, const std::string &mcode) const;
 };
 

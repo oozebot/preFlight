@@ -1,6 +1,6 @@
 @REM /|/ Copyright (c) preFlight 2025+ oozeBot, LLC
 @REM /|/
-@REM /|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
+@REM /|/ Released under AGPLv3 or higher
 @REM /|/
 @echo off
 

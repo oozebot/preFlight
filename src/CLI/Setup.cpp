@@ -20,6 +20,12 @@
 
 #include "CLI.hpp"
 
+#ifdef __WXGTK__
+#include <X11/Xlib.h>
+#include <dirent.h>
+#include <cstring>
+#endif
+
 #ifdef SLIC3R_GUI
 // #include "slic3r/Utils/ServiceConfig.hpp"
 #endif /* SLIC3R_GUI */
@@ -233,9 +239,35 @@ static bool setup_common()
     // instruct the window manager to fall back to X server mode.
     ::setenv("GDK_BACKEND", "x11", /* replace */ true);
 
-    // Fix for CLI setup issue
-    ::setenv("WEBKIT_DISABLE_COMPOSITING_MODE", "1", /* replace */ false);
-    ::setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1", /* replace */ false);
+    // WebKit2GTK's compositing mode can fail in GPU-less environments,
+    // causing WebViews to render blank or crash. Only disable compositing and
+    // DMABUF renderer when no GPU is detected (no DRI render nodes).
+    {
+        bool has_gpu = false;
+        if (DIR *dri = opendir("/dev/dri"))
+        {
+            struct dirent *entry;
+            while ((entry = readdir(dri)) != nullptr)
+            {
+                // Look for card* or renderD* nodes (indicates a GPU is present)
+                if (strncmp(entry->d_name, "card", 4) == 0 || strncmp(entry->d_name, "renderD", 7) == 0)
+                {
+                    has_gpu = true;
+                    break;
+                }
+            }
+            closedir(dri);
+        }
+        if (!has_gpu)
+        {
+            ::setenv("WEBKIT_DISABLE_COMPOSITING_MODE", "1", /* replace */ false);
+            ::setenv("WEBKIT_DISABLE_DMABUF_RENDERER", "1", /* replace */ false);
+        }
+    }
+
+    // Initialize Xlib for multithreaded use - prevents crashes when WebKit2GTK
+    // or GStreamer launch background threads that access the X server.
+    XInitThreads();
 #endif
 
     // Switch boost::filesystem to utf8.

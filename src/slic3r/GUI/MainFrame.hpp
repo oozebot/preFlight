@@ -259,6 +259,7 @@ public:
     GalleryDialog *m_gallery_dialog{nullptr};
     PrinterWebViewPanel *m_printer_webview_panel{nullptr};
     bool m_printer_webview_tab_added{false};
+    wxString m_printer_url; // Stored URL for external browser fallback when webview is unavailable
 
 #ifdef __APPLE__
     std::unique_ptr<wxTaskBarIcon> m_taskbar_icon;

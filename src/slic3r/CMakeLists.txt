@@ -100,10 +100,10 @@ set(SLIC3R_GUI_SOURCES
     GUI/GCodeViewer.cpp
     GUI/ModernTabBar.hpp
     GUI/ModernTabBar.cpp
-    GUI/preFlight.PrinterWebViewPanel.hpp
-    GUI/preFlight.PrinterWebViewPanel.cpp
-    GUI/preFlight.PrinterConnectionChecker.hpp
-    GUI/preFlight.PrinterConnectionChecker.cpp
+    GUI/PrinterWebViewPanel.hpp
+    GUI/PrinterWebViewPanel.cpp
+    GUI/PrinterConnectionChecker.hpp
+    GUI/PrinterConnectionChecker.cpp
     GUI/Preferences.cpp
     GUI/Preferences.hpp
     GUI/PresetHints.cpp

@@ -194,7 +194,7 @@ FileArchiveDialog::FileArchiveDialog(wxWindow *parent_window, mz_zip_archive *ar
 #ifdef _WIN32
     wxGetApp().UpdateDarkUI(this);
 #else
-    SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+    SetBackgroundColour(wxGetApp().get_window_default_clr());
 #endif
 
     int em = em_unit();

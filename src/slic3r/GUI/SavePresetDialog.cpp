@@ -435,7 +435,7 @@ void SavePresetDialog::build(std::vector<Preset::Type> types, std::string suffix
     // From the very beginning set dialog font to the wxSYS_DEFAULT_GUI_FONT
 //    this->SetFont(wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT));
 #else
-    SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+    SetBackgroundColour(wxGetApp().get_window_default_clr());
 #endif // __WXMSW__
 
     if (suffix.empty())

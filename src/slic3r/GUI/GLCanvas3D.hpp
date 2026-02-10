@@ -570,6 +570,8 @@ private:
 
     // Screen is only refreshed from the OnIdle handler if it is dirty.
     bool m_dirty;
+    // When true, on_idle() skips all rendering work (used during window drag to prevent sluggish movement)
+    bool m_rendering_paused{false};
     bool m_initialized;
     bool m_apply_zoom_to_volumes_filter;
     bool m_picking_enabled;
@@ -736,6 +738,8 @@ public:
     void set_raycaster_gizmos_on_top(bool value) { m_scene_raycaster.set_gizmos_on_top(value); }
 
     void set_as_dirty() { m_dirty = true; }
+    void pause_rendering() { m_rendering_paused = true; }
+    void resume_rendering() { m_rendering_paused = false; m_dirty = true; }
     void requires_check_outside_state() { m_requires_check_outside_state = true; }
 
     unsigned int get_volumes_count() const { return (unsigned int) m_volumes.volumes.size(); }

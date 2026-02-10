@@ -12,6 +12,7 @@
 #include <type_traits>
 #include <vector>
 
+#include "../../libslic3r.h"
 #include "../../Point.hpp"
 #include "../../Polygon.hpp"
 #include "../../Layer.hpp"
@@ -101,7 +102,7 @@ JunctionT find_visibility_boundary(const JunctionT &j1, const JunctionT &j2, con
 
     // Stop when interval < fine diameter (no point being more precise than probe size)
     const double min_precision = unscale<double>(check_diameter_fine);
-    double distance = unscale<double>((hidden_j.p - visible_j.p).cast<double>().norm());
+    double distance = unscale<double>((hidden_j.p - visible_j.p).template cast<double>().norm());
 
     // Binary search uses FINE diameter for precision
     while (distance > min_precision)
@@ -116,7 +117,7 @@ JunctionT find_visibility_boundary(const JunctionT &j1, const JunctionT &j2, con
         {
             visible_j = {mid_p, mid_w, static_cast<coord_t>(visible_j.perimeter_index)};
         }
-        distance = unscale<double>((hidden_j.p - visible_j.p).cast<double>().norm());
+        distance = unscale<double>((hidden_j.p - visible_j.p).template cast<double>().norm());
     }
     return {Point((visible_j.p.x() + hidden_j.p.x()) / 2, (visible_j.p.y() + hidden_j.p.y()) / 2),
             (visible_j.w + hidden_j.w) / 2, static_cast<coord_t>(visible_j.perimeter_index)};
@@ -196,7 +197,7 @@ std::vector<SplitResult<ExtrusionLineT>> split_by_visibility(const ExtrusionLine
     {
         const auto &prev = ext.junctions[i - 1];
         const auto &curr = ext.junctions[i];
-        double seg_len = unscale<double>((curr.p - prev.p).cast<double>().norm());
+        double seg_len = unscale<double>((curr.p - prev.p).template cast<double>().norm());
 
         if (seg_len <= sample_interval)
         {
@@ -216,7 +217,7 @@ std::vector<SplitResult<ExtrusionLineT>> split_by_visibility(const ExtrusionLine
         }
         else
         {
-            Vec2d direction = (curr.p - prev.p).cast<double>();
+            Vec2d direction = (curr.p - prev.p).template cast<double>();
             double dir_len = direction.norm();
             Vec2d dir_unit = direction / dir_len;
 

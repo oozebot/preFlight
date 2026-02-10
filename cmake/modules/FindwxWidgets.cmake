@@ -873,6 +873,11 @@ if(wxWidgets_FIND_STYLE STREQUAL "unix")
         string(REPLACE "-isysroot;" "-isysroot "
           wxWidgets_LIBRARIES "${wxWidgets_LIBRARIES}")
 
+        # preFlight: Resolve CMake target names in wx-config output (e.g., -lNanoSVG::nanosvg -> -lnanosvg)
+        # wxWidgets 3.2.x CMake build embeds target names for sys dependencies instead of library names
+        string(REGEX REPLACE "-l[A-Za-z0-9_]+::([A-Za-z0-9_]+)" "-l\\1"
+          wxWidgets_LIBRARIES "${wxWidgets_LIBRARIES}")
+
         # extract linkdirs (-L) for rpath (i.e., LINK_DIRECTORIES)
         string(REGEX MATCHALL "-L[^;]+"
           wxWidgets_LIBRARY_DIRS "${wxWidgets_LIBRARIES}")

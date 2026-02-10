@@ -973,7 +973,8 @@ PageMaterials::PageMaterials(ConfigWizard *parent, Materials *materials, wxStrin
     list_vendor->SetMinSize(wxSize(13 * em, list_h));
     list_profile->SetMinSize(wxSize(23 * em, list_h));
 
-#ifdef __APPLE__
+#ifndef _WIN32
+    // preFlight: apply theme background to list widgets on Linux/macOS
     for (wxWindow *win : std::initializer_list<wxWindow *>{list_printer, list_type, list_vendor, list_profile})
         win->SetBackgroundColour(wxGetApp().get_window_default_clr());
 #endif
@@ -4484,7 +4485,8 @@ ConfigWizard::ConfigWizard(wxWindow *parent)
                 wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
     , p(new priv(this))
 {
-#ifdef __APPLE__
+#ifndef _WIN32
+    // preFlight: apply theme background on Linux/macOS (UpdateDarkUI is Windows-only)
     this->SetBackgroundColour(wxGetApp().get_window_default_clr());
 #endif
     wxBusyCursor wait;

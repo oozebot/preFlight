@@ -261,7 +261,7 @@ PhysicalPrinterDialog::PhysicalPrinterDialog(wxWindow *parent, wxString printer_
 {
     SetFont(wxGetApp().normal_font());
 #ifndef _WIN32
-    SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+    SetBackgroundColour(wxGetApp().get_window_default_clr());
 #endif
     m_default_name = _L("Type here the name of your printer device");
     bool new_printer = true;

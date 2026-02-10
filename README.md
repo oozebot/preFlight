@@ -20,9 +20,11 @@ While preFlight is open-source and free for everyone, your support helps us main
 
 ## Requirements
 
-**Windows only** at this time. Linux and macOS support coming soon.
+**Windows and Linux.** macOS support coming soon.
 
-**Required:** [Microsoft Visual C++ Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe) - Install this first if preFlight won't launch.
+**Windows:** [Microsoft Visual C++ Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe) - Install this first if preFlight won't launch.
+
+**Linux:** Download the AppImage from [GitHub Releases](https://github.com/oozebot/preFlight/releases), make it executable (`chmod +x`), and run. No installation required.
 
 ## Security & Authenticity
 
@@ -318,9 +320,22 @@ run_build.bat -ninja -debug
 | `-clean` | Full rebuild from scratch |
 | `-flush` | Pick up image/resource changes |
 
-### Linux/macOS
+### Linux
 
-Not yet available. Windows is the primary development platform for the initial release.
+```bash
+# Build dependencies (first time only)
+./build_deps.sh
+
+# Build release
+./build_linux.sh
+
+# Package as AppImage
+./pack_appimage.sh
+```
+
+### macOS
+
+Not yet available.
 
 ---
 

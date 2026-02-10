@@ -190,10 +190,18 @@ inline wxColour DisabledForeground()
 static wxStaticBoxSizer *CreateFlatStaticBoxSizer(wxWindow *parent, const wxString &label, int orient = wxVERTICAL)
 {
     auto *stb = new FlatStaticBox(parent, wxID_ANY, label);
+#ifdef _WIN32
     stb->SetBackgroundStyle(wxBG_STYLE_PAINT);
+#endif
     stb->SetFont(wxGetApp().bold_font());
     wxGetApp().UpdateDarkUI(stb);
-    return new wxStaticBoxSizer(stb, orient);
+    auto *sizer = new wxStaticBoxSizer(stb, orient);
+#ifdef __WXGTK__
+    // preFlight: GtkFrame label is removed in FlatStaticBox — add top padding
+    // so content doesn't overlap the custom-drawn border and label.
+    sizer->AddSpacer(wxGetApp().em_unit());
+#endif
+    return sizer;
 }
 
 // ============================================================================
@@ -701,122 +709,79 @@ void TabbedSettingsPanel::BuildUI()
 
     m_main_sizer = new wxBoxSizer(wxVERTICAL);
 
+    // Create a single ScrollablePanel that holds all sections in one scrollable list
+    m_scroll_area = new ScrollablePanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize);
+    m_scroll_area->sys_color_changed();
+
+    auto *content_panel = m_scroll_area->GetContentPanel();
+    auto *content_sizer = new wxBoxSizer(wxVERTICAL);
+
     // Get tab definitions from subclass
     auto definitions = GetTabDefinitions();
     m_tabs.clear();
     m_tabs.reserve(definitions.size());
 
-    // Track the first visible tab for initial expansion
-    int first_visible_tab = -1;
-
-    // Create a CollapsibleSection for each tab (accordion style)
+    // Create a non-collapsible section header for each tab group
     for (size_t i = 0; i < definitions.size(); ++i)
     {
         const auto &def = definitions[i];
 
-        // Check if this tab should be visible based on sidebar visibility settings
-        bool tab_visible = IsTabVisible(static_cast<int>(i));
-
-        // Create collapsible section - first visible one expanded by default
-        bool initially_expanded = tab_visible && (first_visible_tab == -1 || static_cast<int>(i) == m_active_tab_index);
-        if (tab_visible && first_visible_tab == -1)
-            first_visible_tab = static_cast<int>(i);
-
-        auto *section = new CollapsibleSection(this, def.title, initially_expanded && tab_visible);
+        // Create section header — always expanded, non-collapsible
+        auto *section = new CollapsibleSection(content_panel, def.title, true);
 
         // Set icon if available
         if (!def.icon_name.IsEmpty())
             section->SetHeaderIcon(*get_bmp_bundle(def.icon_name.ToStdString()));
 
-        // Add orange bullet to distinguish sub-tabs from main sections
-        section->SetBulletColor(wxColour(0xEA, 0xA0, 0x32));
+        // Disable collapsing — all sections always visible, no hover highlight
+        section->SetCollapsible(false);
 
-        // Create scrolled content area for this tab using custom ScrollablePanel
-        auto *scroll = new ScrollablePanel(section, wxID_ANY, wxDefaultPosition, wxDefaultSize);
-        scroll->sys_color_changed();
-
-        // Create sizer for scroll area now (content added later in EnsureContentBuilt)
-        auto *scroll_sizer = new wxBoxSizer(wxVERTICAL);
-        scroll->SetSizer(scroll_sizer);
+        // Create plain content container inside section (no per-tab scroll)
+        auto *container = new wxPanel(section, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxNO_BORDER);
+        container->SetBackgroundColour(SidebarColors::Background());
+        auto *container_sizer = new wxBoxSizer(wxVERTICAL);
+        container->SetSizer(container_sizer);
+        section->SetContent(container);
 
         // Store tab state
         TabState state;
         state.definition = def;
         state.section = section;
-        state.scroll_area = scroll;
+        state.content_container = container;
         state.content = nullptr;
         state.content_built = false;
         m_tabs.push_back(std::move(state));
 
-        // Wire up accordion behavior - when this section expands, collapse others
-        int tab_index = static_cast<int>(i);
-        section->SetOnExpandChanged(
-            [this, tab_index](bool expanded)
-            {
-                if (expanded)
-                {
-                    // Freeze to prevent layout thrashing during accordion behavior
-                    Freeze();
-
-                    // Collapse all other sections
-                    for (size_t j = 0; j < m_tabs.size(); ++j)
-                    {
-                        if (static_cast<int>(j) != tab_index && m_tabs[j].section)
-                            m_tabs[j].section->SetExpanded(false);
-                    }
-                    // Build content if needed and switch
-                    int old_index = m_active_tab_index;
-                    m_active_tab_index = tab_index;
-                    EnsureContentBuilt(tab_index);
-                    OnTabSwitched(old_index, tab_index);
-
-                    Thaw();
-                }
-                // Update sizer proportions - expanded section gets proportion 1, others get 0
-                UpdateSizerProportions();
-            });
-
-        section->SetContent(scroll);
-
-        // Hide the section if tab is not visible (all settings hidden)
-        if (!tab_visible)
-            section->Hide();
-
-        // Add with proportion 1 if initially expanded, 0 if collapsed
-        int proportion = (initially_expanded && tab_visible) ? 1 : 0;
-        m_main_sizer->Add(section, proportion, wxEXPAND);
+        // All sections at proportion 0 (natural height) — single scroll handles overflow
+        content_sizer->Add(section, 0, wxEXPAND);
     }
 
-    SetSizer(m_main_sizer);
+    content_panel->SetSizer(content_sizer);
 
-    // Update active tab index to first visible tab if current is hidden
-    if (first_visible_tab >= 0 && !IsTabVisible(m_active_tab_index))
-        m_active_tab_index = first_visible_tab;
+    // Add the single scroll area to fill the entire panel
+    m_main_sizer->Add(m_scroll_area, 1, wxEXPAND);
+    SetSizer(m_main_sizer);
 
     // Build content for all tabs eagerly so m_setting_controls is fully populated
     // (required for two-way sync between main settings tabs and sidebar)
     for (int i = 0; i < static_cast<int>(m_tabs.size()); ++i)
         EnsureContentBuilt(i);
+
+    // Set initial visibility: hide empty groups and sections
+    UpdateSidebarVisibility();
 }
 
 void TabbedSettingsPanel::SwitchToTab(int index)
 {
     if (index < 0 || index >= static_cast<int>(m_tabs.size()))
         return;
+    if (!m_scroll_area || !m_tabs[index].section)
+        return;
+    if (!m_tabs[index].section->IsShown())
+        return;
 
-    if (index == m_active_tab_index && m_tabs[index].section && m_tabs[index].section->IsExpanded())
-        return; // Already on this tab and expanded
-
-    // Expand the target section - the OnExpandChanged callback handles:
-    // - Collapsing other sections
-    // - Building content if needed
-    // - Updating m_active_tab_index
-    if (m_tabs[index].section)
-    {
-        m_tabs[index].section->SetExpanded(true);
-    }
-
-    Layout();
+    // Scroll to bring the requested section into view
+    m_scroll_area->ScrollToChild(m_tabs[index].section);
 }
 
 void TabbedSettingsPanel::SwitchToTabByName(const wxString &name)
@@ -841,15 +806,14 @@ wxString TabbedSettingsPanel::GetActiveTabName() const
 wxPanel *TabbedSettingsPanel::GetContentArea() const
 {
     if (m_active_tab_index >= 0 && m_active_tab_index < static_cast<int>(m_tabs.size()))
-        return m_tabs[m_active_tab_index].scroll_area ? m_tabs[m_active_tab_index].scroll_area->GetContentPanel()
-                                                      : nullptr;
+        return m_tabs[m_active_tab_index].content_container;
     return nullptr;
 }
 
 wxPanel *TabbedSettingsPanel::GetContentArea(int index) const
 {
     if (index >= 0 && index < static_cast<int>(m_tabs.size()))
-        return m_tabs[index].scroll_area ? m_tabs[index].scroll_area->GetContentPanel() : nullptr;
+        return m_tabs[index].content_container;
     return nullptr;
 }
 
@@ -861,11 +825,12 @@ void TabbedSettingsPanel::EnsureContentBuilt(int index)
     if (m_tabs[index].content_built)
         return;
 
-    // Freeze to prevent layout thrashing during control creation
-    m_tabs[index].scroll_area->Freeze();
+    // Freeze the content container to prevent layout thrashing during control creation
+    if (m_tabs[index].content_container)
+        m_tabs[index].content_container->Freeze();
 
     // Temporarily set active tab index so GetContentArea() (no-arg) returns the
-    // correct scroll area for this tab. BuildXxxContent() methods use GetContentArea()
+    // correct content container for this tab. BuildXxxContent() methods use GetContentArea()
     // to parent their controls, so this must match the tab being built.
     int saved_active_tab = m_active_tab_index;
     m_active_tab_index = index;
@@ -879,18 +844,18 @@ void TabbedSettingsPanel::EnsureContentBuilt(int index)
     {
         m_tabs[index].content = content;
 
-        // Add content to this tab's scroll area (sizer already exists from BuildUI)
-        auto *scroll_sizer = m_tabs[index].scroll_area->GetSizer();
-        if (scroll_sizer)
+        // Add content to this tab's container (sizer already exists from BuildUI)
+        auto *container_sizer = m_tabs[index].content_container->GetSizer();
+        if (container_sizer)
         {
-            scroll_sizer->Add(content, 1, wxEXPAND);
-            m_tabs[index].scroll_area->FitInside();
-            m_tabs[index].scroll_area->Layout();
+            container_sizer->Add(content, 0, wxEXPAND);
+            m_tabs[index].content_container->Layout();
         }
     }
     m_tabs[index].content_built = true;
 
-    m_tabs[index].scroll_area->Thaw();
+    if (m_tabs[index].content_container)
+        m_tabs[index].content_container->Thaw();
 
     // Apply toggle logic to set initial enable/disable state of dependent options
     // This must be called after content is built so all controls exist
@@ -899,15 +864,18 @@ void TabbedSettingsPanel::EnsureContentBuilt(int index)
     // Bind dead space click handlers on new content to commit field changes
     // Use CallAfter to defer until after Plater construction is complete
     // (during construction, m_plater->sidebar() would crash because Plater::p is not yet assigned)
+    // Re-fetch content from tab data when CallAfter fires rather than capturing a raw pointer,
+    // because the content window can be destroyed/rebuilt before the deferred call executes.
     if (content && m_plater)
     {
-        wxWindow *content_ptr = content;
+        int tab_index = index;
         CallAfter(
-            [this, content_ptr]()
+            [this, tab_index]()
             {
-                if (m_plater)
+                if (m_plater && tab_index >= 0 && tab_index < static_cast<int>(m_tabs.size()) &&
+                    m_tabs[tab_index].content_built && m_tabs[tab_index].content)
                 {
-                    m_plater->sidebar().BindDeadSpaceHandlers(content_ptr);
+                    m_plater->sidebar().BindDeadSpaceHandlers(m_tabs[tab_index].content);
                 }
             });
     }
@@ -915,40 +883,132 @@ void TabbedSettingsPanel::EnsureContentBuilt(int index)
 
 void TabbedSettingsPanel::UpdateContentLayout()
 {
-    // Update layout of active tab's scroll area
-    if (m_active_tab_index >= 0 && m_active_tab_index < static_cast<int>(m_tabs.size()))
+    if (m_scroll_area)
     {
-        if (m_tabs[m_active_tab_index].scroll_area)
-        {
-            m_tabs[m_active_tab_index].scroll_area->Layout();
-            m_tabs[m_active_tab_index].scroll_area->FitInside();
-        }
+        m_scroll_area->Layout();
+        m_scroll_area->UpdateScrollbar();
     }
     Layout();
 }
 
-void TabbedSettingsPanel::UpdateSizerProportions()
+void TabbedSettingsPanel::UpdateSidebarVisibility()
 {
-    if (!m_main_sizer)
-        return;
+    Freeze();
 
-    // Give proportion 1 to expanded section, 0 to collapsed
-    for (size_t i = 0; i < m_tabs.size(); ++i)
+    // Step 1: Let subclass show/hide individual rows based on sidebar_visibility config
+    UpdateRowVisibility();
+
+    // Step 2: Walk sizer hierarchy to show/hide groups and sections
+    for (size_t tab_idx = 0; tab_idx < m_tabs.size(); ++tab_idx)
     {
-        wxSizerItem *item = m_main_sizer->GetItem(m_tabs[i].section);
-        if (item)
+        auto &tab = m_tabs[tab_idx];
+        if (!tab.content || !tab.content_built)
+            continue;
+
+        wxSizer *content_sizer = tab.content->GetSizer();
+        if (!content_sizer)
+            continue;
+
+        bool any_group_visible = false;
+
+        // Iterate direct children of the content sizer (these are groups or panels)
+        for (size_t gi = 0; gi < content_sizer->GetItemCount(); ++gi)
         {
-            bool is_expanded = m_tabs[i].section && m_tabs[i].section->IsExpanded();
-            item->SetProportion(is_expanded ? 1 : 0);
+            wxSizerItem *group_item = content_sizer->GetItem(gi);
+            if (!group_item)
+                continue;
+
+            if (group_item->IsSizer())
+            {
+                // Sub-sizer = a group (wxStaticBoxSizer from CreateFlatStaticBoxSizer)
+                wxSizer *group_sizer = group_item->GetSizer();
+                bool any_row_visible = false;
+
+                for (size_t ri = 0; ri < group_sizer->GetItemCount(); ++ri)
+                {
+                    wxSizerItem *row_item = group_sizer->GetItem(ri);
+                    if (row_item && row_item->IsShown())
+                    {
+                        any_row_visible = true;
+                        break;
+                    }
+                }
+
+                group_item->Show(any_row_visible);
+                if (any_row_visible)
+                    any_group_visible = true;
+            }
+            else if (group_item->IsWindow())
+            {
+                // Window item (e.g., m_marlin_limits_panel, buttons) — check its sizer children
+                wxWindow *win = group_item->GetWindow();
+                if (win && win->IsShown())
+                {
+                    wxSizer *win_sizer = win->GetSizer();
+                    if (win_sizer)
+                    {
+                        // Walk groups inside the sub-panel
+                        bool any_sub_visible = false;
+                        for (size_t si = 0; si < win_sizer->GetItemCount(); ++si)
+                        {
+                            wxSizerItem *sub_item = win_sizer->GetItem(si);
+                            if (!sub_item)
+                                continue;
+
+                            if (sub_item->IsSizer())
+                            {
+                                wxSizer *sub_sizer = sub_item->GetSizer();
+                                bool any_sub_row = false;
+                                for (size_t ri = 0; ri < sub_sizer->GetItemCount(); ++ri)
+                                {
+                                    wxSizerItem *ri_item = sub_sizer->GetItem(ri);
+                                    if (ri_item && ri_item->IsShown())
+                                    {
+                                        any_sub_row = true;
+                                        break;
+                                    }
+                                }
+                                sub_item->Show(any_sub_row);
+                                if (any_sub_row)
+                                    any_sub_visible = true;
+                            }
+                            else if (sub_item->IsShown())
+                            {
+                                any_sub_visible = true;
+                            }
+                        }
+                        // Don't hide sub-panels managed by other logic (e.g., machine limits flavor switching)
+                        if (any_sub_visible)
+                            any_group_visible = true;
+                    }
+                    else
+                    {
+                        // Window without sizer (e.g., a button) — counts as visible
+                        any_group_visible = true;
+                    }
+                }
+            }
         }
+
+        // Step 3: Show/hide the section based on whether it has any visible groups
+        if (tab.section)
+            tab.section->Show(any_group_visible);
     }
 
-    m_main_sizer->Layout();
-    Layout();
+    // Step 4: Update layout and scrollbar
+    UpdateContentLayout();
 
-    // Propagate layout to parent
-    if (GetParent())
-        GetParent()->Layout();
+    Thaw();
+}
+
+void TabbedSettingsPanel::UpdateSizerProportions()
+{
+    // All sections are always expanded at natural height — single scroll area handles overflow
+    if (m_scroll_area)
+    {
+        m_scroll_area->Layout();
+        m_scroll_area->UpdateScrollbar();
+    }
 }
 
 void TabbedSettingsPanel::RebuildContent()
@@ -976,15 +1036,27 @@ void TabbedSettingsPanel::RebuildContent()
     // This prevents stale pointers from being accessed in ApplyToggleLogic()
     ClearSettingControls();
 
-    // Destroy all existing sections
+    // Destroy the scroll area — this destroys all child sections and content.
+    // Hide it first to remove from DWM composition tree, preventing hundreds
+    // of "invalid handle" errors as each child HWND is destroyed.
+    if (m_scroll_area)
+    {
+#ifdef _WIN32
+        // Direct Win32 hide is immediate and removes from DWM tracking
+        if (m_scroll_area->GetHWND())
+            ::ShowWindow((HWND) m_scroll_area->GetHWND(), SW_HIDE);
+#else
+        m_scroll_area->Hide();
+#endif
+        m_scroll_area->Destroy();
+        m_scroll_area = nullptr;
+    }
+
+    // Clear tab state
     for (auto &tab : m_tabs)
     {
-        if (tab.section)
-        {
-            tab.section->Destroy();
-            tab.section = nullptr;
-        }
-        tab.scroll_area = nullptr;
+        tab.section = nullptr;
+        tab.content_container = nullptr;
         tab.content = nullptr;
         tab.content_built = false;
     }
@@ -1182,7 +1254,11 @@ void TabbedSettingsPanel::UpdateUndoUICommon(const std::string &opt_key, wxWindo
 
 void TabbedSettingsPanel::msw_rescale()
 {
-    // Rescale each section
+    // Rescale the single scroll area
+    if (m_scroll_area)
+        m_scroll_area->msw_rescale();
+
+    // Rescale each section header
     for (auto &tab : m_tabs)
     {
         if (tab.section)
@@ -1196,6 +1272,10 @@ void TabbedSettingsPanel::sys_color_changed()
     // Update panel background using unified accessor
     SetBackgroundColour(SidebarColors::Background());
 
+    // Update single scroll area
+    if (m_scroll_area)
+        m_scroll_area->sys_color_changed();
+
     // Update each section
     for (auto &tab : m_tabs)
     {
@@ -1205,12 +1285,6 @@ void TabbedSettingsPanel::sys_color_changed()
             // Refresh header icon for new theme (icons have dark/light variants)
             if (!tab.definition.icon_name.IsEmpty())
                 tab.section->SetHeaderIcon(*get_bmp_bundle(tab.definition.icon_name.ToStdString()));
-        }
-
-        if (tab.scroll_area)
-        {
-            // Update custom scrollable panel for theme change
-            tab.scroll_area->sys_color_changed();
         }
 
         if (tab.content)
@@ -1326,6 +1400,18 @@ wxPanel *PrintSettingsPanel::BuildTabContent(int tab_index)
     }
 }
 
+void PrintSettingsPanel::UpdateRowVisibility()
+{
+    for (auto &[key, ui] : m_setting_controls)
+    {
+        if (ui.row_sizer && ui.parent_sizer)
+        {
+            bool vis = get_app_config()->get("sidebar_visibility", key) != "0";
+            ui.parent_sizer->Show(ui.row_sizer, vis);
+        }
+    }
+}
+
 void PrintSettingsPanel::OnSysColorChanged()
 {
     // Update all setting controls - call SysColorsChanged() on each custom widget
@@ -1356,7 +1442,6 @@ wxPanel *PrintSettingsPanel::BuildLayersContent()
     int em = wxGetApp().em_unit();
 
     // Layer height group
-    if (has_any_visible_setting({"layer_height", "first_layer_height"}))
     {
         auto *layer_group = CreateFlatStaticBoxSizer(content, _L("Layer height"));
         CreateSettingRow(content, layer_group, "layer_height", _L("Layer height"));
@@ -1365,7 +1450,6 @@ wxPanel *PrintSettingsPanel::BuildLayersContent()
     }
 
     // Vertical shells group
-    if (has_any_visible_setting({"perimeters", "spiral_vase"}))
     {
         auto *vshells_group = CreateFlatStaticBoxSizer(content, _L("Vertical shells"));
         CreateSettingRow(content, vshells_group, "perimeters", _L("Perimeters"));
@@ -1374,8 +1458,6 @@ wxPanel *PrintSettingsPanel::BuildLayersContent()
     }
 
     // Horizontal shells group
-    if (has_any_visible_setting(
-            {"top_solid_layers", "bottom_solid_layers", "top_solid_min_thickness", "bottom_solid_min_thickness"}))
     {
         auto *hshells_group = CreateFlatStaticBoxSizer(content, _L("Horizontal shells"));
         CreateSettingRow(content, hshells_group, "top_solid_layers", _L("Top solid layers"));
@@ -1386,8 +1468,6 @@ wxPanel *PrintSettingsPanel::BuildLayersContent()
     }
 
     // Interlock Perimeters group (before Quality per Tab.cpp order)
-    if (has_any_visible_setting({"interlock_perimeters_enabled", "interlock_perimeter_count",
-                                 "interlock_perimeter_overlap", "interlock_flow_detection"}))
     {
         auto *interlock_group = CreateFlatStaticBoxSizer(content, _L("Interlocking"));
         CreateSettingRow(content, interlock_group, "interlock_perimeters_enabled", _L("Enable interlock perimeters"));
@@ -1398,9 +1478,6 @@ wxPanel *PrintSettingsPanel::BuildLayersContent()
     }
 
     // Quality group
-    if (has_any_visible_setting({"extra_perimeters", "extra_perimeters_on_overhangs", "ensure_vertical_shell_thickness",
-                                 "avoid_crossing_curled_overhangs", "avoid_crossing_perimeters",
-                                 "avoid_crossing_perimeters_max_detour", "overhangs"}))
     {
         auto *quality_group = CreateFlatStaticBoxSizer(content, _L("Quality"));
         CreateSettingRow(content, quality_group, "extra_perimeters", _L("Extra perimeters if needed"));
@@ -1416,10 +1493,6 @@ wxPanel *PrintSettingsPanel::BuildLayersContent()
     }
 
     // Advanced group (includes scarf seam per Tab.cpp)
-    if (has_any_visible_setting({"perimeter_generator", "seam_position", "seam_gap_distance", "staggered_inner_seams",
-                                 "external_perimeters_first", "scarf_seam_placement", "scarf_seam_only_on_smooth",
-                                 "scarf_seam_start_height", "scarf_seam_entire_loop", "scarf_seam_length",
-                                 "scarf_seam_max_segment_length", "scarf_seam_on_inner_perimeters"}))
     {
         auto *adv_group = CreateFlatStaticBoxSizer(content, _L("Advanced"));
         CreateSettingRow(content, adv_group, "perimeter_generator", _L("Perimeter generator"));
@@ -1438,7 +1511,6 @@ wxPanel *PrintSettingsPanel::BuildLayersContent()
     }
 
     // Top surface flow group
-    if (has_any_visible_setting({"top_surface_flow_reduction", "top_surface_visibility_detection"}))
     {
         auto *top_surface_group = CreateFlatStaticBoxSizer(content, _L("Top surface flow"));
         CreateSettingRow(content, top_surface_group, "top_surface_flow_reduction", _L("Top surface flow reduction"));
@@ -1447,11 +1519,6 @@ wxPanel *PrintSettingsPanel::BuildLayersContent()
     }
 
     // Fuzzy skin group (order matches Tab.cpp)
-    if (has_any_visible_setting({"fuzzy_skin_painted_perimeters", "fuzzy_skin", "fuzzy_skin_thickness",
-                                 "fuzzy_skin_point_dist", "fuzzy_skin_on_top", "fuzzy_skin_first_layer",
-                                 "fuzzy_skin_visibility_detection", "fuzzy_skin_noise_type", "fuzzy_skin_mode",
-                                 "fuzzy_skin_point_placement", "fuzzy_skin_scale", "fuzzy_skin_octaves",
-                                 "fuzzy_skin_persistence"}))
     {
         auto *fuzzy_group = CreateFlatStaticBoxSizer(content, _L("Fuzzy skin"));
         CreateSettingRow(content, fuzzy_group, "fuzzy_skin_painted_perimeters", _L("Painted perimeters"));
@@ -1471,7 +1538,6 @@ wxPanel *PrintSettingsPanel::BuildLayersContent()
     }
 
     // Only one perimeter group
-    if (has_any_visible_setting({"top_one_perimeter_type", "only_one_perimeter_first_layer"}))
     {
         auto *one_perim_group = CreateFlatStaticBoxSizer(content, _L("Single perimeter"));
         CreateSettingRow(content, one_perim_group, "top_one_perimeter_type", _L("Top one perimeter type"));
@@ -1494,8 +1560,6 @@ wxPanel *PrintSettingsPanel::BuildInfillContent()
     int em = wxGetApp().em_unit();
 
     // Infill group
-    if (has_any_visible_setting({"fill_density", "fill_pattern", "solid_fill_pattern", "top_fill_pattern",
-                                 "bottom_fill_pattern", "infill_anchor", "infill_anchor_max"}))
     {
         auto *infill_group = CreateFlatStaticBoxSizer(content, _L("Infill"));
         CreateSettingRow(content, infill_group, "fill_density", _L("Fill density"));
@@ -1509,7 +1573,6 @@ wxPanel *PrintSettingsPanel::BuildInfillContent()
     }
 
     // Ironing group
-    if (has_any_visible_setting({"ironing", "ironing_type", "ironing_flowrate", "ironing_spacing"}))
     {
         auto *ironing_group = CreateFlatStaticBoxSizer(content, _L("Ironing"));
         CreateSettingRow(content, ironing_group, "ironing", _L("Enable ironing"));
@@ -1520,9 +1583,6 @@ wxPanel *PrintSettingsPanel::BuildInfillContent()
     }
 
     // Reducing printing time group
-    if (has_any_visible_setting({"automatic_infill_combination", "automatic_infill_combination_max_layer_height",
-                                 "infill_every_layers", "narrow_solid_infill_concentric",
-                                 "narrow_solid_infill_threshold"}))
     {
         auto *time_group = CreateFlatStaticBoxSizer(content, _L("Time savings"));
         CreateSettingRow(content, time_group, "automatic_infill_combination", _L("Automatic infill combination"));
@@ -1535,8 +1595,6 @@ wxPanel *PrintSettingsPanel::BuildInfillContent()
     }
 
     // Advanced group
-    if (has_any_visible_setting({"solid_infill_every_layers", "fill_angle", "solid_infill_below_area", "bridge_angle",
-                                 "merge_top_solid_infills", "only_retract_when_crossing_perimeters", "infill_first"}))
     {
         auto *adv_group = CreateFlatStaticBoxSizer(content, _L("Advanced"));
         CreateSettingRow(content, adv_group, "solid_infill_every_layers", _L("Solid infill every"));
@@ -1564,7 +1622,6 @@ wxPanel *PrintSettingsPanel::BuildSkirtBrimContent()
     int em = wxGetApp().em_unit();
 
     // Skirt group
-    if (has_any_visible_setting({"skirts", "skirt_distance", "skirt_height", "draft_shield", "min_skirt_length"}))
     {
         auto *skirt_group = CreateFlatStaticBoxSizer(content, _L("Skirt"));
         CreateSettingRow(content, skirt_group, "skirts", _L("Loops (minimum)"));
@@ -1576,8 +1633,6 @@ wxPanel *PrintSettingsPanel::BuildSkirtBrimContent()
     }
 
     // Brim group
-    if (has_any_visible_setting(
-            {"brim_type", "brim_width", "brim_separation", "brim_ears_max_angle", "brim_ears_detection_length"}))
     {
         auto *brim_group = CreateFlatStaticBoxSizer(content, _L("Brim"));
         CreateSettingRow(content, brim_group, "brim_type", _L("Brim type"));
@@ -1602,9 +1657,6 @@ wxPanel *PrintSettingsPanel::BuildSupportContent()
     int em = wxGetApp().em_unit();
 
     // Support material group
-    if (has_any_visible_setting({"support_material", "support_material_auto", "support_material_style",
-                                 "support_material_threshold", "support_material_enforce_layers",
-                                 "raft_first_layer_density", "raft_first_layer_expansion"}))
     {
         auto *support_group = CreateFlatStaticBoxSizer(content, _L("Support material"));
         CreateSettingRow(content, support_group, "support_material", _L("Generate support material"));
@@ -1618,7 +1670,6 @@ wxPanel *PrintSettingsPanel::BuildSupportContent()
     }
 
     // Raft group
-    if (has_any_visible_setting({"raft_layers", "raft_contact_distance", "raft_expansion"}))
     {
         auto *raft_group = CreateFlatStaticBoxSizer(content, _L("Raft"));
         CreateSettingRow(content, raft_group, "raft_layers", _L("Raft layers"));
@@ -1628,26 +1679,6 @@ wxPanel *PrintSettingsPanel::BuildSupportContent()
     }
 
     // Options for support material and raft group
-    if (has_any_visible_setting({"support_material_contact_distance",
-                                 "support_material_contact_distance_custom",
-                                 "support_material_top_contact_extrusion_width",
-                                 "support_material_bottom_contact_distance",
-                                 "support_material_bottom_contact_extrusion_width",
-                                 "support_material_pattern",
-                                 "support_material_bridge_no_gap",
-                                 "support_material_with_sheath",
-                                 "support_material_spacing",
-                                 "support_material_angle",
-                                 "support_material_closing_radius",
-                                 "support_material_min_area",
-                                 "support_material_interface_layers",
-                                 "support_material_bottom_interface_layers",
-                                 "support_material_interface_pattern",
-                                 "support_material_interface_spacing",
-                                 "support_material_interface_contact_loops",
-                                 "support_material_buildplate_only",
-                                 "support_material_xy_spacing",
-                                 "dont_support_bridges"}))
     {
         auto *opts_group = CreateFlatStaticBoxSizer(content, _L("Options for support material and raft"));
         CreateSettingRow(content, opts_group, "support_material_contact_distance", _L("Contact Z distance"));
@@ -1680,9 +1711,6 @@ wxPanel *PrintSettingsPanel::BuildSupportContent()
     }
 
     // Organic supports group
-    if (has_any_visible_setting({"support_tree_angle", "support_tree_angle_slow", "support_tree_branch_diameter",
-                                 "support_tree_branch_diameter_angle", "support_tree_branch_diameter_double_wall",
-                                 "support_tree_tip_diameter", "support_tree_branch_distance", "support_tree_top_rate"}))
     {
         auto *organic_group = CreateFlatStaticBoxSizer(content, _L("Organic supports"));
         CreateSettingRow(content, organic_group, "support_tree_angle", _L("Branch angle"));
@@ -1711,10 +1739,6 @@ wxPanel *PrintSettingsPanel::BuildSpeedContent()
     int em = wxGetApp().em_unit();
 
     // Print speeds group
-    if (has_any_visible_setting({"perimeter_speed", "small_perimeter_speed", "external_perimeter_speed", "infill_speed",
-                                 "solid_infill_speed", "top_solid_infill_speed", "support_material_speed",
-                                 "support_material_interface_speed", "bridge_speed", "over_bridge_speed",
-                                 "gap_fill_speed", "ironing_speed"}))
     {
         auto *speed_group = CreateFlatStaticBoxSizer(content, _L("Print speed"));
         CreateSettingRow(content, speed_group, "perimeter_speed", _L("Perimeters"));
@@ -1733,8 +1757,6 @@ wxPanel *PrintSettingsPanel::BuildSpeedContent()
     }
 
     // Dynamic overhang speed group
-    if (has_any_visible_setting({"enable_dynamic_overhang_speeds", "overhang_speed_0", "overhang_speed_1",
-                                 "overhang_speed_2", "overhang_speed_3"}))
     {
         auto *overhang_group = CreateFlatStaticBoxSizer(content, _L("Overhang speed"));
         CreateSettingRow(content, overhang_group, "enable_dynamic_overhang_speeds",
@@ -1747,7 +1769,6 @@ wxPanel *PrintSettingsPanel::BuildSpeedContent()
     }
 
     // Travel speeds group
-    if (has_any_visible_setting({"travel_speed", "travel_speed_z"}))
     {
         auto *travel_group = CreateFlatStaticBoxSizer(content, _L("Travel speed"));
         CreateSettingRow(content, travel_group, "travel_speed", _L("Travel"));
@@ -1756,8 +1777,6 @@ wxPanel *PrintSettingsPanel::BuildSpeedContent()
     }
 
     // Modifiers group
-    if (has_any_visible_setting({"first_layer_speed", "first_layer_infill_speed", "first_layer_travel_speed",
-                                 "first_layer_speed_over_raft"}))
     {
         auto *mod_group = CreateFlatStaticBoxSizer(content, _L("Modifiers"));
         CreateSettingRow(content, mod_group, "first_layer_speed", _L("First layer speed"));
@@ -1768,11 +1787,6 @@ wxPanel *PrintSettingsPanel::BuildSpeedContent()
     }
 
     // Acceleration control group
-    if (has_any_visible_setting({"external_perimeter_acceleration", "perimeter_acceleration",
-                                 "top_solid_infill_acceleration", "solid_infill_acceleration", "infill_acceleration",
-                                 "bridge_acceleration", "first_layer_acceleration",
-                                 "first_layer_acceleration_over_raft", "wipe_tower_acceleration", "travel_acceleration",
-                                 "travel_short_distance_acceleration", "default_acceleration"}))
     {
         auto *accel_group = CreateFlatStaticBoxSizer(content, _L("Acceleration"));
         CreateSettingRow(content, accel_group, "external_perimeter_acceleration", _L("External perimeters"));
@@ -1791,7 +1805,6 @@ wxPanel *PrintSettingsPanel::BuildSpeedContent()
     }
 
     // Autospeed group
-    if (has_any_visible_setting({"max_print_speed", "max_volumetric_speed"}))
     {
         auto *auto_group = CreateFlatStaticBoxSizer(content, _L("Autospeed"));
         CreateSettingRow(content, auto_group, "max_print_speed", _L("Max print speed"));
@@ -1800,8 +1813,6 @@ wxPanel *PrintSettingsPanel::BuildSpeedContent()
     }
 
     // Pressure equalizer group
-    if (has_any_visible_setting(
-            {"max_volumetric_extrusion_rate_slope_positive", "max_volumetric_extrusion_rate_slope_negative"}))
     {
         auto *pressure_group = CreateFlatStaticBoxSizer(content, _L("Pressure equalizer"));
         CreateSettingRow(content, pressure_group, "max_volumetric_extrusion_rate_slope_positive",
@@ -1825,10 +1836,6 @@ wxPanel *PrintSettingsPanel::BuildExtrudersContent()
     int em = wxGetApp().em_unit();
 
     // Extruders group
-    if (has_any_visible_setting({"perimeter_extruder", "interlocking_perimeter_extruder", "infill_extruder",
-                                 "solid_infill_extruder", "support_material_extruder",
-                                 "support_material_interface_extruder", "wipe_tower_extruder",
-                                 "bed_temperature_extruder"}))
     {
         auto *ext_group = CreateFlatStaticBoxSizer(content, _L("Extruders"));
         CreateSettingRow(content, ext_group, "perimeter_extruder", _L("Perimeter extruder"));
@@ -1844,7 +1851,6 @@ wxPanel *PrintSettingsPanel::BuildExtrudersContent()
     }
 
     // Ooze prevention group
-    if (has_any_visible_setting({"ooze_prevention", "standby_temperature_delta"}))
     {
         auto *ooze_group = CreateFlatStaticBoxSizer(content, _L("Ooze prevention"));
         CreateSettingRow(content, ooze_group, "ooze_prevention", _L("Enable"));
@@ -1853,9 +1859,6 @@ wxPanel *PrintSettingsPanel::BuildExtrudersContent()
     }
 
     // Wipe tower group
-    if (has_any_visible_setting({"wipe_tower", "wipe_tower_width", "wipe_tower_brim_width", "wipe_tower_bridging",
-                                 "wipe_tower_cone_angle", "wipe_tower_extra_spacing", "wipe_tower_extra_flow",
-                                 "wipe_tower_no_sparse_layers", "single_extruder_multi_material_priming"}))
     {
         auto *wipe_group = CreateFlatStaticBoxSizer(content, _L("Wipe tower"));
         CreateSettingRow(content, wipe_group, "wipe_tower", _L("Enable"));
@@ -1872,10 +1875,6 @@ wxPanel *PrintSettingsPanel::BuildExtrudersContent()
     }
 
     // Advanced group
-    if (has_any_visible_setting({"interface_shells", "mmu_segmented_region_max_width",
-                                 "mmu_segmented_region_interlocking_depth", "interlocking_beam",
-                                 "interlocking_beam_width", "interlocking_orientation", "interlocking_beam_layer_count",
-                                 "interlocking_depth", "interlocking_boundary_avoidance"}))
     {
         auto *mm_group = CreateFlatStaticBoxSizer(content, _L("Advanced"));
         CreateSettingRow(content, mm_group, "interface_shells", _L("Interface shells"));
@@ -1905,11 +1904,6 @@ wxPanel *PrintSettingsPanel::BuildAdvancedContent()
     int em = wxGetApp().em_unit();
 
     // Extrusion width group
-    if (has_any_visible_setting({"extrusion_width", "first_layer_extrusion_width", "perimeter_extrusion_width",
-                                 "external_perimeter_extrusion_width", "infill_extrusion_width",
-                                 "solid_infill_extrusion_width", "bridge_extrusion_width", "top_infill_extrusion_width",
-                                 "support_material_extrusion_width", "support_material_interface_extrusion_width",
-                                 "automatic_extrusion_widths"}))
     {
         auto *width_group = CreateFlatStaticBoxSizer(content, _L("Extrusion width"));
         CreateSettingRow(content, width_group, "extrusion_width", _L("Default extrusion width"));
@@ -1977,8 +1971,6 @@ wxPanel *PrintSettingsPanel::BuildAdvancedContent()
     }
 
     // Overlap group
-    if (has_any_visible_setting({"external_perimeter_overlap", "perimeter_perimeter_overlap", "infill_overlap",
-                                 "bridge_infill_perimeter_overlap", "bridge_infill_overlap"}))
     {
         auto *overlap_group = CreateFlatStaticBoxSizer(content, _L("Overlap"));
         CreateSettingRow(content, overlap_group, "external_perimeter_overlap", _L("External perimeter overlap"));
@@ -1991,7 +1983,6 @@ wxPanel *PrintSettingsPanel::BuildAdvancedContent()
     }
 
     // Flow group
-    if (has_any_visible_setting({"bridge_flow_ratio"}))
     {
         auto *flow_group = CreateFlatStaticBoxSizer(content, _L("Flow"));
         CreateSettingRow(content, flow_group, "bridge_flow_ratio", _L("Bridge flow ratio"));
@@ -1999,8 +1990,6 @@ wxPanel *PrintSettingsPanel::BuildAdvancedContent()
     }
 
     // Slicing group
-    if (has_any_visible_setting({"slice_closing_radius", "slicing_mode", "resolution", "gcode_resolution",
-                                 "xy_size_compensation", "elefant_foot_compensation"}))
     {
         auto *slice_group = CreateFlatStaticBoxSizer(content, _L("Slicing"));
         CreateSettingRow(content, slice_group, "slice_closing_radius", _L("Slice closing radius"));
@@ -2013,9 +2002,6 @@ wxPanel *PrintSettingsPanel::BuildAdvancedContent()
     }
 
     // Athena / Arachne perimeter generator group
-    if (has_any_visible_setting({"perimeter_compression", "wall_transition_angle", "wall_transition_filter_deviation",
-                                 "wall_transition_length", "wall_distribution_count", "min_bead_width",
-                                 "min_feature_size"}))
     {
         auto *arachne_group = CreateFlatStaticBoxSizer(content, _L("Athena / Arachne perimeter generator"));
         CreateSettingRow(content, arachne_group, "perimeter_compression", _L("Perimeter compression"));
@@ -2043,7 +2029,6 @@ wxPanel *PrintSettingsPanel::BuildOutputContent()
     int em = wxGetApp().em_unit();
 
     // Sequential printing group
-    if (has_any_visible_setting({"complete_objects"}))
     {
         auto *seq_group = CreateFlatStaticBoxSizer(content, _L("Sequential printing"));
         CreateSettingRow(content, seq_group, "complete_objects", _L("Complete individual objects"));
@@ -2051,7 +2036,6 @@ wxPanel *PrintSettingsPanel::BuildOutputContent()
     }
 
     // Output file group
-    if (has_any_visible_setting({"gcode_comments", "gcode_label_objects", "output_filename_format"}))
     {
         auto *output_group = CreateFlatStaticBoxSizer(content, _L("Output file"));
         CreateSettingRow(content, output_group, "gcode_comments", _L("Verbose G-code"));
@@ -2121,7 +2105,14 @@ void PrintSettingsPanel::CreateMultilineSettingRow(wxWindow *parent, wxSizer *si
         original_value = config.opt_serialize(opt_key);
     }
 
-    text->Bind(wxEVT_TEXT, [this, opt_key](wxCommandEvent &) { OnSettingChanged(opt_key); });
+    // Use wxEVT_KILL_FOCUS instead of wxEVT_TEXT to avoid triggering config writes,
+    // tab syncs, and background slicing on every keystroke in multiline fields.
+    text->Bind(wxEVT_KILL_FOCUS,
+               [this, opt_key](wxFocusEvent &evt)
+               {
+                   OnSettingChanged(opt_key);
+                   evt.Skip();
+               });
 
     sizer->Add(text, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, em / 4);
 
@@ -2156,10 +2147,6 @@ void PrintSettingsPanel::CreateMultilineSettingRow(wxWindow *parent, wxSizer *si
 void PrintSettingsPanel::CreateSettingRow(wxWindow *parent, wxSizer *sizer, const std::string &opt_key,
                                           const wxString &label, bool full_width)
 {
-    // Check sidebar visibility - skip if user has hidden this setting
-    if (get_app_config()->get("sidebar_visibility", opt_key) == "0")
-        return;
-
     int em = wxGetApp().em_unit();
 
     // Create the common row header (icons, label, sizers)
@@ -2361,6 +2348,8 @@ void PrintSettingsPanel::CreateSettingRow(wxWindow *parent, wxSizer *sizer, cons
         ui_elem.undo_icon = undo_icon;
         ui_elem.label_text = ctx.label_text;
         ui_elem.original_value = original_value;
+        ui_elem.row_sizer = row_sizer;
+        ui_elem.parent_sizer = sizer;
         m_setting_controls[opt_key] = ui_elem;
 
         // Set initial icon state based on system preset comparison
@@ -2428,6 +2417,10 @@ void PrintSettingsPanel::CreateSettingRow(wxWindow *parent, wxSizer *sizer, cons
     }
 
     sizer->Add(row_sizer, 0, wxEXPAND | wxTOP | wxBOTTOM, em / 4);
+
+    // Hide row if sidebar visibility is off (row always created for show/hide toggling)
+    if (get_app_config()->get("sidebar_visibility", opt_key) == "0")
+        sizer->Hide(row_sizer);
 }
 
 void PrintSettingsPanel::OnSettingChanged(const std::string &opt_key)
@@ -2436,8 +2429,8 @@ void PrintSettingsPanel::OnSettingChanged(const std::string &opt_key)
     if (m_disable_update)
         return;
 
-    // Set flag to prevent re-entrancy (e.g., when validation dialog steals focus)
-    m_disable_update = true;
+    // RAII guard: sets m_disable_update=true now, restores on scope exit (even if exception thrown)
+    DisableUpdateGuard guard(m_disable_update);
 
     auto it = m_setting_controls.find(opt_key);
     if (it == m_setting_controls.end())
@@ -2462,6 +2455,14 @@ void PrintSettingsPanel::OnSettingChanged(const std::string &opt_key)
         if (auto *spin = dynamic_cast<SpinInput *>(it->second.control))
         {
             config.set_key_value(opt_key, new ConfigOptionInt(spin->GetValue()));
+        }
+        else if (auto *text_input = dynamic_cast<::TextInput *>(it->second.control))
+        {
+            config.set_deserialize_strict(opt_key, into_u8(text_input->GetValue()));
+        }
+        else if (auto *text = dynamic_cast<wxTextCtrl *>(it->second.control))
+        {
+            config.set_deserialize_strict(opt_key, into_u8(text->GetValue()));
         }
         break;
     case coEnum:
@@ -2573,9 +2574,7 @@ void PrintSettingsPanel::OnSettingChanged(const std::string &opt_key)
 #endif
         }
     }
-
-    // Re-enable updates
-    m_disable_update = false;
+    // Note: m_disable_update is reset by DisableUpdateGuard destructor
 }
 
 void PrintSettingsPanel::UpdateUndoUI(const std::string &opt_key)
@@ -2587,7 +2586,13 @@ void PrintSettingsPanel::UpdateUndoUI(const std::string &opt_key)
 
 void PrintSettingsPanel::RefreshFromConfig()
 {
-    // RAII guard prevents flag from getting stuck if exception occurs
+    // If we're already inside OnSettingChanged, don't refresh - this prevents the
+    // circular callback: OnSettingChanged -> ConfigManipulation -> RefreshFromConfig()
+    // from overwriting the user's in-progress edits with stale config values.
+    if (m_disable_update)
+        return;
+
+    // RAII guard: sets m_disable_update=true now, restores on scope exit (even if exception thrown)
     DisableUpdateGuard guard(m_disable_update);
 
     try
@@ -3474,7 +3479,6 @@ wxPanel *PrinterSettingsPanel::BuildGeneralContent()
     sizer->Add(cap_group, 0, wxEXPAND | wxALL, em / 4);
 
     // Firmware group
-    if (has_any_visible_setting({"gcode_flavor", "thumbnails", "silent_mode", "remaining_times", "binary_gcode"}))
     {
         auto *fw_group = CreateFlatStaticBoxSizer(content, _L("Firmware"));
         CreateSettingRow(content, fw_group, "gcode_flavor", _L("G-code flavor"));
@@ -3486,8 +3490,6 @@ wxPanel *PrinterSettingsPanel::BuildGeneralContent()
     }
 
     // Advanced group
-    if (has_any_visible_setting({"use_relative_e_distances", "use_firmware_retraction", "use_volumetric_e",
-                                 "variable_layer_height", "prefer_clockwise_movements"}))
     {
         auto *adv_group = CreateFlatStaticBoxSizer(content, _L("Advanced"));
         CreateSettingRow(content, adv_group, "use_relative_e_distances", _L("Use relative E distances"));
@@ -3499,7 +3501,6 @@ wxPanel *PrinterSettingsPanel::BuildGeneralContent()
     }
 
     // Sequential printing limits group
-    if (has_any_visible_setting({"extruder_clearance_radius", "extruder_clearance_height"}))
     {
         auto *seq_group = CreateFlatStaticBoxSizer(content, _L("Sequential printing limits"));
         CreateSettingRow(content, seq_group, "extruder_clearance_radius", _L("Extruder clearance radius"));
@@ -3522,7 +3523,6 @@ wxPanel *PrinterSettingsPanel::BuildMachineLimitsContent()
     int em = wxGetApp().em_unit();
 
     // General group (common to both RRF and Marlin) - only show if machine_limits_usage is visible
-    if (has_any_visible_setting({"machine_limits_usage"}))
     {
         auto *general_group = CreateFlatStaticBoxSizer(content, _L("General"));
         CreateSettingRow(content, general_group, "machine_limits_usage", _L("Machine limits usage"));
@@ -3572,18 +3572,8 @@ wxPanel *PrinterSettingsPanel::BuildMachineLimitsContent()
     m_marlin_limits_panel = new wxPanel(content, wxID_ANY);
     auto *marlin_sizer = new wxBoxSizer(wxVERTICAL);
 
-    // Check if any Marlin settings are visible (for stealth note and overall panel content)
-    bool has_any_marlin_visible = has_any_visible_setting(
-        {"machine_max_feedrate_x", "machine_max_feedrate_y", "machine_max_feedrate_z", "machine_max_feedrate_e",
-         "machine_max_acceleration_x", "machine_max_acceleration_y", "machine_max_acceleration_z",
-         "machine_max_acceleration_e", "machine_max_acceleration_extruding", "machine_max_acceleration_retracting",
-         "machine_max_acceleration_travel", "machine_max_jerk_x", "machine_max_jerk_y", "machine_max_jerk_z",
-         "machine_max_jerk_e", "machine_max_junction_deviation", "machine_min_extruding_rate",
-         "machine_min_travel_rate"});
-
-    // Stealth mode note (shown only when stealth mode is enabled AND Marlin settings visible)
+    // Stealth mode note (shown only when stealth mode is enabled)
     m_stealth_mode_note = nullptr;
-    if (has_any_marlin_visible)
     {
         m_stealth_mode_note =
             new wxStaticText(m_marlin_limits_panel, wxID_ANY,
@@ -3599,8 +3589,6 @@ wxPanel *PrinterSettingsPanel::BuildMachineLimitsContent()
     }
 
     // Maximum feedrates group
-    if (has_any_visible_setting(
-            {"machine_max_feedrate_x", "machine_max_feedrate_y", "machine_max_feedrate_z", "machine_max_feedrate_e"}))
     {
         auto *feedrate_group = CreateFlatStaticBoxSizer(m_marlin_limits_panel, _L("Maximum feedrates"));
         CreateSettingRow(m_marlin_limits_panel, feedrate_group, "machine_max_feedrate_x", _L("X"));
@@ -3611,10 +3599,6 @@ wxPanel *PrinterSettingsPanel::BuildMachineLimitsContent()
     }
 
     // Maximum accelerations group
-    if (has_any_visible_setting({"machine_max_acceleration_x", "machine_max_acceleration_y",
-                                 "machine_max_acceleration_z", "machine_max_acceleration_e",
-                                 "machine_max_acceleration_extruding", "machine_max_acceleration_retracting",
-                                 "machine_max_acceleration_travel"}))
     {
         auto *accel_group = CreateFlatStaticBoxSizer(m_marlin_limits_panel, _L("Maximum accelerations"));
         CreateSettingRow(m_marlin_limits_panel, accel_group, "machine_max_acceleration_x", _L("X"));
@@ -3628,8 +3612,6 @@ wxPanel *PrinterSettingsPanel::BuildMachineLimitsContent()
     }
 
     // Jerk limits group
-    if (has_any_visible_setting(
-            {"machine_max_jerk_x", "machine_max_jerk_y", "machine_max_jerk_z", "machine_max_jerk_e"}))
     {
         auto *jerk_group = CreateFlatStaticBoxSizer(m_marlin_limits_panel, _L("Jerk limits"));
         CreateSettingRow(m_marlin_limits_panel, jerk_group, "machine_max_jerk_x", _L("X"));
@@ -3640,7 +3622,6 @@ wxPanel *PrinterSettingsPanel::BuildMachineLimitsContent()
     }
 
     // Junction deviation group
-    if (has_any_visible_setting({"machine_max_junction_deviation"}))
     {
         auto *junction_group = CreateFlatStaticBoxSizer(m_marlin_limits_panel, _L("Junction deviation"));
         CreateSettingRow(m_marlin_limits_panel, junction_group, "machine_max_junction_deviation",
@@ -3649,7 +3630,6 @@ wxPanel *PrinterSettingsPanel::BuildMachineLimitsContent()
     }
 
     // Minimum feedrates group
-    if (has_any_visible_setting({"machine_min_extruding_rate", "machine_min_travel_rate"}))
     {
         auto *min_group = CreateFlatStaticBoxSizer(m_marlin_limits_panel, _L("Minimum feedrates"));
         CreateSettingRow(m_marlin_limits_panel, min_group, "machine_min_extruding_rate", _L("Minimum extruding rate"));
@@ -3665,8 +3645,6 @@ wxPanel *PrinterSettingsPanel::BuildMachineLimitsContent()
     auto *rrf_sizer = new wxBoxSizer(wxVERTICAL);
 
     // Only show RRF content if any RRF settings are visible
-    if (has_any_visible_setting(
-            {"machine_rrf_m566", "machine_rrf_m201", "machine_rrf_m203", "machine_rrf_m204", "machine_rrf_m207"}))
     {
         // Retrieve from machine button
         auto *btn_sizer = new wxBoxSizer(wxHORIZONTAL);
@@ -3696,7 +3674,6 @@ wxPanel *PrinterSettingsPanel::BuildMachineLimitsContent()
     sizer->Add(m_rrf_limits_panel, 0, wxEXPAND);
 
     // Time estimation group (common to both)
-    if (has_any_visible_setting({"machine_time_compensation"}))
     {
         auto *time_group = CreateFlatStaticBoxSizer(content, _L("Time estimation"));
         CreateSettingRow(content, time_group, "machine_time_compensation", _L("Time compensation"));
@@ -3722,8 +3699,6 @@ wxPanel *PrinterSettingsPanel::BuildSingleExtruderMMContent()
     int em = wxGetApp().em_unit();
 
     // Single extruder multimaterial parameters group
-    if (has_any_visible_setting({"cooling_tube_retraction", "cooling_tube_length", "parking_pos_retraction",
-                                 "extra_loading_move", "multimaterial_purging", "high_current_on_filament_swap"}))
     {
         auto *semm_group = CreateFlatStaticBoxSizer(content, _L("Single extruder multimaterial parameters"));
 
@@ -3886,10 +3861,6 @@ void PrinterSettingsPanel::OnRetrieveFromMachine()
 void PrinterSettingsPanel::CreateSettingRow(wxWindow *parent, wxSizer *sizer, const std::string &opt_key,
                                             const wxString &label, bool full_width)
 {
-    // Check sidebar visibility - skip if user has hidden this setting
-    if (get_app_config()->get("sidebar_visibility", opt_key) == "0")
-        return;
-
     int em = wxGetApp().em_unit();
 
     // Create the common row header (icons, label, sizers)
@@ -4891,22 +4862,17 @@ void PrinterSettingsPanel::OnExtruderSettingChanged(const std::string &opt_key, 
     if (m_disable_update)
         return;
 
-    m_disable_update = true;
+    // RAII guard: sets m_disable_update=true now, restores on scope exit (even if exception thrown)
+    DisableUpdateGuard guard(m_disable_update);
 
     std::string composite_key = opt_key + "#" + std::to_string(extruder_idx);
     auto it = m_setting_controls.find(composite_key);
     if (it == m_setting_controls.end())
-    {
-        m_disable_update = false;
         return;
-    }
 
     const ConfigOptionDef *opt_def = print_config_def.get(opt_key);
     if (!opt_def)
-    {
-        m_disable_update = false;
         return;
-    }
 
     DynamicPrintConfig &config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
 
@@ -5056,8 +5022,7 @@ void PrinterSettingsPanel::OnExtruderSettingChanged(const std::string &opt_key, 
     {
         wxGetApp().sidebar().refresh_printer_nozzles();
     }
-
-    m_disable_update = false;
+    // Note: m_disable_update is reset by DisableUpdateGuard destructor
 }
 
 wxPanel *PrinterSettingsPanel::BuildExtruderContent(size_t extruder_idx)
@@ -5073,39 +5038,14 @@ wxPanel *PrinterSettingsPanel::BuildExtruderContent(size_t extruder_idx)
     // so it's not included here in the extruder accordion tabs.
 
     // Preview group
-    if (has_extruder_visible_setting({"extruder_colour"}, extruder_idx))
     {
         auto *preview_group = CreateFlatStaticBoxSizer(content, _L("Preview"));
         CreateExtruderSettingRow(content, preview_group, "extruder_colour", _L("Extruder color"), extruder_idx);
         sizer->Add(preview_group, 0, wxEXPAND | wxALL, em / 4);
     }
 
-    // "Apply below settings to other extruders" button (only if multiple extruders AND any applicable settings visible)
-    if (m_extruders_count > 1 && has_extruder_visible_setting({"fan_spinup_time",
-                                                               "fan_spinup_response_type",
-                                                               "min_layer_height",
-                                                               "max_layer_height",
-                                                               "extruder_offset",
-                                                               "retract_length",
-                                                               "retract_lift",
-                                                               "retract_lift_above",
-                                                               "retract_lift_below",
-                                                               "retract_speed",
-                                                               "deretract_speed",
-                                                               "retract_restart_extra",
-                                                               "retract_before_travel",
-                                                               "retract_layer_change",
-                                                               "wipe",
-                                                               "wipe_extend",
-                                                               "retract_before_wipe",
-                                                               "wipe_length",
-                                                               "travel_ramping_lift",
-                                                               "travel_slope",
-                                                               "travel_max_lift",
-                                                               "travel_lift_before_obstacle",
-                                                               "retract_length_toolchange",
-                                                               "retract_restart_extra_toolchange"},
-                                                              extruder_idx))
+    // "Apply below settings to other extruders" button (only if multiple extruders)
+    if (m_extruders_count > 1)
     {
         auto *btn_sizer = new wxBoxSizer(wxHORIZONTAL);
         auto *btn = new ScalableButton(content, wxID_ANY, "copy", _L("Apply below settings to other extruders"),
@@ -5177,7 +5117,6 @@ wxPanel *PrinterSettingsPanel::BuildExtruderContent(size_t extruder_idx)
     }
 
     // Cooling fan group
-    if (has_extruder_visible_setting({"fan_spinup_time", "fan_spinup_response_type"}, extruder_idx))
     {
         auto *fan_group = CreateFlatStaticBoxSizer(content, _L("Cooling fan"));
         CreateExtruderSettingRow(content, fan_group, "fan_spinup_time", _L("Fan spin-up time"), extruder_idx);
@@ -5186,7 +5125,6 @@ wxPanel *PrinterSettingsPanel::BuildExtruderContent(size_t extruder_idx)
     }
 
     // Layer height limits group
-    if (has_extruder_visible_setting({"min_layer_height", "max_layer_height"}, extruder_idx))
     {
         auto *height_group = CreateFlatStaticBoxSizer(content, _L("Layer height limits"));
         CreateExtruderSettingRow(content, height_group, "min_layer_height", _L("Minimum"), extruder_idx);
@@ -5195,7 +5133,7 @@ wxPanel *PrinterSettingsPanel::BuildExtruderContent(size_t extruder_idx)
     }
 
     // Position group (for multi-extruder)
-    if (m_extruders_count > 1 && has_extruder_visible_setting({"extruder_offset"}, extruder_idx))
+    if (m_extruders_count > 1)
     {
         auto *pos_group = CreateFlatStaticBoxSizer(content, _L("Position (for multi-extruder printers)"));
         CreateExtruderSettingRow(content, pos_group, "extruder_offset", _L("Extruder offset"), extruder_idx);
@@ -5203,9 +5141,6 @@ wxPanel *PrinterSettingsPanel::BuildExtruderContent(size_t extruder_idx)
     }
 
     // Travel lift group
-    if (has_extruder_visible_setting({"retract_lift", "travel_ramping_lift", "travel_max_lift", "travel_slope",
-                                      "travel_lift_before_obstacle", "retract_lift_above", "retract_lift_below"},
-                                     extruder_idx))
     {
         auto *lift_group = CreateFlatStaticBoxSizer(content, _L("Travel lift"));
         CreateExtruderSettingRow(content, lift_group, "retract_lift", _L("Lift Z"), extruder_idx);
@@ -5220,10 +5155,6 @@ wxPanel *PrinterSettingsPanel::BuildExtruderContent(size_t extruder_idx)
     }
 
     // Retraction / Wipe group
-    if (has_extruder_visible_setting({"retract_length", "retract_speed", "deretract_speed", "retract_restart_extra",
-                                      "retract_before_wipe", "retract_before_travel", "retract_layer_change", "wipe",
-                                      "wipe_extend", "wipe_length"},
-                                     extruder_idx))
     {
         auto *retract_group = CreateFlatStaticBoxSizer(content, _L("Retraction / Wipe"));
         CreateExtruderSettingRow(content, retract_group, "retract_length", _L("Retraction length"), extruder_idx);
@@ -5243,7 +5174,6 @@ wxPanel *PrinterSettingsPanel::BuildExtruderContent(size_t extruder_idx)
     }
 
     // Tool change retraction group
-    if (has_extruder_visible_setting({"retract_length_toolchange", "retract_restart_extra_toolchange"}, extruder_idx))
     {
         auto *toolchange_group = CreateFlatStaticBoxSizer(content, _L("Retraction when tool is disabled"));
         CreateExtruderSettingRow(content, toolchange_group, "retract_length_toolchange", _L("Retraction length"),
@@ -5263,21 +5193,16 @@ void PrinterSettingsPanel::OnSettingChanged(const std::string &opt_key)
     if (m_disable_update)
         return;
 
-    m_disable_update = true;
+    // RAII guard: sets m_disable_update=true now, restores on scope exit (even if exception thrown)
+    DisableUpdateGuard guard(m_disable_update);
 
     auto it = m_setting_controls.find(opt_key);
     if (it == m_setting_controls.end())
-    {
-        m_disable_update = false;
         return;
-    }
 
     const ConfigOptionDef *opt_def = print_config_def.get(opt_key);
     if (!opt_def)
-    {
-        m_disable_update = false;
         return;
-    }
 
     // Use printers config
     DynamicPrintConfig &config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
@@ -5294,6 +5219,14 @@ void PrinterSettingsPanel::OnSettingChanged(const std::string &opt_key)
         if (auto *spin = dynamic_cast<SpinInput *>(it->second.control))
         {
             config.set_key_value(opt_key, new ConfigOptionInt(spin->GetValue()));
+        }
+        else if (auto *text_input = dynamic_cast<::TextInput *>(it->second.control))
+        {
+            config.set_deserialize_strict(opt_key, into_u8(text_input->GetValue()));
+        }
+        else if (auto *text = dynamic_cast<wxTextCtrl *>(it->second.control))
+        {
+            config.set_deserialize_strict(opt_key, into_u8(text->GetValue()));
         }
         break;
     case coEnum:
@@ -5598,8 +5531,7 @@ void PrinterSettingsPanel::OnSettingChanged(const std::string &opt_key)
 
     // Apply toggle logic to enable/disable dependent options
     ApplyToggleLogic();
-
-    m_disable_update = false;
+    // Note: m_disable_update is reset by DisableUpdateGuard destructor
 }
 
 void PrinterSettingsPanel::UpdateUndoUI(const std::string &opt_key)
@@ -5661,6 +5593,16 @@ void PrinterSettingsPanel::UpdateUndoUI(const std::string &opt_key)
                         auto serialized = opt->vserialize();
                         if (extruder_idx < serialized.size())
                             current_value = serialized[extruder_idx];
+                    }
+                }
+                break;
+            case coPoints:
+                if (auto *opt = config.option<ConfigOptionPoints>(base_key))
+                {
+                    if (extruder_idx < opt->values.size())
+                    {
+                        current_value = std::to_string(opt->values[extruder_idx].x()) + "x" +
+                                        std::to_string(opt->values[extruder_idx].y());
                     }
                 }
                 break;
@@ -5779,7 +5721,14 @@ void PrinterSettingsPanel::UpdateUndoUI(const std::string &opt_key)
 
 void PrinterSettingsPanel::RefreshFromConfig()
 {
-    m_disable_update = true;
+    // If we're already inside OnSettingChanged, don't refresh - this prevents the
+    // circular callback: OnSettingChanged -> tab->update_dirty() -> RefreshFromConfig()
+    // from overwriting the user's in-progress edits with stale config values.
+    if (m_disable_update)
+        return;
+
+    // RAII guard: sets m_disable_update=true now, restores on scope exit (even if exception thrown)
+    DisableUpdateGuard guard(m_disable_update);
 
     const DynamicPrintConfig &config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
 
@@ -5806,9 +5755,8 @@ void PrinterSettingsPanel::RefreshFromConfig()
     }
     if (semm_tab_should_show != semm_tab_exists)
     {
-        m_disable_update = false;
         CallAfter([this]() { RebuildContent(); });
-        return; // Let rebuild handle everything
+        return; // Let rebuild handle everything (guard destructor resets m_disable_update)
     }
 
     for (auto &[opt_key, ui_elem] : m_setting_controls)
@@ -6043,8 +5991,7 @@ void PrinterSettingsPanel::RefreshFromConfig()
 #endif
         }
     }
-
-    m_disable_update = false;
+    // Note: m_disable_update is reset by DisableUpdateGuard destructor
 }
 
 void PrinterSettingsPanel::ToggleOption(const std::string &opt_key, bool enable)
@@ -6252,6 +6199,18 @@ void PrinterSettingsPanel::sys_color_changed()
     UpdateScalableButtonsRecursive(this);
 }
 
+void PrinterSettingsPanel::UpdateRowVisibility()
+{
+    for (auto &[key, ui] : m_setting_controls)
+    {
+        if (ui.row_sizer && ui.parent_sizer)
+        {
+            bool vis = get_app_config()->get("sidebar_visibility", key) != "0";
+            ui.parent_sizer->Show(ui.row_sizer, vis);
+        }
+    }
+}
+
 void PrinterSettingsPanel::OnSysColorChanged()
 {
     // Update all setting controls - call SysColorsChanged() on each custom widget
@@ -6435,8 +6394,6 @@ wxPanel *FilamentSettingsPanel::BuildFilamentContent()
     int em = wxGetApp().em_unit();
 
     // Filament group
-    if (has_any_visible_setting({"filament_colour", "filament_diameter", "extrusion_multiplier", "filament_density",
-                                 "filament_cost", "filament_spool_weight"}))
     {
         auto *filament_group = CreateFlatStaticBoxSizer(content, _L("Filament"));
         CreateSettingRow(content, filament_group, "filament_colour", _L("Color"));
@@ -6449,9 +6406,6 @@ wxPanel *FilamentSettingsPanel::BuildFilamentContent()
     }
 
     // Temperature group
-    if (has_any_visible_setting({"idle_temperature", "first_layer_temperature", "temperature",
-                                 "first_layer_bed_temperature", "bed_temperature", "chamber_temperature",
-                                 "chamber_minimal_temperature"}))
     {
         auto *temp_group = CreateFlatStaticBoxSizer(content, _L("Temperature"));
         CreateNullableSettingRow(content, temp_group, "idle_temperature", _L("Idle temperature"));
@@ -6479,8 +6433,6 @@ wxPanel *FilamentSettingsPanel::BuildCoolingContent()
     int em = wxGetApp().em_unit();
 
     // Enable group
-    if (has_any_visible_setting(
-            {"fan_always_on", "cooling", "cooling_slowdown_logic", "cooling_perimeter_transition_distance"}))
     {
         auto *enable_group = CreateFlatStaticBoxSizer(content, _L("Enable"));
         CreateSettingRow(content, enable_group, "fan_always_on", _L("Keep fan always on"));
@@ -6492,7 +6444,6 @@ wxPanel *FilamentSettingsPanel::BuildCoolingContent()
     }
 
     // Fan settings group
-    if (has_any_visible_setting({"min_fan_speed", "max_fan_speed", "disable_fan_first_layers", "full_fan_speed_layer"}))
     {
         auto *fan_group = CreateFlatStaticBoxSizer(content, _L("Fan settings"));
         CreateSettingRow(content, fan_group, "min_fan_speed", _L("Min fan speed"));
@@ -6503,12 +6454,6 @@ wxPanel *FilamentSettingsPanel::BuildCoolingContent()
     }
 
     // Manual fan controls group
-    if (has_any_visible_setting(
-            {"enable_manual_fan_speeds", "manual_fan_speed_perimeter", "manual_fan_speed_external_perimeter",
-             "manual_fan_speed_overhang_perimeter", "manual_fan_speed_interlocking_perimeter",
-             "manual_fan_speed_internal_infill", "manual_fan_speed_solid_infill", "bridge_fan_speed",
-             "manual_fan_speed_top_solid_infill", "manual_fan_speed_ironing", "manual_fan_speed_gap_fill",
-             "manual_fan_speed_skirt", "manual_fan_speed_support_material", "manual_fan_speed_support_interface"}))
     {
         auto *manual_group = CreateFlatStaticBoxSizer(content, _L("Manual fan controls"));
         CreateSettingRow(content, manual_group, "enable_manual_fan_speeds", _L("Enable manual fan speeds"));
@@ -6530,8 +6475,6 @@ wxPanel *FilamentSettingsPanel::BuildCoolingContent()
     }
 
     // Dynamic fan speeds group
-    if (has_any_visible_setting({"enable_dynamic_fan_speeds", "overhang_fan_speed_0", "overhang_fan_speed_1",
-                                 "overhang_fan_speed_2", "overhang_fan_speed_3"}))
     {
         auto *dynamic_group = CreateFlatStaticBoxSizer(content, _L("Dynamic fan speeds"));
         CreateSettingRow(content, dynamic_group, "enable_dynamic_fan_speeds", _L("Enable dynamic fan speeds"));
@@ -6543,7 +6486,6 @@ wxPanel *FilamentSettingsPanel::BuildCoolingContent()
     }
 
     // Fan spin-up group
-    if (has_any_visible_setting({"fan_spinup_bridge_infill", "fan_spinup_overhang_perimeter"}))
     {
         auto *spinup_group = CreateFlatStaticBoxSizer(content, _L("Fan spin-up"));
         CreateSettingRow(content, spinup_group, "fan_spinup_bridge_infill", _L("Bridge infill"));
@@ -6552,7 +6494,6 @@ wxPanel *FilamentSettingsPanel::BuildCoolingContent()
     }
 
     // Cooling thresholds group
-    if (has_any_visible_setting({"fan_below_layer_time", "slowdown_below_layer_time", "min_print_speed"}))
     {
         auto *threshold_group = CreateFlatStaticBoxSizer(content, _L("Cooling thresholds"));
         CreateSettingRow(content, threshold_group, "fan_below_layer_time", _L("Fan below layer time"));
@@ -6580,7 +6521,6 @@ wxPanel *FilamentSettingsPanel::BuildAdvancedContent()
     int em = wxGetApp().em_unit();
 
     // Filament properties group
-    if (has_any_visible_setting({"filament_type", "filament_soluble", "filament_abrasive"}))
     {
         auto *props_group = CreateFlatStaticBoxSizer(content, _L("Filament properties"));
         CreateSettingRow(content, props_group, "filament_type", _L("Filament type"));
@@ -6590,8 +6530,6 @@ wxPanel *FilamentSettingsPanel::BuildAdvancedContent()
     }
 
     // Print speed override group
-    if (has_any_visible_setting(
-            {"filament_max_volumetric_speed", "filament_infill_max_speed", "filament_infill_max_crossing_speed"}))
     {
         auto *speed_group = CreateFlatStaticBoxSizer(content, _L("Print speed override"));
         CreateSettingRow(content, speed_group, "filament_max_volumetric_speed", _L("Max volumetric speed"));
@@ -6601,8 +6539,6 @@ wxPanel *FilamentSettingsPanel::BuildAdvancedContent()
     }
 
     // Shrinkage compensation group
-    if (has_any_visible_setting({"filament_shrinkage_compensation_x", "filament_shrinkage_compensation_y",
-                                 "filament_shrinkage_compensation_z"}))
     {
         auto *shrink_group = CreateFlatStaticBoxSizer(content, _L("Shrinkage compensation"));
         CreateSettingRow(content, shrink_group, "filament_shrinkage_compensation_x", _L("X compensation"));
@@ -6612,7 +6548,6 @@ wxPanel *FilamentSettingsPanel::BuildAdvancedContent()
     }
 
     // Wipe tower group
-    if (has_any_visible_setting({"filament_minimal_purge_on_wipe_tower"}))
     {
         auto *wipe_group = CreateFlatStaticBoxSizer(content, _L("Wipe tower parameters"));
         CreateSettingRow(content, wipe_group, "filament_minimal_purge_on_wipe_tower",
@@ -6621,11 +6556,6 @@ wxPanel *FilamentSettingsPanel::BuildAdvancedContent()
     }
 
     // Toolchange single extruder MM group
-    if (has_any_visible_setting(
-            {"filament_loading_speed_start", "filament_loading_speed", "filament_unloading_speed_start",
-             "filament_unloading_speed", "filament_load_time", "filament_unload_time", "filament_toolchange_delay",
-             "filament_cooling_moves", "filament_cooling_initial_speed", "filament_cooling_final_speed",
-             "filament_stamping_loading_speed", "filament_stamping_distance", "filament_purge_multiplier"}))
     {
         auto *tc_single_group = CreateFlatStaticBoxSizer(content, _L("Single extruder MMU"));
         CreateSettingRow(content, tc_single_group, "filament_loading_speed_start", _L("Loading speed (start)"));
@@ -6698,8 +6628,6 @@ wxPanel *FilamentSettingsPanel::BuildAdvancedContent()
     }
 
     // Toolchange multi extruder MM group
-    if (has_any_visible_setting(
-            {"filament_multitool_ramming", "filament_multitool_ramming_volume", "filament_multitool_ramming_flow"}))
     {
         auto *tc_multi_group = CreateFlatStaticBoxSizer(content, _L("Multi extruder MMU"));
         CreateSettingRow(content, tc_multi_group, "filament_multitool_ramming", _L("Multitool ramming"));
@@ -6723,9 +6651,6 @@ wxPanel *FilamentSettingsPanel::BuildOverridesContent()
     int em = wxGetApp().em_unit();
 
     // Travel lift group
-    if (has_any_visible_setting({"filament_retract_lift", "filament_travel_ramping_lift", "filament_travel_max_lift",
-                                 "filament_travel_slope", "filament_travel_lift_before_obstacle",
-                                 "filament_retract_lift_above", "filament_retract_lift_below"}))
     {
         auto *lift_group = CreateFlatStaticBoxSizer(content, _L("Travel lift"));
         CreateNullableSettingRow(content, lift_group, "filament_retract_lift", _L("Lift Z"));
@@ -6740,10 +6665,6 @@ wxPanel *FilamentSettingsPanel::BuildOverridesContent()
     }
 
     // Retraction group
-    if (has_any_visible_setting({"filament_retract_length", "filament_retract_speed", "filament_deretract_speed",
-                                 "filament_retract_restart_extra", "filament_retract_before_travel",
-                                 "filament_retract_layer_change", "filament_wipe", "filament_wipe_extend",
-                                 "filament_retract_before_wipe", "filament_wipe_length"}))
     {
         auto *retract_group = CreateFlatStaticBoxSizer(content, _L("Retraction"));
         CreateNullableSettingRow(content, retract_group, "filament_retract_length", _L("Retraction length"));
@@ -6761,7 +6682,6 @@ wxPanel *FilamentSettingsPanel::BuildOverridesContent()
     }
 
     // Tool change retraction group
-    if (has_any_visible_setting({"filament_retract_length_toolchange", "filament_retract_restart_extra_toolchange"}))
     {
         auto *tc_retract_group = CreateFlatStaticBoxSizer(content, _L("Tool change retraction"));
         CreateNullableSettingRow(content, tc_retract_group, "filament_retract_length_toolchange",
@@ -6772,7 +6692,6 @@ wxPanel *FilamentSettingsPanel::BuildOverridesContent()
     }
 
     // Seams group
-    if (has_any_visible_setting({"filament_seam_gap_distance"}))
     {
         auto *seams_group = CreateFlatStaticBoxSizer(content, _L("Seams"));
         CreateNullableSettingRow(content, seams_group, "filament_seam_gap_distance", _L("Seam gap distance"));
@@ -6790,10 +6709,6 @@ wxPanel *FilamentSettingsPanel::BuildOverridesContent()
 void FilamentSettingsPanel::CreateSettingRow(wxWindow *parent, wxSizer *sizer, const std::string &opt_key,
                                              const wxString &label, bool full_width)
 {
-    // Check sidebar visibility - skip if user has hidden this setting
-    if (get_app_config()->get("sidebar_visibility", opt_key) == "0")
-        return;
-
     int em = wxGetApp().em_unit();
 
     // Create the common row header (icons, label, sizers)
@@ -7176,6 +7091,8 @@ void FilamentSettingsPanel::CreateSettingRow(wxWindow *parent, wxSizer *sizer, c
         ui_elem.undo_icon = undo_icon;
         ui_elem.label_text = ctx.label_text;
         ui_elem.original_value = original_value;
+        ui_elem.row_sizer = row_sizer;
+        ui_elem.parent_sizer = sizer;
         m_setting_controls[opt_key] = ui_elem;
 
         UpdateUndoUI(opt_key);
@@ -7258,6 +7175,10 @@ void FilamentSettingsPanel::CreateSettingRow(wxWindow *parent, wxSizer *sizer, c
     }
 
     sizer->Add(row_sizer, 0, wxEXPAND | wxTOP | wxBOTTOM, em / 4);
+
+    // Hide row if sidebar visibility is off (row always created for show/hide toggling)
+    if (get_app_config()->get("sidebar_visibility", opt_key) == "0")
+        sizer->Hide(row_sizer);
 }
 
 void FilamentSettingsPanel::CreateMultilineSettingRow(wxWindow *parent, wxSizer *sizer, const std::string &opt_key,
@@ -7364,10 +7285,6 @@ void FilamentSettingsPanel::CreateMultilineSettingRow(wxWindow *parent, wxSizer 
 void FilamentSettingsPanel::CreateNullableSettingRow(wxWindow *parent, wxSizer *sizer, const std::string &opt_key,
                                                      const wxString &label)
 {
-    // Check sidebar visibility - skip if user has hidden this setting
-    if (get_app_config()->get("sidebar_visibility", opt_key) == "0")
-        return;
-
     int em = wxGetApp().em_unit();
 
     const ConfigOptionDef *opt_def = print_config_def.get(opt_key);
@@ -7665,6 +7582,8 @@ void FilamentSettingsPanel::CreateNullableSettingRow(wxWindow *parent, wxSizer *
         ui_elem.enable_checkbox = enable_checkbox;
         ui_elem.original_value = original_value;
         ui_elem.last_meaningful_value = last_meaningful_value;
+        ui_elem.row_sizer = row_sizer;
+        ui_elem.parent_sizer = sizer;
         m_setting_controls[opt_key] = ui_elem;
 
         UpdateUndoUI(opt_key);
@@ -7717,6 +7636,10 @@ void FilamentSettingsPanel::CreateNullableSettingRow(wxWindow *parent, wxSizer *
                           [this, opt_key](wxCommandEvent &evt) { OnNullableSettingChanged(opt_key, evt.IsChecked()); });
 
     sizer->Add(row_sizer, 0, wxEXPAND | wxTOP | wxBOTTOM, em / 4);
+
+    // Hide row if sidebar visibility is off (row always created for show/hide toggling)
+    if (get_app_config()->get("sidebar_visibility", opt_key) == "0")
+        sizer->Hide(row_sizer);
 }
 
 void FilamentSettingsPanel::OnNullableSettingChanged(const std::string &opt_key, bool is_checked)
@@ -7724,14 +7647,12 @@ void FilamentSettingsPanel::OnNullableSettingChanged(const std::string &opt_key,
     if (m_disable_update)
         return;
 
-    m_disable_update = true;
+    // RAII guard: sets m_disable_update=true now, restores on scope exit (even if exception thrown)
+    DisableUpdateGuard guard(m_disable_update);
 
     auto it = m_setting_controls.find(opt_key);
     if (it == m_setting_controls.end())
-    {
-        m_disable_update = false;
         return;
-    }
 
     DynamicPrintConfig &config = wxGetApp().preset_bundle->filaments.get_edited_preset().config;
 
@@ -7740,8 +7661,13 @@ void FilamentSettingsPanel::OnNullableSettingChanged(const std::string &opt_key,
         // Enable the field and restore last meaningful value
         if (it->second.control)
         {
-            // Use SetEditable instead of Enable for wxTextCtrl on Windows (Enable ignores SetBackgroundColour)
-            if (wxTextCtrl *text = dynamic_cast<wxTextCtrl *>(it->second.control))
+            // TextInput wraps a wxTextCtrl but derives from wxWindow, not wxTextCtrl.
+            // Check for TextInput first - its Enable() handles editable state + colors on Windows.
+            if (auto *text_input = dynamic_cast<::TextInput *>(it->second.control))
+            {
+                text_input->Enable(true);
+            }
+            else if (wxTextCtrl *text = dynamic_cast<wxTextCtrl *>(it->second.control))
             {
 #ifdef _WIN32
                 text->SetEditable(true);
@@ -7766,7 +7692,11 @@ void FilamentSettingsPanel::OnNullableSettingChanged(const std::string &opt_key,
             value_to_set = "0";
 
         // Set the value on the control
-        if (auto *text = dynamic_cast<wxTextCtrl *>(it->second.control))
+        if (auto *text_input = dynamic_cast<::TextInput *>(it->second.control))
+        {
+            text_input->SetValue(from_u8(value_to_set));
+        }
+        else if (auto *text = dynamic_cast<wxTextCtrl *>(it->second.control))
         {
             text->SetValue(from_u8(value_to_set));
         }
@@ -7783,8 +7713,13 @@ void FilamentSettingsPanel::OnNullableSettingChanged(const std::string &opt_key,
         // Disable the field and set to N/A
         if (it->second.control)
         {
-            // Use SetEditable instead of Enable for wxTextCtrl on Windows (Enable ignores SetBackgroundColour)
-            if (wxTextCtrl *text = dynamic_cast<wxTextCtrl *>(it->second.control))
+            // TextInput wraps a wxTextCtrl but derives from wxWindow, not wxTextCtrl.
+            // Check for TextInput first - its Enable() handles editable state + colors on Windows.
+            if (auto *text_input = dynamic_cast<::TextInput *>(it->second.control))
+            {
+                text_input->Enable(false);
+            }
+            else if (wxTextCtrl *text = dynamic_cast<wxTextCtrl *>(it->second.control))
             {
 #ifdef _WIN32
                 text->SetEditable(false);
@@ -7802,7 +7737,14 @@ void FilamentSettingsPanel::OnNullableSettingChanged(const std::string &opt_key,
         }
 
         // Store current value as last meaningful before setting to nil
-        if (auto *text = dynamic_cast<wxTextCtrl *>(it->second.control))
+        if (auto *text_input = dynamic_cast<::TextInput *>(it->second.control))
+        {
+            std::string current = into_u8(text_input->GetValue());
+            if (current != into_u8(_L("N/A")) && !current.empty())
+                it->second.last_meaningful_value = current;
+            text_input->SetValue(_L("N/A"));
+        }
+        else if (auto *text = dynamic_cast<wxTextCtrl *>(it->second.control))
         {
             std::string current = into_u8(text->GetValue());
             if (current != into_u8(_L("N/A")) && !current.empty())
@@ -7885,8 +7827,7 @@ void FilamentSettingsPanel::OnNullableSettingChanged(const std::string &opt_key,
 
     // Update undo icon state
     UpdateUndoUI(opt_key);
-
-    m_disable_update = false;
+    // Note: m_disable_update is reset by DisableUpdateGuard destructor
 }
 
 void FilamentSettingsPanel::UpdateOverridesToggleState()
@@ -7989,21 +7930,16 @@ void FilamentSettingsPanel::OnSettingChanged(const std::string &opt_key)
     if (m_disable_update)
         return;
 
-    m_disable_update = true;
+    // RAII guard: sets m_disable_update=true now, restores on scope exit (even if exception thrown)
+    DisableUpdateGuard guard(m_disable_update);
 
     auto it = m_setting_controls.find(opt_key);
     if (it == m_setting_controls.end())
-    {
-        m_disable_update = false;
         return;
-    }
 
     const ConfigOptionDef *opt_def = print_config_def.get(opt_key);
     if (!opt_def)
-    {
-        m_disable_update = false;
         return;
-    }
 
     DynamicPrintConfig &config = wxGetApp().preset_bundle->filaments.get_edited_preset().config;
 
@@ -8036,6 +7972,15 @@ void FilamentSettingsPanel::OnSettingChanged(const std::string &opt_key)
             auto *opt = config.option<ConfigOptionInts>(opt_key, true);
             if (opt && !opt->values.empty())
                 opt->values[0] = spin->GetValue();
+        }
+        else if (auto *text_input = dynamic_cast<::TextInput *>(it->second.control))
+        {
+            // TextInput fallback for nullable coInts (e.g. idle_temperature)
+            config.set_deserialize_strict(opt_key, into_u8(text_input->GetValue()));
+        }
+        else if (auto *text = dynamic_cast<wxTextCtrl *>(it->second.control))
+        {
+            config.set_deserialize_strict(opt_key, into_u8(text->GetValue()));
         }
         break;
     case coEnum:
@@ -8198,7 +8143,10 @@ void FilamentSettingsPanel::OnSettingChanged(const std::string &opt_key)
     // Apply toggle logic to enable/disable dependent options
     ApplyToggleLogic();
 
-    m_disable_update = false;
+    // Update override toggle states (e.g. ramping lift enables max_lift, travel_slope, etc.
+    // and retract_length > 0 enables retract_speed, deretract_speed, etc.)
+    UpdateOverridesToggleState();
+    // Note: m_disable_update is reset by DisableUpdateGuard destructor
 }
 
 void FilamentSettingsPanel::UpdateUndoUI(const std::string &opt_key)
@@ -8210,7 +8158,14 @@ void FilamentSettingsPanel::UpdateUndoUI(const std::string &opt_key)
 
 void FilamentSettingsPanel::RefreshFromConfig()
 {
-    m_disable_update = true;
+    // If we're already inside OnSettingChanged, don't refresh - this prevents the
+    // circular callback: OnSettingChanged -> tab->update_dirty() -> RefreshFromConfig()
+    // from overwriting the user's in-progress edits with stale config values.
+    if (m_disable_update)
+        return;
+
+    // RAII guard: sets m_disable_update=true now, restores on scope exit (even if exception thrown)
+    DisableUpdateGuard guard(m_disable_update);
 
     const DynamicPrintConfig &config = wxGetApp().preset_bundle->filaments.get_edited_preset().config;
 
@@ -8461,8 +8416,7 @@ void FilamentSettingsPanel::RefreshFromConfig()
 #endif
         }
     }
-
-    m_disable_update = false;
+    // Note: m_disable_update is reset by DisableUpdateGuard destructor
 }
 
 void FilamentSettingsPanel::ToggleOption(const std::string &opt_key, bool enable)
@@ -8575,6 +8529,18 @@ void FilamentSettingsPanel::sys_color_changed()
     UpdateScalableButtonsRecursive(this);
 }
 
+void FilamentSettingsPanel::UpdateRowVisibility()
+{
+    for (auto &[key, ui] : m_setting_controls)
+    {
+        if (ui.row_sizer && ui.parent_sizer)
+        {
+            bool vis = get_app_config()->get("sidebar_visibility", key) != "0";
+            ui.parent_sizer->Show(ui.row_sizer, vis);
+        }
+    }
+}
+
 void FilamentSettingsPanel::OnSysColorChanged()
 {
     // Update all setting controls - call SysColorsChanged() on each custom widget
@@ -8615,7 +8581,7 @@ void ProcessSection::BuildUI()
 
     m_main_sizer = new wxBoxSizer(wxVERTICAL);
 
-    // Settings panel with nested accordions for each category
+    // Settings panel with all categories in a continuous scrollable list
     m_settings_panel = new PrintSettingsPanel(this, m_plater);
     m_main_sizer->Add(m_settings_panel, 1, wxEXPAND);
 
@@ -8677,6 +8643,12 @@ void ProcessSection::RebuildContent()
 {
     if (m_settings_panel)
         m_settings_panel->RebuildContent();
+}
+
+void ProcessSection::UpdateSidebarVisibility()
+{
+    if (m_settings_panel)
+        m_settings_panel->UpdateSidebarVisibility();
 }
 
 void ProcessSection::msw_rescale()
@@ -8815,13 +8787,20 @@ void Sidebar::BindDeadSpaceHandlers(wxWindow *root)
     if (!root)
         return;
 
-    // Recursively bind to all container panels (but not input controls)
+    // Recursively bind to all container panels and deadspace widgets (but not input controls)
     std::function<void(wxWindow *)> bind_handler = [this, &bind_handler](wxWindow *win)
     {
-        // Only bind to container types, skip all input controls
+        // Bind to container types (wxPanel, wxScrolledWindow) and also to "deadspace" widgets
+        // that cover visual area but aren't input controls. In the sidebar, group interiors are
+        // FlatStaticBox (wxStaticBox), labels are wxStaticText, and icons are wxStaticBitmap.
+        // Unlike the main Tab where OG_CustomCtrl (wxPanel) covers the entire group area,
+        // the sidebar's FlatStaticBox inherits from wxStaticBox -> wxControl -> wxWindow (not wxPanel),
+        // so without this, clicks between rows within a group would go unhandled.
         bool isContainer = win->IsKindOf(CLASSINFO(wxPanel)) || win->IsKindOf(CLASSINFO(wxScrolledWindow));
+        bool isDeadSpace = win->IsKindOf(CLASSINFO(wxStaticBox)) || win->IsKindOf(CLASSINFO(wxStaticText)) ||
+                           win->IsKindOf(CLASSINFO(wxStaticBitmap));
 
-        if (isContainer)
+        if (isContainer || isDeadSpace)
         {
             win->Bind(wxEVT_LEFT_DOWN,
                       [this](wxMouseEvent &evt)
@@ -10050,7 +10029,10 @@ void Sidebar::LoadSectionStates()
 
 void Sidebar::rebuild_settings_panels()
 {
-    // Rebuild all settings panels to reflect visibility changes
+    // Freeze the entire sidebar to batch all window operations
+    Freeze();
+
+    // Rebuild all settings panels (destroys + recreates)
     if (m_printer_settings_panel)
         m_printer_settings_panel->RebuildContent();
 
@@ -10061,6 +10043,26 @@ void Sidebar::rebuild_settings_panels()
         m_process_content->RebuildContent();
 
     Layout();
+
+    Thaw();
+}
+
+void Sidebar::update_sidebar_visibility()
+{
+    Freeze();
+
+    if (m_printer_settings_panel)
+        m_printer_settings_panel->UpdateSidebarVisibility();
+
+    if (m_filament_settings_panel)
+        m_filament_settings_panel->UpdateSidebarVisibility();
+
+    if (m_process_content)
+        m_process_content->UpdateSidebarVisibility();
+
+    Layout();
+
+    Thaw();
 }
 
 // preFlight: Tab -> Sidebar sync. When a value changes in the main Tab,

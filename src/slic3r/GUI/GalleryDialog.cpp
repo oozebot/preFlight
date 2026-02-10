@@ -86,7 +86,7 @@ GalleryDialog::GalleryDialog(wxWindow *parent)
                 wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
 {
 #ifndef _WIN32
-    SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+    SetBackgroundColour(wxGetApp().get_window_default_clr());
 #endif
     SetFont(wxGetApp().normal_font());
 

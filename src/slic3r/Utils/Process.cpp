@@ -22,7 +22,7 @@
 // For starting another preFlight instance on OSX.
 // Fails to compile on Windows on the build server.
 #ifdef __APPLE__
-#include <boost/process/v2.hpp>
+#include <boost/process.hpp>
 #include <boost/asio/io_context.hpp>
 #endif
 

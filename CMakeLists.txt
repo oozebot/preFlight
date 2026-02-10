@@ -417,10 +417,10 @@ endif()
 # boost::process was introduced first in version 1.64.0,
 # boost::beast::detail::base64 was introduced first in version 1.66.0
 set(MINIMUM_BOOST_VERSION "1.83.0")
-set(_boost_components "system;filesystem;thread;log;log_setup;locale;regex;chrono;atomic;date_time;iostreams;nowide")
+set(_boost_components "system;filesystem;thread;log;log_setup;locale;regex;chrono;atomic;date_time;iostreams;nowide;process")
 find_package(Boost ${MINIMUM_BOOST_VERSION} REQUIRED COMPONENTS ${_boost_components})
 
-find_package(Eigen3 3.3.7 REQUIRED)
+find_package(Eigen3 3.3.7...<6.0 REQUIRED) # preFlight: accept Eigen 5.x (jumped from 3.x)
 
 add_library(boost_libs INTERFACE)
 add_library(boost_headeronly INTERFACE)

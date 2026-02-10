@@ -39,7 +39,7 @@ ExtruderSequenceDialog::ExtruderSequenceDialog(const DoubleSlider::ExtrudersSequ
 #ifdef _WIN32
     wxGetApp().UpdateDarkUI(this);
 #else
-    SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+    SetBackgroundColour(wxGetApp().get_window_default_clr());
 #endif
     SetDoubleBuffered(true);
     SetFont(wxGetApp().normal_font());

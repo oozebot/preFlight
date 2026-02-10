@@ -18,8 +18,8 @@ namespace GUI
 
 /// FlatStaticBox - A wxStaticBox that draws flat borders in both light and dark mode
 ///
-/// In light mode: Uses Explorer theme (invisible borders) and draws custom flat borders
-/// In dark mode: Uses DarkMode_Explorer theme which has built-in flat borders
+/// Windows: Uses DarkMode_Explorer theme (dark) or custom WM_PAINT overlay (light)
+/// GTK3:    Hooks the GtkFrame "draw" signal to custom-draw via cairo
 ///
 class FlatStaticBox : public wxStaticBox
 {
@@ -52,6 +52,12 @@ public:
     // Call when DPI changes
     void msw_rescale() { Refresh(); }
 
+#ifdef __WXGTK__
+    // GTK: set header panel so the draw handler can redraw it unclipped
+    void SetHeaderPanel(wxWindow *panel) { m_headerPanel = panel; }
+    wxWindow *GetHeaderPanel() const { return m_headerPanel; }
+#endif
+
 #ifdef _WIN32
 protected:
     virtual WXLRESULT MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam) override;
@@ -60,6 +66,9 @@ protected:
 private:
     wxColour m_borderColor{0, 0, 0}; // Black for light mode
     bool m_drawFlatBorder{true};
+#ifdef __WXGTK__
+    wxWindow *m_headerPanel{nullptr};
+#endif
 
     void UpdateTheme();
 };

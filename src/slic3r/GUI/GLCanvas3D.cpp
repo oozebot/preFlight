@@ -2882,7 +2882,7 @@ void GLCanvas3D::unbind_event_handlers()
 
 void GLCanvas3D::on_idle(wxIdleEvent &evt)
 {
-    if (!m_initialized)
+    if (!m_initialized || m_rendering_paused)
         return;
 
     m_dirty |= m_main_toolbar.update_items_state();

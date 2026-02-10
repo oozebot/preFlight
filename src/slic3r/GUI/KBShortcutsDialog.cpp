@@ -50,6 +50,9 @@ KBShortcutsDialog::KBShortcutsDialog()
         book = new wxNotebook(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxNB_TOP);*/
 #else
     wxNotebook *book = new wxNotebook(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxNB_TOP);
+    // preFlight: apply theme background on Linux/macOS (UpdateDlgDarkUI is Windows-only)
+    SetBackgroundColour(wxGetApp().get_window_default_clr());
+    book->SetBackgroundColour(wxGetApp().get_window_default_clr());
 #endif
     main_sizer->Add(book, 1, wxEXPAND | wxALL, em);
 

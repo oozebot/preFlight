@@ -17,6 +17,7 @@
 #include "wxExtensions.hpp" // for em_unit
 #include "Widgets/CustomMenu.hpp"
 #include "Theme.hpp" // for preFlight theme colors
+#include <wx/dcbuffer.h>
 
 namespace Slic3r
 {
@@ -150,6 +151,14 @@ ModernTabBar::ModernTabBar(wxWindow *parent)
                                    m_slice_button->Refresh();
                                if (m_printer_webview_btn)
                                    m_printer_webview_btn->Refresh();
+                               if (m_print_settings_btn)
+                                   m_print_settings_btn->Refresh();
+                               if (m_filament_settings_btn)
+                                   m_filament_settings_btn->Refresh();
+                               if (m_printer_settings_btn)
+                                   m_printer_settings_btn->Refresh();
+                               if (m_settings_dropdown_btn)
+                                   m_settings_dropdown_btn->Refresh();
                            }
                        });
     }
@@ -159,14 +168,20 @@ ModernTabBar::ModernTabBar(wxWindow *parent)
 
     SetSizer(sizer);
 
-    // Search box will be created after all buttons are added
+    // Responsive layout: toggle between expanded (3 buttons) and collapsed (dropdown) settings
+    Bind(wxEVT_SIZE,
+         [this](wxSizeEvent &event)
+         {
+             event.Skip();
+             UpdateSettingsLayout();
+         });
 }
 
 void ModernTabBar::AddButton(TabType type, const wxString &label, std::function<void()> callback)
 {
     auto *button = CreateStyledButton(label);
 
-    button->Bind(wxEVT_BUTTON, [this, type](wxCommandEvent &) { OnButtonClick(type); });
+    button->Bind(wxEVT_LEFT_UP, [this, type](wxMouseEvent &) { OnButtonClick(type); });
     button->Bind(wxEVT_ENTER_WINDOW,
                  [button, this](wxMouseEvent &)
                  {
@@ -199,16 +214,71 @@ void ModernTabBar::AddSettingsDropdownButton(std::function<void(TabType)> callba
 {
     m_settings_callback = callback;
 
-    m_settings_dropdown_btn = new wxButton(this, wxID_ANY, _L("Settings"), wxDefaultPosition, GetScaledButtonSize(),
-                                           wxBORDER_NONE);
+    // Helper lambda: common click logic for selecting a settings tab
+    auto select_settings_tab = [this](TabType selected_type)
+    {
+        if (!m_settings_callback)
+            return;
+
+        // If leaving the printer webview tab, hide its content first
+        if (m_selected_tab == TAB_PRINTER_WEBVIEW && m_printer_webview_btn)
+        {
+            if (auto *mainframe = dynamic_cast<MainFrame *>(wxGetApp().GetTopWindow()))
+            {
+                mainframe->hide_printer_webview_content();
+            }
+            m_printer_webview_btn->Refresh();
+        }
+
+        m_selected_tab = selected_type;
+        UpdateButtonStyles();
+        UpdateSliceButtonVisibility();
+        m_settings_callback(selected_type);
+    };
+
+    // --- Create 3 individual settings buttons (shown when expanded) ---
+
+    auto create_individual_settings_btn = [this, select_settings_tab](const wxString &label, TabType type) -> wxPanel *
+    {
+        wxPanel *btn = CreateStyledButton(label);
+
+        btn->Bind(wxEVT_LEFT_UP, [select_settings_tab, type](wxMouseEvent &) { select_settings_tab(type); });
+        btn->Bind(wxEVT_ENTER_WINDOW,
+                  [btn, this](wxMouseEvent &)
+                  {
+                      btn->SetBackgroundColour(m_color_bg_hover);
+                      btn->Refresh();
+                  });
+        btn->Bind(wxEVT_LEAVE_WINDOW,
+                  [btn, this, type](wxMouseEvent &)
+                  {
+                      btn->SetBackgroundColour((m_selected_tab == type) ? m_color_bg_selected : m_color_bg_normal);
+                      btn->Refresh();
+                  });
+
+        // Initially hidden - UpdateSettingsLayout() will show them if there's enough space
+        btn->Hide();
+        GetSizer()->Add(btn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, GetScaledSmallMargin());
+        return btn;
+    };
+
+    m_print_settings_btn = create_individual_settings_btn(_L("Print Settings"), TAB_PRINT_SETTINGS);
+    m_filament_settings_btn = create_individual_settings_btn(_L("Filament Settings"), TAB_FILAMENTS);
+    m_printer_settings_btn = create_individual_settings_btn(_L("Printer Settings"), TAB_PRINTERS);
+
+    // --- Create collapsed Settings dropdown button (shown when not enough space) ---
+
+    m_settings_dropdown_btn = new wxPanel(this, wxID_ANY, wxDefaultPosition, GetScaledButtonSize(), wxBORDER_NONE);
+    m_settings_dropdown_btn->SetLabel(_L("Settings"));
     m_settings_dropdown_btn->SetBackgroundColour(m_color_bg_normal);
     m_settings_dropdown_btn->SetForegroundColour(m_color_text_normal);
+    m_settings_dropdown_btn->SetBackgroundStyle(wxBG_STYLE_PAINT);
 
     // Custom paint handler for Settings button with border when active
     m_settings_dropdown_btn->Bind(wxEVT_PAINT,
                                   [this](wxPaintEvent &)
                                   {
-                                      wxPaintDC dc(m_settings_dropdown_btn);
+                                      wxAutoBufferedPaintDC dc(m_settings_dropdown_btn);
                                       wxSize size = m_settings_dropdown_btn->GetSize();
 
                                       bool is_active = (m_selected_tab == TAB_PRINT_SETTINGS ||
@@ -250,8 +320,8 @@ void ModernTabBar::AddSettingsDropdownButton(std::function<void(TabType)> callba
                                   });
 
     m_settings_dropdown_btn->Bind(
-        wxEVT_BUTTON,
-        [this](wxCommandEvent &)
+        wxEVT_LEFT_UP,
+        [this, select_settings_tab](wxMouseEvent &)
         {
             wxMenu menu;
             wxMenuItem *print_item = menu.Append(static_cast<int>(TAB_PRINT_SETTINGS), _L("Print Settings"));
@@ -268,33 +338,12 @@ void ModernTabBar::AddSettingsDropdownButton(std::function<void(TabType)> callba
             auto customMenu = CustomMenu::FromWxMenu(&menu, m_settings_dropdown_btn);
             if (customMenu)
             {
-                // Set callbacks for each menu item
-                auto handle_selection = [this](TabType selected_type)
-                {
-                    if (!m_settings_callback)
-                        return;
-
-                    // If leaving the printer webview tab, hide its content first
-                    if (m_selected_tab == TAB_PRINTER_WEBVIEW && m_printer_webview_btn)
-                    {
-                        if (auto *mainframe = dynamic_cast<MainFrame *>(wxGetApp().GetTopWindow()))
-                        {
-                            mainframe->hide_printer_webview_content();
-                        }
-                        m_printer_webview_btn->Refresh();
-                    }
-
-                    m_selected_tab = selected_type;
-                    UpdateButtonStyles();
-                    m_settings_callback(selected_type);
-                };
-
                 customMenu->SetCallback(static_cast<int>(TAB_PRINT_SETTINGS),
-                                        [handle_selection]() { handle_selection(TAB_PRINT_SETTINGS); });
+                                        [select_settings_tab]() { select_settings_tab(TAB_PRINT_SETTINGS); });
                 customMenu->SetCallback(static_cast<int>(TAB_FILAMENTS),
-                                        [handle_selection]() { handle_selection(TAB_FILAMENTS); });
+                                        [select_settings_tab]() { select_settings_tab(TAB_FILAMENTS); });
                 customMenu->SetCallback(static_cast<int>(TAB_PRINTERS),
-                                        [handle_selection]() { handle_selection(TAB_PRINTERS); });
+                                        [select_settings_tab]() { select_settings_tab(TAB_PRINTERS); });
 
                 customMenu->KeepAliveUntilDismissed(customMenu);
                 if (!customMenu->GetParent())
@@ -306,23 +355,9 @@ void ModernTabBar::AddSettingsDropdownButton(std::function<void(TabType)> callba
             {
                 // Fallback to native menu
                 int selection = m_settings_dropdown_btn->GetPopupMenuSelectionFromUser(menu, menu_pos);
-                if (selection != wxID_NONE && m_settings_callback)
+                if (selection != wxID_NONE)
                 {
-                    TabType selected_type = static_cast<TabType>(selection);
-
-                    // If leaving the printer webview tab, hide its content first
-                    if (m_selected_tab == TAB_PRINTER_WEBVIEW && m_printer_webview_btn)
-                    {
-                        if (auto *mainframe = dynamic_cast<MainFrame *>(wxGetApp().GetTopWindow()))
-                        {
-                            mainframe->hide_printer_webview_content();
-                        }
-                        m_printer_webview_btn->Refresh();
-                    }
-
-                    m_selected_tab = selected_type;
-                    UpdateButtonStyles();
-                    m_settings_callback(selected_type);
+                    select_settings_tab(static_cast<TabType>(selection));
                 }
             }
         });
@@ -345,6 +380,67 @@ void ModernTabBar::AddSettingsDropdownButton(std::function<void(TabType)> callba
                                   });
 
     GetSizer()->Add(m_settings_dropdown_btn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, GetScaledSmallMargin());
+}
+
+void ModernTabBar::UpdateSettingsLayout(bool force)
+{
+    // Nothing to do if individual buttons weren't created yet
+    if (!m_print_settings_btn || !m_settings_dropdown_btn)
+        return;
+
+    // Use INTENDED sizes (MinSize/scaled constants) rather than current GetSize(),
+    // because the sizer may have already compressed buttons when space is tight.
+    const int margin = GetScaledSmallMargin();
+    const int left_margin = GetScaledMargin();
+    const int btn_w = GetScaledButtonWidth();
+
+    int fixed_width = left_margin; // Left spacer
+
+    // Tab buttons (Prepare, Preview) - use intended width
+    fixed_width += static_cast<int>(m_tabs.size()) * (btn_w + margin);
+
+    // Printer webview button (if present) - use MinSize since it's dynamically sized
+    if (m_printer_webview_btn && m_printer_webview_btn->IsShown())
+        fixed_width += m_printer_webview_btn->GetMinSize().GetWidth() + margin;
+
+    // Slice button + its right margin - use intended width
+    if (m_slice_button && m_slice_button->IsShown())
+        fixed_width += GetScaledSliceButtonWidth() + GetScaledMargin();
+
+    // Calculate width for expanded mode (3 individual buttons)
+    int expanded_settings_width = 3 * (btn_w + margin);
+
+    int total_expanded = fixed_width + expanded_settings_width;
+
+    // Current available width
+    int available_width = GetSize().GetWidth();
+
+    bool should_expand = (available_width >= total_expanded);
+
+    if (!force && should_expand == m_settings_expanded)
+        return; // No change needed
+
+    m_settings_expanded = should_expand;
+
+    if (m_settings_expanded)
+    {
+        // Show individual buttons, hide dropdown
+        m_print_settings_btn->Show();
+        m_filament_settings_btn->Show();
+        m_printer_settings_btn->Show();
+        m_settings_dropdown_btn->Hide();
+    }
+    else
+    {
+        // Hide individual buttons, show dropdown
+        m_print_settings_btn->Hide();
+        m_filament_settings_btn->Hide();
+        m_printer_settings_btn->Hide();
+        m_settings_dropdown_btn->Show();
+    }
+
+    Layout();
+    Refresh();
 }
 
 void ModernTabBar::SelectTab(TabType type)
@@ -453,21 +549,40 @@ void ModernTabBar::UpdateButtonStyles()
                                                                           : m_color_text_normal);
         m_settings_dropdown_btn->Refresh();
     }
+
+    // Update individual settings buttons if they exist
+    auto update_settings_btn = [this](wxPanel *btn, TabType type)
+    {
+        if (!btn)
+            return;
+        bool is_selected = (m_selected_tab == type);
+        btn->SetBackgroundColour(is_selected ? m_color_bg_normal : m_color_bg_normal);
+        btn->SetForegroundColour(is_selected ? m_color_text_selected : m_color_text_normal);
+        btn->Refresh();
+    };
+    update_settings_btn(m_print_settings_btn, TAB_PRINT_SETTINGS);
+    update_settings_btn(m_filament_settings_btn, TAB_FILAMENTS);
+    update_settings_btn(m_printer_settings_btn, TAB_PRINTERS);
 }
 
-wxButton *ModernTabBar::CreateStyledButton(const wxString &label)
+wxPanel *ModernTabBar::CreateStyledButton(const wxString &label)
 {
-    auto *button = new wxButton(this, wxID_ANY, label, wxDefaultPosition, GetScaledButtonSize(), wxBORDER_NONE);
+    // preFlight: Use wxPanel instead of wxButton — wxButton on GTK3 has native theme rendering
+    // that can't be fully suppressed, producing inconsistent custom-drawn buttons.
+    // wxPanel with wxBG_STYLE_PAINT gives us a clean canvas on all platforms.
+    auto *button = new wxPanel(this, wxID_ANY, wxDefaultPosition, GetScaledButtonSize(), wxBORDER_NONE);
+    button->SetLabel(label);
 
     // Set modern styling
     button->SetBackgroundColour(m_color_bg_normal);
     button->SetForegroundColour(m_color_text_normal);
+    button->SetBackgroundStyle(wxBG_STYLE_PAINT);
 
     // Create rounded corners effect with custom paint
     button->Bind(wxEVT_PAINT,
                  [button, this](wxPaintEvent &evt)
                  {
-                     wxPaintDC dc(button);
+                     wxAutoBufferedPaintDC dc(button);
 
                      // Get button size
                      wxSize size = button->GetSize();
@@ -480,6 +595,16 @@ wxButton *ModernTabBar::CreateStyledButton(const wxString &label)
                          {
                              is_active = true;
                              break;
+                         }
+                     }
+                     // Also check individual settings buttons
+                     if (!is_active)
+                     {
+                         if ((button == m_print_settings_btn && m_selected_tab == TAB_PRINT_SETTINGS) ||
+                             (button == m_filament_settings_btn && m_selected_tab == TAB_FILAMENTS) ||
+                             (button == m_printer_settings_btn && m_selected_tab == TAB_PRINTERS))
+                         {
+                             is_active = true;
                          }
                      }
 
@@ -579,6 +704,13 @@ void ModernTabBar::sys_color_changed()
         m_settings_dropdown_btn->Refresh();
     }
 
+    // Update individual settings button colors
+    for (wxPanel *btn : {m_print_settings_btn, m_filament_settings_btn, m_printer_settings_btn})
+    {
+        if (btn)
+            btn->Refresh();
+    }
+
     // Refresh the panel
     Refresh();
 }
@@ -603,6 +735,16 @@ void ModernTabBar::msw_rescale()
         m_settings_dropdown_btn->SetSize(button_size);
     }
 
+    // Update individual settings buttons
+    for (wxPanel *btn : {m_print_settings_btn, m_filament_settings_btn, m_printer_settings_btn})
+    {
+        if (btn)
+        {
+            btn->SetMinSize(button_size);
+            btn->SetSize(button_size);
+        }
+    }
+
     // Update slice button
     if (m_slice_button)
     {
@@ -618,8 +760,8 @@ void ModernTabBar::msw_rescale()
         dc.SetFont(m_printer_webview_btn->GetFont());
         wxCoord tw = 0, th = 0;
         dc.GetTextExtent(m_printer_webview_name, &tw, &th);
-        int    needed_w = 2 * GetScaledHMargin() + GetScaledDotSize() + GetScaledDotTextGap() + tw;
-        int    btn_w    = std::max(needed_w, GetScaledButtonWidth());
+        int needed_w = 2 * GetScaledHMargin() + GetScaledDotSize() + GetScaledDotTextGap() + tw;
+        int btn_w = std::max(needed_w, GetScaledButtonWidth());
         wxSize btn_sz(btn_w, GetScaledButtonHeight());
         m_printer_webview_btn->SetMinSize(btn_sz);
         m_printer_webview_btn->SetSize(btn_sz);
@@ -632,13 +774,18 @@ void ModernTabBar::msw_rescale()
     }
     if (m_settings_dropdown_btn)
         m_settings_dropdown_btn->Refresh();
+    for (wxPanel *btn : {m_print_settings_btn, m_filament_settings_btn, m_printer_settings_btn})
+    {
+        if (btn)
+            btn->Refresh();
+    }
     if (m_slice_button)
         m_slice_button->Refresh();
     if (m_printer_webview_btn)
         m_printer_webview_btn->Refresh();
 
-    Layout();
-    Refresh();
+    // Re-evaluate expanded/collapsed after rescale since button sizes changed
+    UpdateSettingsLayout(true);
 }
 
 void ModernTabBar::AddSliceButton(std::function<void()> slice_callback, std::function<void()> export_callback)
@@ -647,14 +794,16 @@ void ModernTabBar::AddSliceButton(std::function<void()> slice_callback, std::fun
     m_export_callback = export_callback;
 
     // Create a custom button that matches Orca Slicer style
-    m_slice_button = new wxButton(this, wxID_ANY, "", wxDefaultPosition, GetScaledSliceButtonSize(), wxBORDER_NONE);
+    m_slice_button = new wxPanel(this, wxID_ANY, wxDefaultPosition, GetScaledSliceButtonSize(), wxBORDER_NONE);
+    m_slice_button->SetMinSize(GetScaledSliceButtonSize());
+    m_slice_button->SetBackgroundStyle(wxBG_STYLE_PAINT);
 
     // Bind paint event for custom drawing
     m_slice_button->Bind(
         wxEVT_PAINT,
         [this](wxPaintEvent &event)
         {
-            wxPaintDC dc(m_slice_button);
+            wxAutoBufferedPaintDC dc(m_slice_button);
             wxSize size = m_slice_button->GetSize();
 
             // Colors
@@ -674,10 +823,11 @@ void ModernTabBar::AddSliceButton(std::function<void()> slice_callback, std::fun
             dc.SetPen(*wxTRANSPARENT_PEN);
             dc.DrawRectangle(0, 0, size.x, size.y);
 
-            // Choose colors based on enabled state
-            wxColour bg_color = m_slice_button_enabled ? dark_bg : disabled_bg;
-            wxColour border_color = m_slice_button_enabled ? orange : disabled_bg;
-            wxColour current_text_color = m_slice_button_enabled ? text_color : disabled_text;
+            // Choose colors based on enabled state (both Plater and tab conditions must be met)
+            bool effectively_enabled = m_slice_button_enabled && m_slice_tab_enabled;
+            wxColour bg_color = effectively_enabled ? dark_bg : disabled_bg;
+            wxColour border_color = effectively_enabled ? orange : disabled_bg;
+            wxColour current_text_color = effectively_enabled ? text_color : disabled_text;
 
             // Draw background with rounded corners (match border dimensions)
             dc.SetBrush(wxBrush(bg_color));
@@ -711,7 +861,7 @@ void ModernTabBar::AddSliceButton(std::function<void()> slice_callback, std::fun
             // Draw text
             dc.SetTextForeground(current_text_color);
             dc.SetFont(GetFont());
-            wxString label = m_has_sliced_object ? _L("Export G-code") : _L("Slice platter");
+            wxString label = m_has_sliced_object ? _L("Export G-code") : _L("Slice Platter");
             wxSize text_size = dc.GetTextExtent(label);
             // Center text - if dropdown shown, offset by dropdown width; otherwise center in full button
             int text_x = m_show_dropdown ? (dropdown_width + (size.x - dropdown_width - text_size.x) / 2)
@@ -724,7 +874,7 @@ void ModernTabBar::AddSliceButton(std::function<void()> slice_callback, std::fun
     m_slice_button->Bind(wxEVT_LEFT_DOWN,
                          [this](wxMouseEvent &event)
                          {
-                             if (!m_slice_button_enabled)
+                             if (!m_slice_button_enabled || !m_slice_tab_enabled)
                                  return;
 
                              m_slice_button_pressed = true;
@@ -742,27 +892,27 @@ void ModernTabBar::AddSliceButton(std::function<void()> slice_callback, std::fun
                                  wxMenuItem *send_item = menu.Append(ID_SEND_TO_PRINTER, _L("Send to Printer"));
                                  send_item->SetBitmap(*get_bmp_bundle("export_gcode"));
 
-                                 menu.Bind(wxEVT_MENU,
-                                           [this, ID_SAVE_LOCALLY, ID_SEND_TO_PRINTER](wxCommandEvent &evt)
-                                           {
-                                               if (evt.GetId() == ID_SAVE_LOCALLY)
-                                               {
-                                                   if (m_export_callback)
-                                                       m_export_callback();
-                                               }
-                                               else if (evt.GetId() == ID_SEND_TO_PRINTER)
-                                               {
-                                                   if (m_send_to_printer_callback)
-                                                       m_send_to_printer_callback();
-                                               }
-                                           });
-
                                  // Show menu at button position using CustomMenu for theming
                                  wxPoint menu_pos = m_slice_button->GetPosition();
                                  menu_pos.y += m_slice_button->GetSize().y;
                                  auto customMenu = CustomMenu::FromWxMenu(&menu, this);
                                  if (customMenu)
                                  {
+                                     // Override FromWxMenu callbacks with direct lambdas so
+                                     // we don't route through the stack-local wxMenu (which
+                                     // is destroyed once ShowAt returns asynchronously).
+                                     customMenu->SetCallback(ID_SAVE_LOCALLY,
+                                                             [this]()
+                                                             {
+                                                                 if (m_export_callback)
+                                                                     m_export_callback();
+                                                             });
+                                     customMenu->SetCallback(ID_SEND_TO_PRINTER,
+                                                             [this]()
+                                                             {
+                                                                 if (m_send_to_printer_callback)
+                                                                     m_send_to_printer_callback();
+                                                             });
                                      customMenu->KeepAliveUntilDismissed(customMenu);
                                      if (!customMenu->GetParent())
                                          customMenu->Create(this);
@@ -771,6 +921,20 @@ void ModernTabBar::AddSliceButton(std::function<void()> slice_callback, std::fun
                                  }
                                  else
                                  {
+                                     menu.Bind(wxEVT_MENU,
+                                               [this, ID_SAVE_LOCALLY, ID_SEND_TO_PRINTER](wxCommandEvent &evt)
+                                               {
+                                                   if (evt.GetId() == ID_SAVE_LOCALLY)
+                                                   {
+                                                       if (m_export_callback)
+                                                           m_export_callback();
+                                                   }
+                                                   else if (evt.GetId() == ID_SEND_TO_PRINTER)
+                                                   {
+                                                       if (m_send_to_printer_callback)
+                                                           m_send_to_printer_callback();
+                                                   }
+                                               });
                                      PopupMenu(&menu, menu_pos);
                                  }
                              }
@@ -798,7 +962,7 @@ void ModernTabBar::AddSliceButton(std::function<void()> slice_callback, std::fun
     m_slice_button->Bind(wxEVT_ENTER_WINDOW,
                          [this](wxMouseEvent &event)
                          {
-                             if (!m_slice_button_enabled)
+                             if (!m_slice_button_enabled || !m_slice_tab_enabled)
                              {
                                  m_slice_button->SetToolTip(_L("Add objects to the platter to enable slicing"));
                              }
@@ -837,7 +1001,7 @@ void ModernTabBar::UpdateSliceButtonState(bool has_sliced_object)
     // Update button visibility based on current tab
     UpdateSliceButtonVisibility();
 
-    m_slice_button->SetLabel(has_sliced_object ? _L("Export G-code") : _L("Slice platter"));
+    m_slice_button->SetLabel(has_sliced_object ? _L("Export G-code") : _L("Slice Platter"));
     m_slice_button->Refresh();
 }
 
@@ -862,20 +1026,14 @@ void ModernTabBar::UpdateSliceButtonVisibility()
     if (!m_slice_button)
         return;
 
-    // In Slice mode (not sliced yet): only show on Prepare tab
-    // In Export mode (already sliced): show on any tab
-    if (m_has_sliced_object)
-    {
-        // Export mode - always visible
-        m_slice_button->Show();
-    }
-    else
-    {
-        // Slice mode - only visible on Prepare tab
-        bool on_prepare_tab = (m_selected_tab == TAB_PREPARE);
-        m_slice_button->Show(on_prepare_tab);
-    }
+    // Always visible regardless of tab
+    m_slice_button->Show();
 
+    // In Slice mode: only actionable on Prepare tab
+    // In Export mode: actionable on all tabs
+    m_slice_tab_enabled = m_has_sliced_object || (m_selected_tab == TAB_PREPARE);
+
+    m_slice_button->Refresh();
     Layout();
 }
 
@@ -929,20 +1087,20 @@ void ModernTabBar::ShowPrinterWebViewTab(const wxString &printerName, std::funct
     m_printer_webview_name = printerName;
     m_printer_webview_callback = callback;
 
-    // Create a custom button for the printer webview tab with status indicator
-    // Note: Don't use wxBU_NOTEXT - it causes paint issues when window is uncovered after being obscured
+    // Create a custom panel for the printer webview tab with status indicator
     // Width matches regular tab buttons (scaled)
-    m_printer_webview_btn = new wxButton(this, wxID_ANY, "", wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
+    m_printer_webview_btn = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBORDER_NONE);
+    m_printer_webview_btn->SetBackgroundStyle(wxBG_STYLE_PAINT);
 
     // Size the button to fit the printer name (with dot + margins), minimum is the standard button width
     {
-        wxClientDC   dc(m_printer_webview_btn);
+        wxClientDC dc(m_printer_webview_btn);
         dc.SetFont(m_printer_webview_btn->GetFont());
-        wxCoord      tw = 0, th = 0;
+        wxCoord tw = 0, th = 0;
         dc.GetTextExtent(printerName, &tw, &th);
         int needed_w = 2 * GetScaledHMargin() + GetScaledDotSize() + GetScaledDotTextGap() + tw;
-        int btn_w    = std::max(needed_w, GetScaledButtonWidth());
-        wxSize       btn_sz(btn_w, GetScaledButtonHeight());
+        int btn_w = std::max(needed_w, GetScaledButtonWidth());
+        wxSize btn_sz(btn_w, GetScaledButtonHeight());
         m_printer_webview_btn->SetMinSize(btn_sz);
         m_printer_webview_btn->SetSize(btn_sz);
     }
@@ -952,11 +1110,11 @@ void ModernTabBar::ShowPrinterWebViewTab(const wxString &printerName, std::funct
 
     // Custom paint to draw status dot and label
     // Capture button pointer directly (like regular buttons) for stable reference during paint
-    wxButton *btn = m_printer_webview_btn;
+    wxPanel *btn = m_printer_webview_btn;
     btn->Bind(wxEVT_PAINT,
               [btn, this](wxPaintEvent &evt)
               {
-                  wxPaintDC dc(btn);
+                  wxAutoBufferedPaintDC dc(btn);
                   wxSize size = btn->GetSize();
 
                   bool is_active = (m_selected_tab == TAB_PRINTER_WEBVIEW);
@@ -1037,8 +1195,8 @@ void ModernTabBar::ShowPrinterWebViewTab(const wxString &printerName, std::funct
               });
 
     // Handle click
-    m_printer_webview_btn->Bind(wxEVT_BUTTON,
-                                [this](wxCommandEvent &)
+    m_printer_webview_btn->Bind(wxEVT_LEFT_UP,
+                                [this](wxMouseEvent &)
                                 {
                                     m_selected_tab = TAB_PRINTER_WEBVIEW;
                                     UpdateButtonStyles();
@@ -1088,12 +1246,15 @@ void ModernTabBar::ShowPrinterWebViewTab(const wxString &printerName, std::funct
     // The sizer structure is: spacer(0), tabs(1..n), settings_dropdown, stretch_spacer, slice_button
     // Count: initial spacer + tabs + settings_dropdown = 1 + m_tabs.size() + 1
     // We want to insert after settings_dropdown, before stretch spacer
-    m_printer_webview_sizer_index = 1 + static_cast<int>(m_tabs.size()) + (m_settings_dropdown_btn ? 1 : 0);
+    // Sizer structure: spacer(0), tabs(1..n), 3 individual settings btns, settings dropdown, [webview here]
+    int settings_btn_count = (m_print_settings_btn ? 3 : 0) + (m_settings_dropdown_btn ? 1 : 0);
+    m_printer_webview_sizer_index = 1 + static_cast<int>(m_tabs.size()) + settings_btn_count;
 
     sizer->Insert(m_printer_webview_sizer_index, m_printer_webview_btn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT,
                   GetScaledSmallMargin());
 
-    Layout();
+    // Re-evaluate settings layout since printer button width affects available space
+    UpdateSettingsLayout(true);
 }
 
 void ModernTabBar::HidePrinterWebViewTab()
@@ -1122,7 +1283,8 @@ void ModernTabBar::HidePrinterWebViewTab()
     m_printer_webview_sizer_index = -1;
     m_connection_state = PrinterConnectionChecker::State::Unknown;
 
-    Layout();
+    // Re-evaluate settings layout since printer button removal frees space
+    UpdateSettingsLayout(true);
 }
 
 void ModernTabBar::UpdatePrinterConnectionState(PrinterConnectionChecker::State state)

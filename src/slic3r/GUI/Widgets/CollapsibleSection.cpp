@@ -318,6 +318,8 @@ void CollapsibleSection::SetExpanded(bool expanded, bool animate)
 
 void CollapsibleSection::ToggleExpanded()
 {
+    if (!m_collapsible)
+        return;
     SetExpanded(!m_expanded);
 }
 
@@ -435,6 +437,40 @@ void CollapsibleSection::SetCompact(bool compact)
     UpdateLayout();
 }
 
+void CollapsibleSection::SetCollapsible(bool collapsible)
+{
+    m_collapsible = collapsible;
+
+    if (!collapsible)
+    {
+        // Hide chevron — no collapse/expand indicator needed
+        if (m_chevron)
+            m_chevron->Hide();
+
+        // Remove hand cursor from header and children — not interactive
+        if (m_header_panel)
+        {
+            m_header_panel->SetCursor(wxNullCursor);
+            for (auto *child : m_header_panel->GetChildren())
+                child->SetCursor(wxNullCursor);
+        }
+    }
+    else
+    {
+        // Restore chevron and hand cursor
+        if (m_chevron)
+            m_chevron->Show();
+        if (m_header_panel)
+        {
+            m_header_panel->SetCursor(wxCursor(wxCURSOR_HAND));
+            for (auto *child : m_header_panel->GetChildren())
+                child->SetCursor(wxCursor(wxCURSOR_HAND));
+        }
+    }
+
+    UpdateLayout();
+}
+
 void CollapsibleSection::SetHeaderBackgroundColor(const StateColor &color)
 {
     m_header_bg_color = color;
@@ -468,6 +504,11 @@ void CollapsibleSection::OnHeaderClick(wxMouseEvent &evt)
 
 void CollapsibleSection::OnHeaderEnter(wxMouseEvent &evt)
 {
+    if (!m_collapsible)
+    {
+        evt.Skip();
+        return;
+    }
     m_header_hovered = true;
     if (m_header_panel)
     {

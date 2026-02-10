@@ -53,6 +53,14 @@ public:
     // Get scroll position
     int GetScrollPosition() const;
 
+protected:
+    // preFlight: Return a small default so parent sizers constrain our height
+    // instead of expanding to fit full content. Without this, DoGetBestSize
+    // iterates children and returns m_content's full height (since m_windowSizer
+    // is null — SetSizer delegates to the content panel). This inflates the
+    // reported size and prevents the inner scrollbar from ever appearing.
+    wxSize DoGetBestSize() const override { return wxSize(20, 20); }
+
 private:
     void OnSize(wxSizeEvent &event);
     void OnScroll(wxScrollEvent &event);

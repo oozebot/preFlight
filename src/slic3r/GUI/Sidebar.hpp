@@ -98,6 +98,9 @@ public:
     // Force content rebuild (e.g., after config change that affects tab visibility)
     void RebuildContent();
 
+    // Update visibility of rows, groups, and sections without rebuilding
+    void UpdateSidebarVisibility();
+
 protected:
     // Tab definition - subclasses return a vector of these
     struct TabDefinition
@@ -134,6 +137,9 @@ protected:
     // Optional: called before content is destroyed during RebuildContent()
     // Subclasses should override to clear their m_setting_controls map
     virtual void ClearSettingControls() {}
+
+    // Show/hide rows based on sidebar_visibility config (subclasses override to iterate m_setting_controls)
+    virtual void UpdateRowVisibility() {}
 
     // Access for subclasses
     Plater *GetPlater() const { return m_plater; }
@@ -186,18 +192,19 @@ private:
 
     Plater *m_plater;
     wxBoxSizer *m_main_sizer{nullptr};
+    ScrollablePanel *m_scroll_area{nullptr}; // Single scroll area for all sections
 
-    // Tab state - each tab is a CollapsibleSection with scrollable content
+    // Tab state - each tab is a non-collapsible section header with content
     struct TabState
     {
         TabDefinition definition;
         CollapsibleSection *section{nullptr};
-        ScrollablePanel *scroll_area{nullptr};
+        wxPanel *content_container{nullptr}; // Plain panel inside section for content parenting
         wxPanel *content{nullptr};
         bool content_built{false};
     };
     std::vector<TabState> m_tabs;
-    int m_active_tab_index{0};
+    int m_active_tab_index{0}; // Only used temporarily during EnsureContentBuilt()
 };
 
 /**
@@ -274,11 +281,15 @@ private:
         wxWindow *undo_icon{nullptr};
         wxWindow *label_text{nullptr};
         std::string original_value;
+        wxSizer *row_sizer{nullptr};    // The row's top-level sizer (for show/hide)
+        wxSizer *parent_sizer{nullptr}; // The group sizer containing this row
     };
     std::map<std::string, SettingUIElements> m_setting_controls;
 
     // Flag to prevent cascading events during RefreshFromConfig
     bool m_disable_update{false};
+
+    void UpdateRowVisibility() override;
 };
 
 /**
@@ -367,8 +378,12 @@ private:
         wxWindow *undo_icon{nullptr};
         wxWindow *label_text{nullptr};
         std::string original_value;
+        wxSizer *row_sizer{nullptr};    // The row's top-level sizer (for show/hide)
+        wxSizer *parent_sizer{nullptr}; // The group sizer containing this row
     };
     std::map<std::string, SettingUIElements> m_setting_controls;
+
+    void UpdateRowVisibility() override;
 
     // Preserved original values that persist across rebuilds
     // Used to maintain undo state when content is rebuilt (e.g., after extruder count change)
@@ -456,6 +471,8 @@ private:
         ::CheckBox *enable_checkbox{nullptr}; // For nullable options
         std::string original_value;
         std::string last_meaningful_value; // Last non-nil value
+        wxSizer *row_sizer{nullptr};       // The row's top-level sizer (for show/hide)
+        wxSizer *parent_sizer{nullptr};    // The group sizer containing this row
     };
     std::map<std::string, SettingUIElements> m_setting_controls;
 
@@ -464,6 +481,8 @@ private:
 
     // Flag to prevent cascading events during RefreshFromConfig
     bool m_disable_update{false};
+
+    void UpdateRowVisibility() override;
 };
 
 /**
@@ -481,6 +500,7 @@ public:
     void SetPresetComboBox(PlaterPresetComboBox *combo);
     void UpdateFromConfig();
     void RebuildContent();
+    void UpdateSidebarVisibility();
 
     void msw_rescale();
     void sys_color_changed();
@@ -581,6 +601,9 @@ public:
 
     // Rebuild settings panels (call when sidebar visibility settings change)
     void rebuild_settings_panels();
+
+    // Update sidebar visibility without rebuilding (show/hide rows, groups, sections in-place)
+    void update_sidebar_visibility();
 
     // Refresh the sidebar settings panel for the given preset type (Tab -> Sidebar sync)
     void refresh_settings_panel(Preset::Type type);

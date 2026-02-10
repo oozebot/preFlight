@@ -51,7 +51,8 @@ LoadStepDialog::LoadStepDialog(wxWindow *parent, const std::string &filename, do
 #ifdef _WIN32
     wxGetApp().UpdateDarkUI(this);
 #else
-    //SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+    // preFlight: apply theme background on Linux/macOS (UpdateDarkUI is Windows-only)
+    SetBackgroundColour(wxGetApp().get_window_default_clr());
 #endif
     const wxFont &font = wxGetApp().normal_font();
     SetFont(font);
@@ -220,8 +221,7 @@ void LoadStepDialog::add_params(wxSizer *sizer)
     m_linear_precision_val->SetToolTip(tooltip(m_linear_precision_sl));
 
     m_linear_precision_val->Bind(wxEVT_TEXT_ENTER,
-                                 [process_value_change, this](wxCommandEvent &e)
-                                 {
+                                 [process_value_change, this](wxCommandEvent &e) {
                                      process_value_change(m_params.linear, m_linear_precision_val,
                                                           m_linear_precision_slider, m_linear_precision_sl);
                                  });
@@ -258,8 +258,7 @@ void LoadStepDialog::add_params(wxSizer *sizer)
     m_angle_precision_val->SetToolTip(tooltip(m_angle_precision_sl));
 
     m_angle_precision_val->Bind(wxEVT_TEXT_ENTER,
-                                [process_value_change, this](wxCommandEvent &e)
-                                {
+                                [process_value_change, this](wxCommandEvent &e) {
                                     process_value_change(m_params.angle, m_angle_precision_val,
                                                          m_angle_precision_slider, m_angle_precision_sl);
                                 });

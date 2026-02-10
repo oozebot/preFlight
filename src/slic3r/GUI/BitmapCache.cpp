@@ -464,12 +464,62 @@ wxBitmapBundle *BitmapCache::from_svg(const std::string &bitmap_name, unsigned t
 
     replaces["#ButtonBG"] = dark_mode ? "#4E4E4E" : "#828282";
 
+#ifdef _WIN32
+    // Windows: wxBitmapBundle::FromSVG() works natively via WIC/Direct2D
     std::string str;
     nsvgGetDataFromFileWithReplace(Slic3r::var(bitmap_name + ".svg").c_str(), str, replaces);
     if (str.empty())
         return nullptr;
 
     return insert_bndl(bitmap_key, str.data(), target_width, target_height);
+#else
+    // preFlight: Linux/Mac - wxBitmapBundle::FromSVG() is unreliable on non-Windows platforms.
+    // Rasterize with NanoSVG directly for crisp rendering.
+    NSVGimage *image = nsvgParseFromFileWithReplace(Slic3r::var(bitmap_name + ".svg").c_str(), "px", 96.0f, replaces);
+    if (image == nullptr)
+        return nullptr;
+
+    float svg_scale = target_height != 0  ? (float) target_height / image->height
+                      : target_width != 0 ? (float) target_width / image->width
+                                          : 1;
+
+    int width = (int) (svg_scale * image->width + 0.5f);
+    int height = (int) (svg_scale * image->height + 0.5f);
+    int n_pixels = width * height;
+    if (n_pixels <= 0)
+    {
+        ::nsvgDelete(image);
+        return nullptr;
+    }
+
+    NSVGrasterizer *rast = ::nsvgCreateRasterizer();
+    if (rast == nullptr)
+    {
+        ::nsvgDelete(image);
+        return nullptr;
+    }
+
+    std::vector<unsigned char> data(n_pixels * 4, 0);
+    ::nsvgRasterize(rast, image, 0, 0, svg_scale, data.data(), width, height, width * 4);
+    ::nsvgDeleteRasterizer(rast);
+    ::nsvgDelete(image);
+
+    // Convert RGBA to wxImage -> wxBitmap -> wxBitmapBundle
+    wxImage wximg(width, height);
+    wximg.InitAlpha();
+    unsigned char *rgb = wximg.GetData();
+    unsigned char *alpha = wximg.GetAlpha();
+    const unsigned char *src = data.data();
+    for (int i = 0; i < n_pixels; ++i)
+    {
+        *rgb++ = *src++;
+        *rgb++ = *src++;
+        *rgb++ = *src++;
+        *alpha++ = *src++;
+    }
+
+    return insert_bndl(bitmap_key, wxImage_to_wxBitmap_with_alpha(std::move(wximg)));
+#endif
 }
 
 wxBitmapBundle *BitmapCache::from_png(const std::string &bitmap_name, unsigned width, unsigned height)

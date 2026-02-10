@@ -1,6 +1,6 @@
 @REM /|/ Copyright (c) preFlight 2025+ oozeBot, LLC
 @REM /|/
-@REM /|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
+@REM /|/ Released under AGPLv3 or higher
 @REM /|/
 @REM Ninja-based build script for preFlight (generates compile_commands.json)
 @REM Prerequisites: Run build_win.bat -s deps first to build dependencies

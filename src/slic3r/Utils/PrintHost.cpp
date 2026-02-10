@@ -63,6 +63,8 @@ PrintHost *PrintHost::get_print_host(DynamicPrintConfig *config)
         {
         case htOctoPrint:
             return new OctoPrint(config);
+        case htRapid:
+            return new Duet(config); // oozeBot Rapid uses Duet protocol
         case htDuet:
             return new Duet(config);
         case htFlashAir:

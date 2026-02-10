@@ -21,6 +21,8 @@
 #include "DarkMode.hpp"
 #include <uxtheme.h>
 #pragma comment(lib, "uxtheme.lib")
+#elif defined(__WXGTK__)
+#include <gtk/gtk.h>
 #endif
 #include "OG_CustomCtrl.hpp"
 #include "Widgets/FlatStaticBox.hpp"
@@ -489,6 +491,12 @@ void OptionsGroup::activate_line(Line &line)
     }
 
     const std::vector<Option> &option_set = line.get_options();
+#ifdef __linux__
+    // preFlight: Safety guard — rapid tab switching on GTK can corrupt Line state,
+    // leaving the options vector empty. Skip the line to prevent a crash.
+    if (option_set.empty())
+        return;
+#endif
     bool is_legend_line = option_set.front().opt.gui_type == ConfigOptionDef::GUIType::legend;
 
     if (!custom_ctrl && m_use_custom_ctrl)
@@ -715,9 +723,18 @@ bool OptionsGroup::activate(std::function<void()> throw_if_canceled /* = [](){}*
             // If sidebar checkbox is enabled, use space as title and overlay our own header
             wxString box_title = m_enable_sidebar_checkbox ? " " : _(title);
             stb = new FlatStaticBox(m_parent, wxID_ANY, box_title);
-            if (!wxOSX)
-                stb->SetBackgroundStyle(wxBG_STYLE_PAINT);
+#ifdef _WIN32
+            // Windows only: wxBG_STYLE_PAINT needed for MSWWindowProc border painting.
+            // On GTK3, this blocks our g_signal_connect_after draw callback.
+            stb->SetBackgroundStyle(wxBG_STYLE_PAINT);
+#endif
+#ifdef __WXGTK__
+            // GTK3: use normal font to prevent child widgets from inheriting bold.
+            // The OnPaint handler in FlatStaticBox draws the label bold if needed.
+            stb->SetFont(wxGetApp().normal_font());
+#else
             stb->SetFont(wxOSX ? wxGetApp().normal_font() : wxGetApp().bold_font());
+#endif
             wxGetApp().UpdateDarkUI(stb);
 
             // Create checkbox overlay for sidebar visibility if enabled
@@ -749,6 +766,21 @@ bool OptionsGroup::activate(std::function<void()> throw_if_canceled /* = [](){}*
                 label_text->SetFont(wxOSX ? wxGetApp().normal_font() : wxGetApp().bold_font());
                 label_text->SetBackgroundColour(stb->GetBackgroundColour());
                 wxGetApp().UpdateDarkUI(label_text);
+#ifdef __WXGTK__
+                // Force the label to hold its full text width — GTK's GtkLabel
+                // may wrap or truncate if not given an explicit minimum size.
+                {
+                    wxSize textSz = label_text->GetTextExtent(_(title));
+                    label_text->SetMinSize(wxSize(textSz.GetWidth() + 2, textSz.GetHeight()));
+                    GtkWidget *labelGtk = static_cast<GtkWidget *>(label_text->GetHandle());
+                    if (labelGtk && GTK_IS_LABEL(labelGtk))
+                    {
+                        gtk_label_set_line_wrap(GTK_LABEL(labelGtk), FALSE);
+                        gtk_label_set_ellipsize(GTK_LABEL(labelGtk), PANGO_ELLIPSIZE_NONE);
+                        gtk_label_set_max_width_chars(GTK_LABEL(labelGtk), -1);
+                    }
+                }
+#endif
 
                 header_sizer->Add(m_sidebar_checkbox, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT,
                                   (wxGetApp().em_unit() * 4) / 10);
@@ -758,11 +790,23 @@ bool OptionsGroup::activate(std::function<void()> throw_if_canceled /* = [](){}*
                 m_header_panel->SetSizer(header_sizer);
                 m_header_panel->Fit();
 
+                // Explicitly compute the needed width: checkbox + gap + label text + gap.
+                // Fit() may undersize if the checkbox isn't realized yet on GTK.
+                int cb_gap = (wxGetApp().em_unit() * 4) / 10;
+                int label_gap = wxGetApp().em_unit() / 3;
+                wxSize cbBest = m_sidebar_checkbox->GetBestSize();
+                wxSize txtExt = label_text->GetTextExtent(_(title));
+                int needed_w = cbBest.GetWidth() + cb_gap + txtExt.GetWidth() + label_gap;
+                int needed_h = std::max(cbBest.GetHeight(), txtExt.GetHeight());
+                if (needed_w > m_header_panel->GetSize().GetWidth())
+                    m_header_panel->SetSize(needed_w, needed_h);
+                m_header_panel->SetMinSize(wxSize(needed_w, needed_h));
+
                 // Calculate position to center header on the top border line
                 // The static box border is drawn at approximately textHeight/2 from the top
                 // We want our header centered on that border line
                 int header_height = m_header_panel->GetSize().GetHeight();
-                int label_height = label_text->GetSize().GetHeight();
+                int label_height = txtExt.GetHeight();
                 int border_y = label_height / 2;                // Where the top border line is drawn
                 int y_pos = border_y - (header_height / 2) + 1; // +1 for fine tuning
 
@@ -771,6 +815,12 @@ bool OptionsGroup::activate(std::function<void()> throw_if_canceled /* = [](){}*
 
                 // Raise the header panel to ensure it's on top of the static box border
                 m_header_panel->Raise();
+#ifdef __WXGTK__
+                // preFlight: tell FlatStaticBox about the header panel so the draw
+                // handler can redraw it unclipped (GtkFrame mismanages its allocation).
+                if (auto *flat_stb = dynamic_cast<FlatStaticBox *>(stb))
+                    flat_stb->SetHeaderPanel(m_header_panel);
+#endif
 
                 // Bind to paint event to keep header on top when static box redraws
                 // Use CallAfter to ensure Raise happens after paint completes
@@ -798,6 +848,7 @@ bool OptionsGroup::activate(std::function<void()> throw_if_canceled /* = [](){}*
                           {
                               if (m_header_panel && m_header_panel->IsShownOnScreen())
                               {
+                                  m_header_panel->Fit();
                                   m_header_panel->SetPosition(wxPoint(8, y_pos));
                                   m_header_panel->Raise();
                               }
@@ -808,6 +859,12 @@ bool OptionsGroup::activate(std::function<void()> throw_if_canceled /* = [](){}*
         else
             stb = nullptr;
         sizer = (staticbox ? new wxStaticBoxSizer(stb, wxVERTICAL) : new wxBoxSizer(wxVERTICAL));
+#ifdef __WXGTK__
+        // preFlight: GtkFrame label is removed in FlatStaticBox so content starts at top.
+        // Add top padding so controls don't overlap the custom-drawn border.
+        if (staticbox)
+            sizer->AddSpacer(wxGetApp().em_unit());
+#endif
 
         auto num_columns = 1U;
         size_t grow_col = 1;
@@ -943,13 +1000,13 @@ void OptionsGroup::set_all_rows_sidebar_visible(bool visible)
     // Refresh the custom ctrl to update checkbox display
     custom_ctrl->Refresh();
 
-    // Trigger sidebar rebuild to reflect visibility changes
+    // Update sidebar visibility in-place (show/hide rows, groups, sections)
     // Use CallAfter to avoid potential issues during event handling
     wxTheApp->CallAfter(
         []()
         {
             if (wxGetApp().plater())
-                wxGetApp().sidebar().rebuild_settings_panels();
+                wxGetApp().sidebar().update_sidebar_visibility();
         });
 }
 

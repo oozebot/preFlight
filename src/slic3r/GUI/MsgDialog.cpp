@@ -58,7 +58,8 @@ MsgDialog::MsgDialog(wxWindow *parent, const wxString &title, const wxString &he
     , content_sizer(new wxBoxSizer(wxVERTICAL))
     , btn_sizer(new wxBoxSizer(wxHORIZONTAL))
 {
-#ifdef __APPLE__
+#ifndef _WIN32
+    // preFlight: apply theme background on Linux/macOS (UpdateDarkUI is Windows-only)
     this->SetBackgroundColour(wxGetApp().get_window_default_clr());
 #endif
     boldfont.SetWeight(wxFONTWEIGHT_BOLD);
@@ -311,8 +312,7 @@ WarningDialog::WarningDialog(wxWindow *parent, const wxString &message, const wx
     finalize();
 }
 
-#ifdef _WIN32
-// MessageDialog
+// MessageDialog - preFlight: compiled on all platforms for consistent theming
 
 MessageDialog::MessageDialog(wxWindow *parent, const wxString &message, const wxString &caption /* = wxEmptyString*/,
                              long style /* = wxOK*/)
@@ -322,7 +322,6 @@ MessageDialog::MessageDialog(wxWindow *parent, const wxString &message, const wx
     add_msg_content(this, content_sizer, HtmlContent{get_wraped_wxString(message)});
     finalize();
 }
-#endif
 
 // RichMessageDialogBase
 

@@ -29,6 +29,10 @@ public:
     // returns true if path to preFlight.desktop is stored in App Config and existence of desktop file.
     // Does not check if desktop file leads to this binary or existence of icons and viewer desktop file.
     static bool is_integrated();
+    // Returns true if desktop integration exists but the Exec= path in the
+    // .desktop file does not match the currently running binary.  Used to
+    // prompt the user to migrate desktop integration after an update.
+    static bool needs_path_update();
     // true if appimage
     static bool integration_possible();
     // Creates Desktop files and icons for both preFlight and GcodeViewer.

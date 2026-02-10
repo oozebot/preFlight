@@ -31,9 +31,9 @@ CheckBox::CheckBox(wxWindow *parent, const wxString &name)
     Bind(wxEVT_LEAVE_WINDOW, &CheckBox::updateBitmap, this);
 #endif
 
-    // Set initial colors to match parent's background
-    if (wxWindow *p = GetParent())
-        SetBackgroundColour(p->GetBackgroundColour());
+    // Set initial background color: use the app's themed default to ensure
+    // correct color on GTK3 where parent containers may not have dark bg set yet.
+    SetBackgroundColour(Slic3r::GUI::wxGetApp().get_window_default_clr());
 
     bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
     SetForegroundColour(is_dark ? UIColors::PanelForegroundDark() : UIColors::PanelForegroundLight());
@@ -67,9 +67,8 @@ void CheckBox::sys_color_changed()
     m_on_focused.sys_color_changed();
     m_off_focused.sys_color_changed();
 
-    // Update colors to match parent's background (inherited from theme)
-    if (wxWindow *parent = GetParent())
-        SetBackgroundColour(parent->GetBackgroundColour());
+    // Update background to app's themed default color
+    SetBackgroundColour(Slic3r::GUI::wxGetApp().get_window_default_clr());
 
     bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
     SetForegroundColour(is_dark ? UIColors::PanelForegroundDark() : UIColors::PanelForegroundLight());

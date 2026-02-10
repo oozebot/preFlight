@@ -1,5 +1,23 @@
 # preFlight Changelog
 
+## v0.9.2
+
+### New Features
+- **Linux Support**: preFlight now runs natively on Linux with the full preFlight experience and single-file AppImage packaging — download and run, no install needed
+- **Responsive Tab Bar**: Settings buttons auto-collapse into a single "Settings" dropdown when the tab bar is narrow (e.g., long printer name, small window)
+- **Continuous Scrollable Sidebar**: Flattened sub-tabs into a single scrollable list where all setting groups are visible simultaneously
+
+### UI/Theme Improvements
+- Smoother window dragging on high-DPI displays by pausing GL canvas rendering during drag
+- Custom themed menus and tab bar on Linux (GTK3), matching the Windows experience
+
+### Bug Fixes
+- Fix use-after-free crash in sidebar dead-space click handler binding
+- Fix standalone RRF (Duet) machine limits retrieval for non-SBC boards
+
+### Known Limitations
+- Linux build supports dark mode only — light mode is not yet available
+
 ## v0.9.1
 
 ### New Features

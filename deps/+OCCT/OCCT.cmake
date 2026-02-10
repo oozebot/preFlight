@@ -23,4 +23,5 @@ add_cmake_project(OCCT
         # - DataExchange: STEP reader (STEPCAFControl_Reader)
         -DBUILD_MODULE_Draw=OFF
         -DBUILD_MODULE_Visualization=OFF
+        -DBUILD_MODULE_DETools=OFF  # ExpToCasExe has static link order bug on Linux; not needed by preFlight
 )

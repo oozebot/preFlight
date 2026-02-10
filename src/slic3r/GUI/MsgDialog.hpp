@@ -254,8 +254,23 @@ public:
     }
     ~StaticLine() {}
 };
+#else
+// just a wrapper for wxStaticLine to use the same code on all platforms
+class StaticLine : public wxStaticLine
+{
+public:
+    StaticLine(wxWindow *parent, wxWindowID id = wxID_ANY, const wxPoint &pos = wxDefaultPosition,
+               const wxSize &size = wxDefaultSize, long style = wxLI_HORIZONTAL,
+               const wxString &name = wxString::FromAscii(wxStaticLineNameStr))
+        : wxStaticLine(parent, id, pos, size, style, name)
+    {
+    }
+    ~StaticLine() {}
+};
+#endif
 
-// Generic message dialog, used intead of wxMessageDialog
+// preFlight: use custom themed MsgDialog-based dialogs on all platforms
+// (previously Linux/macOS used native wxMessageDialog/wxRichMessageDialog which ignored theming)
 class MessageDialog : public MsgDialog
 {
 public:
@@ -270,44 +285,6 @@ public:
 };
 
 using RichMessageDialog = RichMessageDialogBase;
-
-#else
-// just a wrapper for wxStaticLine to use the same code on all platforms
-class StaticLine : public wxStaticLine
-{
-public:
-    StaticLine(wxWindow *parent, wxWindowID id = wxID_ANY, const wxPoint &pos = wxDefaultPosition,
-               const wxSize &size = wxDefaultSize, long style = wxLI_HORIZONTAL,
-               const wxString &name = wxString::FromAscii(wxStaticLineNameStr))
-        : wxStaticLine(parent, id, pos, size, style, name)
-    {
-    }
-    ~StaticLine() {}
-};
-// just a wrapper to wxMessageBox to use the same code on all platforms
-class MessageDialog : public wxMessageDialog
-{
-public:
-    MessageDialog(wxWindow *parent, const wxString &message, const wxString &caption = wxEmptyString, long style = wxOK)
-        : wxMessageDialog(parent, get_wraped_wxString(message), caption, style)
-    {
-    }
-    ~MessageDialog() {}
-};
-
-// just a wrapper to wxRichMessageBox to use the same code on all platforms
-class RichMessageDialog : public wxRichMessageDialog
-{
-public:
-    RichMessageDialog(wxWindow *parent, const wxString &message, const wxString &caption = wxEmptyString,
-                      long style = wxOK)
-        : wxRichMessageDialog(parent, get_wraped_wxString(message), caption, style)
-    {
-        this->SetEscapeId(wxID_CANCEL);
-    }
-    ~RichMessageDialog() {}
-};
-#endif
 
 class HtmlCapableRichMessageDialog : public RichMessageDialogBase
 {

@@ -187,6 +187,10 @@ static std::shared_ptr<ConfigOptionsGroup> create_options_tab(const wxString &ti
 #ifdef _WIN32
     wxGetApp().UpdateDarkUI(tab);
     wxGetApp().UpdateDarkUI(scrolled);
+#else
+    // preFlight: apply theme background on Linux/macOS
+    tab->SetBackgroundColour(wxGetApp().get_window_default_clr());
+    scrolled->SetBackgroundColour(wxGetApp().get_window_default_clr());
 #endif
 
     // Sizer in the scrolled area
@@ -275,7 +279,8 @@ void PreferencesDialog::build()
     if (GetHWND())
         wxGetApp().UpdateDarkUI(this);
 #else
-    //SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+    // preFlight: apply theme background on Linux/macOS (UpdateDarkUI is Windows-only)
+    SetBackgroundColour(wxGetApp().get_window_default_clr());
 #endif
     const wxFont &font = wxGetApp().normal_font();
     SetFont(font);
@@ -291,6 +296,8 @@ void PreferencesDialog::build()
 #else
     tabs = new wxNotebook(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                           wxNB_TOP | wxTAB_TRAVERSAL | wxNB_NOPAGETHEME | wxNB_DEFAULT);
+    // preFlight: theme the notebook tab bar on Linux/macOS
+    tabs->SetBackgroundColour(wxGetApp().get_window_default_clr());
 #ifdef __linux__
     tabs->Bind(wxEVT_NOTEBOOK_PAGE_CHANGED,
                [this](wxBookCtrlEvent &e)
@@ -717,8 +724,10 @@ void PreferencesDialog::build()
     for (int id : {wxID_OK, wxID_CANCEL})
     {
         wxWindow *btn = FindWindowById(id, this);
+#ifdef _WIN32
         if (btn && btn->GetHWND())
             wxGetApp().UpdateDarkUI(static_cast<wxButton *>(btn));
+#endif
     }
 
     sizer->Add(buttons, 0, wxALIGN_CENTER_HORIZONTAL | wxBOTTOM | wxTOP, em);

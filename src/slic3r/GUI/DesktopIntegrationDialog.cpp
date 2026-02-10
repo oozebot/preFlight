@@ -238,7 +238,7 @@ bool create_desktop_file(const std::string &path, const std::string &data)
     BOOST_LOG_TRIVIAL(debug) << "Desktop file NOT created.";
     return false;
 }
-} // namespace integratec_desktop_internal
+} // namespace
 
 // methods that actually do / undo desktop integration. Static to be accesible from anywhere.
 bool DesktopIntegrationDialog::is_integrated()
@@ -255,6 +255,68 @@ bool DesktopIntegrationDialog::is_integrated()
     struct stat buffer;
     return (stat(path.c_str(), &buffer) == 0);
 }
+bool DesktopIntegrationDialog::needs_path_update()
+{
+    if (!is_integrated())
+        return false;
+
+    const AppConfig *app_config = wxGetApp().app_config;
+    std::string desktop_path(app_config->get("desktop_integration_app_path"));
+    if (desktop_path.empty())
+        return false;
+
+    // Read the .desktop file and extract the Exec= line
+    boost::nowide::ifstream desktop_file(desktop_path);
+    if (!desktop_file.is_open())
+        return false;
+
+    std::string exec_path_in_file;
+    std::string line;
+    while (std::getline(desktop_file, line))
+    {
+        if (line.rfind("Exec=", 0) == 0)
+        {
+            // Exec="path/to/binary" %F  or  Exec=path/to/binary %F
+            exec_path_in_file = line.substr(5); // strip "Exec="
+            // Remove %F, %f, %U, %u trailing args
+            auto pct = exec_path_in_file.find(" %");
+            if (pct != std::string::npos)
+                exec_path_in_file = exec_path_in_file.substr(0, pct);
+            // Strip surrounding quotes
+            if (exec_path_in_file.size() >= 2 && exec_path_in_file.front() == '"' && exec_path_in_file.back() == '"')
+                exec_path_in_file = exec_path_in_file.substr(1, exec_path_in_file.size() - 2);
+            break;
+        }
+    }
+
+    if (exec_path_in_file.empty())
+        return false;
+
+    // Determine the current executable path (same logic as perform_desktop_integration)
+    std::string current_path;
+    const char *appimage_env = std::getenv("APPIMAGE");
+    if (appimage_env)
+    {
+        try
+        {
+            current_path = boost::filesystem::canonical(boost::filesystem::path(appimage_env)).string();
+        }
+        catch (std::exception &)
+        {
+            return false;
+        }
+    }
+    else
+    {
+        current_path = boost::dll::program_location().string();
+    }
+    current_path = escape_string(current_path);
+
+    BOOST_LOG_TRIVIAL(debug) << "Desktop integration path check: file=" << exec_path_in_file
+                             << " current=" << current_path;
+    return exec_path_in_file != current_path;
+}
+
 bool DesktopIntegrationDialog::integration_possible()
 {
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__;
@@ -345,12 +407,12 @@ void DesktopIntegrationDialog::perform_desktop_integration()
     // iterate thru target_candidates to find icons folder
     for (size_t i = 0; i < target_candidates.size(); ++i)
     {
-        // Copy icon preFlight.png from resources_dir()/icons to target_dir_icons/icons/
+        // preFlight: Copy SVG icon from resources_dir()/icons to target_dir_icons/icons/
         if (contains_path_dir(target_candidates[i], "icons"))
         {
             target_dir_icons = target_candidates[i];
-            std::string icon_path = GUI::format("%1%/icons/preFlight.png", resources_dir());
-            std::string dest_path = GUI::format("%1%/icons/%2%preFlight%3%.png", target_dir_icons, icon_theme_path,
+            std::string icon_path = GUI::format("%1%/icons/preFlight.svg", resources_dir());
+            std::string dest_path = GUI::format("%1%/icons/%2%preFlight%3%.svg", target_dir_icons, icon_theme_path,
                                                 version_suffix);
             if (copy_icon(icon_path, dest_path))
                 break; // success
@@ -364,8 +426,8 @@ void DesktopIntegrationDialog::perform_desktop_integration()
             create_path(into_u8(wxFileName::GetHomeDir()), ".local/share/icons" + icon_theme_dirs);
             // copy icon
             target_dir_icons = GUI::format("%1%/.local/share", wxFileName::GetHomeDir());
-            std::string icon_path = GUI::format("%1%/icons/preFlight.png", resources_dir());
-            std::string dest_path = GUI::format("%1%/icons/%2%preFlight%3%.png", target_dir_icons, icon_theme_path,
+            std::string icon_path = GUI::format("%1%/icons/preFlight.svg", resources_dir());
+            std::string dest_path = GUI::format("%1%/icons/%2%preFlight%3%.svg", target_dir_icons, icon_theme_path,
                                                 version_suffix);
             if (!contains_path_dir(target_dir_icons, "icons") || !copy_icon(icon_path, dest_path))
             {
@@ -381,7 +443,7 @@ void DesktopIntegrationDialog::perform_desktop_integration()
     else
         // save path to icon
         app_config->set("desktop_integration_icon_slicer_path",
-                        GUI::format("%1%/icons/%2%preFlight%3%.png", target_dir_icons, icon_theme_path,
+                        GUI::format("%1%/icons/%2%preFlight%3%.svg", target_dir_icons, icon_theme_path,
                                     version_suffix));
 
     // desktop file
@@ -471,8 +533,8 @@ void DesktopIntegrationDialog::perform_desktop_integration()
         // Icon
         if (!target_dir_icons.empty())
         {
-            std::string icon_path = GUI::format("%1%/icons/preFlight-gcodeviewer_192px.png", resources_dir());
-            std::string dest_path = GUI::format("%1%/icons/%2%preFlight-gcodeviewer%3%.png", target_dir_icons,
+            std::string icon_path = GUI::format("%1%/icons/preFlight-gcodeviewer.svg", resources_dir());
+            std::string dest_path = GUI::format("%1%/icons/%2%preFlight-gcodeviewer%3%.svg", target_dir_icons,
                                                 icon_theme_path, version_suffix);
             if (copy_icon(icon_path, dest_path))
                 // save path to icon
@@ -508,7 +570,26 @@ void DesktopIntegrationDialog::perform_desktop_integration()
                 _L("Performing desktop integration failed - could not create Gcodeviewer desktop file. preFlight desktop file was probably created successfully."));
         }
     }
-    wxGetApp().plater()->get_notification_manager()->push_notification(NotificationType::DesktopIntegrationSuccess);
+    // preFlight: Also create a desktop shortcut on ~/Desktop/
+    {
+        std::string desktop_dir = GUI::format("%1%/Desktop", wxFileName::GetHomeDir());
+        if (contains_path_dir(into_u8(wxFileName::GetHomeDir()), "Desktop"))
+        {
+            std::string desktop_shortcut_path = GUI::format("%1%/Desktop/preFlight%2%.desktop",
+                                                            wxFileName::GetHomeDir(), version_suffix);
+            if (create_desktop_file(desktop_shortcut_path, desktop_file))
+            {
+                // Mark as executable so the DE treats it as a launchable shortcut
+                chmod(desktop_shortcut_path.c_str(), 0755);
+                app_config->set("desktop_integration_shortcut_path", desktop_shortcut_path);
+                BOOST_LOG_TRIVIAL(debug) << "Desktop shortcut created: " << desktop_shortcut_path;
+            }
+        }
+    }
+
+    // preFlight: plater may not exist yet if called during early startup
+    if (wxGetApp().plater())
+        wxGetApp().plater()->get_notification_manager()->push_notification(NotificationType::DesktopIntegrationSuccess);
 }
 void DesktopIntegrationDialog::undo_desktop_integration()
 {
@@ -545,6 +626,13 @@ void DesktopIntegrationDialog::undo_desktop_integration()
             BOOST_LOG_TRIVIAL(debug) << "removing " << path;
             std::remove(path.c_str());
         }
+    }
+    // preFlight: Remove desktop shortcut
+    path = std::string(app_config->get("desktop_integration_shortcut_path"));
+    if (!path.empty())
+    {
+        BOOST_LOG_TRIVIAL(debug) << "removing " << path;
+        std::remove(path.c_str());
     }
     wxGetApp().plater()->get_notification_manager()->push_notification(NotificationType::UndoDesktopIntegrationSuccess);
 }
@@ -728,7 +816,9 @@ void DesktopIntegrationDialog::perform_downloader_desktop_integration()
     int r = system(command.c_str());
     BOOST_LOG_TRIVIAL(debug) << "system result: " << r;
 
-    wxGetApp().plater()->get_notification_manager()->push_notification(NotificationType::DesktopIntegrationSuccess);
+    // preFlight: plater may not exist yet if called during early startup
+    if (wxGetApp().plater())
+        wxGetApp().plater()->get_notification_manager()->push_notification(NotificationType::DesktopIntegrationSuccess);
 }
 void DesktopIntegrationDialog::undo_downloader_registration()
 {
@@ -821,7 +911,6 @@ void DesktopIntegrationDialog::find_all_desktop_files(std::vector<boost::filesys
                 results.emplace_back(std::move(file_path));
             }
     }
-}
 }
 
 void DesktopIntegrationDialog::remove_desktop_file_list(const std::vector<boost::filesystem::path> &list,

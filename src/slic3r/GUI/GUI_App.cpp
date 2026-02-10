@@ -62,6 +62,8 @@
 #include <wx/dialog.h>
 #include <wx/textctrl.h>
 #include <wx/splash.h>
+#include <wx/dcbuffer.h>
+#include <wx/graphics.h>
 #include <wx/fontutil.h>
 #include <wx/weakref.h>
 
@@ -136,6 +138,9 @@
 // Needed for forcing menu icons back under gtk2 and gtk3
 #if defined(__WXGTK20__) || defined(__WXGTK3__)
 #include <gtk/gtk.h>
+#ifdef GDK_WINDOWING_X11
+#include <gdk/gdkx.h>
+#endif
 #endif
 
 using namespace std::literals;
@@ -171,7 +176,11 @@ public:
     SplashScreen(const wxBitmap &bitmap, long splashStyle, int milliseconds, wxPoint pos = wxDefaultPosition)
         : wxFrame(nullptr, wxID_ANY, wxEmptyString, CalculateCenteredPosition(bitmap, pos),
                   wxSize(bitmap.GetWidth(), bitmap.GetHeight()),
-                  wxBORDER_NONE | wxFRAME_NO_TASKBAR | wxSTAY_ON_TOP | wxFRAME_SHAPED)
+                  wxBORDER_NONE | wxFRAME_NO_TASKBAR | wxSTAY_ON_TOP
+#ifdef __WXMSW__
+                      | wxFRAME_SHAPED // Windows uses UpdateLayeredWindow; Linux uses RGBA visual (SHAPED conflicts)
+#endif
+          )
     {
         wxASSERT(bitmap.IsOk());
 
@@ -235,7 +244,53 @@ public:
             ReleaseDC(NULL, screenDC);
         }
 #else
-        SetBackgroundStyle(wxBG_STYLE_TRANSPARENT);
+        // preFlight: Linux/Mac - paint the splash bitmap with transparency support
+        m_bitmap = bitmap;
+        SetBackgroundStyle(wxBG_STYLE_PAINT);
+
+#ifdef __WXGTK3__
+        // Enable RGBA visual for true window transparency (requires compositor)
+        GtkWidget *widget = static_cast<GtkWidget *>(GetHandle());
+        GdkScreen *screen = gtk_widget_get_screen(widget);
+        GdkVisual *visual = gdk_screen_get_rgba_visual(screen);
+        m_has_alpha = (visual != nullptr);
+        if (m_has_alpha)
+        {
+            gtk_widget_set_visual(widget, visual);
+            gtk_widget_set_app_paintable(widget, TRUE);
+        }
+#endif
+
+        Bind(wxEVT_PAINT,
+             [this](wxPaintEvent &)
+             {
+                 wxAutoBufferedPaintDC dc(this);
+#ifdef __WXGTK3__
+                 if (m_has_alpha)
+                 {
+                     // Clear to fully transparent
+                     auto gc = wxGraphicsContext::Create(dc);
+                     if (gc)
+                     {
+                         wxSize cs = GetClientSize();
+                         gc->SetCompositionMode(wxCOMPOSITION_SOURCE);
+                         gc->SetBrush(wxBrush(wxColour(0, 0, 0, 0)));
+                         gc->DrawRectangle(0, 0, cs.GetWidth(), cs.GetHeight());
+                         gc->SetCompositionMode(wxCOMPOSITION_OVER);
+                         gc->DrawBitmap(m_bitmap, 0, 0, cs.GetWidth(), cs.GetHeight());
+                         delete gc;
+                     }
+                 }
+                 else
+#endif
+                 {
+                     // Fallback: dark background
+                     dc.SetBackground(wxBrush(wxColour(34, 34, 34)));
+                     dc.Clear();
+                     if (m_bitmap.IsOk())
+                         dc.DrawBitmap(m_bitmap, 0, 0, true);
+                 }
+             });
 #endif
 
         // Set up auto-close timer if timeout specified
@@ -262,6 +317,8 @@ public:
 
 private:
     wxTimer m_timer;
+    wxBitmap m_bitmap;
+    bool m_has_alpha{false};
 };
 
 #ifdef __linux__
@@ -1307,6 +1364,17 @@ bool GUI_App::on_init_inner()
         NppDarkMode::SetSystemMenuForApp(new_sys_menu_enabled);
 #endif
 
+#ifdef __linux__
+    // preFlight: Tell GTK to use the dark theme variant for window decorations
+    // (title bar) when the app is in dark mode. Must be set before any dialogs
+    // are shown so that all windows get dark decorations.
+    if (dark_mode())
+    {
+        GtkSettings *gtk_settings = gtk_settings_get_default();
+        g_object_set(gtk_settings, "gtk-application-prefer-dark-theme", TRUE, NULL);
+    }
+#endif
+
     if (is_editor())
     {
         std::string msg = Http::tls_global_init();
@@ -1327,6 +1395,38 @@ bool GUI_App::on_init_inner()
                             dlg.IsCheckBoxChecked() ? Http::tls_system_cert_store() : "");
         }
     }
+
+#if defined(__linux__) && defined(SLIC3R_DESKTOP_INTEGRATION)
+    // preFlight: Desktop integration handling on Linux.
+    if (DesktopIntegrationDialog::is_integrated() && DesktopIntegrationDialog::needs_path_update())
+    {
+        // Integrated but pointing to a different binary — offer to migrate.
+        RichMessageDialog dlg(nullptr,
+                              _L("preFlight desktop integration points to a different version.\n"
+                                 "Would you like to update it to this version?"),
+                              "preFlight", wxICON_QUESTION | wxYES_NO);
+        if (dlg.ShowModal() == wxID_YES)
+        {
+            DesktopIntegrationDialog::perform_desktop_integration();
+        }
+        // No "remember" checkbox — prompt again each launch until they say Yes.
+    }
+    else if (!DesktopIntegrationDialog::is_integrated() && app_config->get("desktop_integration_suppressed") != "yes")
+    {
+        // Not integrated yet — offer first-time integration.
+        RichMessageDialog dlg(nullptr, _L("Would you like to add preFlight to your desktop applications menu?"),
+                              "preFlight", wxICON_QUESTION | wxYES_NO);
+        dlg.ShowCheckBox(_L("Remember my choice"));
+        if (dlg.ShowModal() == wxID_YES)
+        {
+            DesktopIntegrationDialog::perform_desktop_integration();
+        }
+        else if (dlg.IsCheckBoxChecked())
+        {
+            app_config->set("desktop_integration_suppressed", "yes");
+        }
+    }
+#endif
 
     SplashScreen *scrn = nullptr;
     if (app_config->get_bool("show_splash_screen"))
@@ -1434,11 +1534,44 @@ bool GUI_App::on_init_inner()
         if (!bmp.IsOk())
 #endif
         {
-            BitmapCache bmp_cache;
-            wxBitmap *splash_bmp_ptr = bmp_cache.load_svg("preFlight-splash", target_width, 0);
-            if (splash_bmp_ptr != nullptr)
+            // preFlight: Load splash SVG from disk and render with NanoSVG (same quality as Windows path)
+            NSVGimage *image = nsvgParseFromFile(Slic3r::var("preFlight-splash.svg").c_str(), "px", 96.0f);
+            if (image != nullptr)
             {
-                bmp = SplashScreen::MakeBitmap(*splash_bmp_ptr);
+                float svg_scale = static_cast<float>(render_width) / image->width;
+                int width = static_cast<int>(svg_scale * image->width + 0.5f);
+                int height = static_cast<int>(svg_scale * image->height + 0.5f);
+
+                if (width > 0 && height > 0)
+                {
+                    NSVGrasterizer *rast = nsvgCreateRasterizer();
+                    if (rast != nullptr)
+                    {
+                        std::vector<unsigned char> rgba_data(width * height * 4, 0);
+                        nsvgRasterize(rast, image, 0, 0, svg_scale, rgba_data.data(), width, height, width * 4);
+                        nsvgDeleteRasterizer(rast);
+
+                        wxImage wximg(width, height);
+                        wximg.InitAlpha();
+                        unsigned char *rgb = wximg.GetData();
+                        unsigned char *alpha = wximg.GetAlpha();
+                        const unsigned char *src = rgba_data.data();
+                        for (int i = 0; i < width * height; ++i)
+                        {
+                            *rgb++ = *src++;
+                            *rgb++ = *src++;
+                            *rgb++ = *src++;
+                            *alpha++ = *src++;
+                        }
+
+                        int final_width = static_cast<int>(target_width);
+                        int final_height = static_cast<int>(height / supersample + 0.5f);
+                        wximg.Rescale(final_width, final_height, wxIMAGE_QUALITY_HIGH);
+
+                        bmp = SplashScreen::MakeBitmap(wxBitmap(wximg));
+                    }
+                }
+                nsvgDelete(image);
             }
         }
 
@@ -1611,6 +1744,33 @@ bool GUI_App::on_init_inner()
     // hide settings tabs after first Layout
     if (is_editor())
         mainframe->select_tab(size_t(0));
+
+#ifdef __linux__
+    // preFlight: Set _GTK_THEME_VARIANT X11 property on the window to request
+    // dark title bar decorations. This works on distros where
+    // gtk-application-prefer-dark-theme alone isn't enough.
+    if (dark_mode())
+    {
+        GtkWidget *gtk_win = static_cast<GtkWidget *>(mainframe->GetHandle());
+        if (gtk_win)
+        {
+            gtk_widget_realize(gtk_win);
+            GdkWindow *gdk_win = gtk_widget_get_window(gtk_win);
+#ifdef GDK_WINDOWING_X11
+            if (gdk_win && GDK_IS_X11_WINDOW(gdk_win))
+            {
+                Display *xdisplay = GDK_WINDOW_XDISPLAY(gdk_win);
+                Window xwindow = GDK_WINDOW_XID(gdk_win);
+                Atom variant_atom = XInternAtom(xdisplay, "_GTK_THEME_VARIANT", False);
+                Atom utf8_atom = XInternAtom(xdisplay, "UTF8_STRING", False);
+                const char *dark = "dark";
+                XChangeProperty(xdisplay, xwindow, variant_atom, utf8_atom, 8, PropModeReplace,
+                                (const unsigned char *) dark, strlen(dark));
+            }
+#endif
+        }
+    }
+#endif
 
     // Call this check only after appconfig was loaded to mainframe, otherwise there will be duplicity error.
     legacy_app_config_vendor_check();
@@ -2126,6 +2286,50 @@ void GUI_App::UpdateDVCDarkUI(wxDataViewCtrl *dvc, bool highlited /* = false*/)
         dvc->SetAlternateRowColour(m_color_highlight_default);
     if (dvc->GetBorder() != wxBORDER_SIMPLE)
         dvc->SetWindowStyle(dvc->GetWindowStyle() | wxBORDER_SIMPLE);
+#else
+    // On Linux/GTK, wxDataViewCtrl inherits GTK theme colors which don't match
+    // preFlight's UIColors palette. Set background and text colors explicitly.
+    dvc->SetBackgroundColour(highlited ? m_color_highlight_default : m_color_window_default);
+    dvc->SetForegroundColour(m_color_label_default);
+    if (dvc->HasFlag(wxDV_ROW_LINES))
+        dvc->SetAlternateRowColour(m_color_highlight_default);
+
+    // Style the column header to match preFlight's dark theme via GTK CSS.
+    // GTK3 header buttons are children of the GtkTreeView and require screen-level
+    // CSS to override their theme styling. Applied once via static guard.
+    {
+        static bool s_dvc_css_applied = false;
+        if (!s_dvc_css_applied)
+        {
+            s_dvc_css_applied = true;
+            wxColour bg = m_color_window_default;
+            wxColour fg = m_color_label_default;
+            char css_buf[512];
+            snprintf(css_buf, sizeof(css_buf),
+                     ".view header button {"
+                     "  background-image: none;"
+                     "  background-color: #%02x%02x%02x;"
+                     "  color: #%02x%02x%02x;"
+                     "  border: none;"
+                     "  border-bottom: 1px solid #%02x%02x%02x;"
+                     "  font-weight: normal;"
+                     "}"
+                     ".view header button label {"
+                     "  color: #%02x%02x%02x;"
+                     "  font-weight: normal;"
+                     "}",
+                     bg.Red(), bg.Green(), bg.Blue(), fg.Red(), fg.Green(), fg.Blue(), bg.Red(), bg.Green(), bg.Blue(),
+                     fg.Red(), fg.Green(), fg.Blue());
+
+            GtkCssProvider *provider = gtk_css_provider_new();
+            gtk_css_provider_load_from_data(provider, css_buf, -1, nullptr);
+            GdkScreen *screen = gdk_screen_get_default();
+            if (screen)
+                gtk_style_context_add_provider_for_screen(screen, GTK_STYLE_PROVIDER(provider),
+                                                          GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+            g_object_unref(provider);
+        }
+    }
 #endif
 }
 
@@ -4618,9 +4822,10 @@ bool GUI_App::is_account_logged_in() const
 
 bool LogGui::ignorred_message(const wxString &msg)
 {
-    for (const wxString &err : std::initializer_list<wxString>{wxString("cHRM chunk does not match sRGB"),
-                                                               wxString("known incorrect sRGB profile"),
-                                                               wxString("Error running JavaScript")})
+    for (const wxString &err :
+         std::initializer_list<wxString>{wxString("cHRM chunk does not match sRGB"),
+                                         wxString("known incorrect sRGB profile"), wxString("Error running JavaScript"),
+                                         wxString("lost focus even though it didn't have it")})
     {
         if (msg.Contains(err))
             return true;

@@ -202,7 +202,7 @@ BulkExportDialog::BulkExportDialog(const std::vector<std::pair<int, std::optiona
     this->SetFont(wxGetApp().normal_font());
 
 #ifndef __WXMSW__
-    SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+    SetBackgroundColour(wxGetApp().get_window_default_clr());
 #endif // __WXMSW__
 
     wxBoxSizer *topSizer = new wxBoxSizer(wxVERTICAL);

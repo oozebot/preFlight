@@ -85,31 +85,27 @@ bool BitmapTextRenderer::Render(wxRect rect, wxDC *dc, int state)
         xoffset = icon_sz.x + 4;
     }
 
-#ifdef _WIN32
-    // UNIFIED THEMING: Explicitly set text color based on current theme palette
-    // Windows dark mode APIs are always enabled, but we use light/dark color palettes
+    // Set text color based on current theme palette (cross-platform)
     bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
     wxColour text_color = is_dark ? wxColour(250, 250, 250) : wxColour(38, 46, 48);
 
     // For selected items, use appropriate contrast color
     if (state & wxDATAVIEW_CELL_SELECTED)
-    {
-        // Selected items need good contrast - white for dark selection, dark for light selection
         text_color = is_dark ? wxColour(255, 255, 255) : wxColour(38, 46, 48);
-    }
 
     dc->SetTextForeground(text_color);
-    RenderText(m_value.GetText(), xoffset, rect, dc, state & wxDATAVIEW_CELL_SELECTED ? 0 : state);
-#else
+
+#ifndef _WIN32
     {
         wxDataViewCtrl *const view = GetView();
         if (GetAttr().HasFont())
             dc->SetFont(GetAttr().GetEffectiveFont(view->GetFont()));
         else
             dc->SetFont(view->GetFont());
-        RenderText(m_value.GetText(), xoffset, rect, dc, state);
     }
 #endif
+
+    RenderText(m_value.GetText(), xoffset, rect, dc, state & wxDATAVIEW_CELL_SELECTED ? 0 : state);
 
     return true;
 }
@@ -234,19 +230,17 @@ bool BitmapChoiceRenderer::Render(wxRect rect, wxDC *dc, int state)
             rect.height = icon_sz.GetHeight();
     }
 
-#ifdef _WIN32
-    // UNIFIED THEMING: Explicitly set text color based on current theme palette
-    bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
-    wxColour text_color = is_dark ? wxColour(250, 250, 250) : wxColour(38, 46, 48);
+    // Set text color based on current theme palette (cross-platform)
+    {
+        bool is_dark = Slic3r::GUI::wxGetApp().dark_mode();
+        wxColour text_color = is_dark ? wxColour(250, 250, 250) : wxColour(38, 46, 48);
 
-    if (state & wxDATAVIEW_CELL_SELECTED)
-        text_color = is_dark ? wxColour(255, 255, 255) : wxColour(38, 46, 48);
+        if (state & wxDATAVIEW_CELL_SELECTED)
+            text_color = is_dark ? wxColour(255, 255, 255) : wxColour(38, 46, 48);
 
-    dc->SetTextForeground(text_color);
+        dc->SetTextForeground(text_color);
+    }
     RenderText(m_value.GetText(), xoffset, rect, dc, state & wxDATAVIEW_CELL_SELECTED ? 0 : state);
-#else
-    RenderText(m_value.GetText(), xoffset, rect, dc, state);
-#endif
 
     return true;
 }

@@ -8,7 +8,9 @@
 #include "Duet.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <ctime>
+#include <thread>
 #include <boost/filesystem/path.hpp>
 #include <boost/format.hpp>
 #include <boost/log/trivial.hpp>
@@ -109,7 +111,8 @@ bool Duet::upload(PrintHostUpload upload_data, ProgressFn prorgess_fn, ErrorFn e
     if (dsf)
     {
         http.set_put_body(upload_data.source_path);
-        if (connect_msg.empty())
+        // preFlight: Fix inverted condition - send session key when it IS present
+        if (!connect_msg.empty())
             http.header("X-Session-Key", GUI::into_u8(connect_msg));
     }
     else
@@ -379,7 +382,7 @@ int Duet::get_err_code_from_body(const std::string &body) const
 }
 
 bool Duet::send_gcode(const std::string &gcode, std::string &response, wxString &error_msg,
-                      ConnectionType connectionType) const
+                      ConnectionType connectionType, const std::string &session_key) const
 {
     if (connectionType == ConnectionType::error)
     {
@@ -399,6 +402,9 @@ bool Duet::send_gcode(const std::string &gcode, std::string &response, wxString 
     if (dsf)
     {
         http.set_post_body(gcode);
+        // preFlight: Pass session key for authenticated DSF installations
+        if (!session_key.empty())
+            http.header("X-Session-Key", session_key);
     }
 
     http.on_error(
@@ -413,10 +419,40 @@ bool Duet::send_gcode(const std::string &gcode, std::string &response, wxString 
             [&](std::string body, unsigned)
             {
                 BOOST_LOG_TRIVIAL(debug) << boost::format("Duet: GCode '%1%' response: %2%") % gcode % body;
-                response = body;
+                if (dsf)
+                {
+                    // DSF returns the G-code reply text inline
+                    response = body;
+                }
                 success = true;
             })
         .perform_sync();
+
+    // preFlight: For standalone RRF, rr_gcode returns only {"buff": N} (buffer status).
+    // The actual G-code reply text must be fetched separately via GET /rr_reply.
+    if (success && !dsf)
+    {
+        // Brief delay to let firmware process the command and buffer the reply
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+        auto reply_url = (boost::format("%1%rr_reply") % get_base_url()).str();
+        auto reply_http = Http::get(std::move(reply_url));
+        reply_http
+            .on_error(
+                [&](std::string body, std::string error, unsigned status)
+                {
+                    BOOST_LOG_TRIVIAL(error)
+                        << boost::format("Duet: Error fetching rr_reply for '%1%': %2%, HTTP %3%") % gcode % error %
+                               status;
+                })
+            .on_complete(
+                [&](std::string body, unsigned)
+                {
+                    BOOST_LOG_TRIVIAL(debug) << boost::format("Duet: rr_reply for '%1%': %2%") % gcode % body;
+                    response = body;
+                })
+            .perform_sync();
+    }
 
     return success;
 }
@@ -697,49 +733,90 @@ bool Duet::get_machine_limits(wxString &msg, MachineLimitsResult &result) const
     }
 
     bool success = true;
+    bool dsf = (connectionType == ConnectionType::dsf);
     std::string response;
     wxString error;
 
+    // preFlight: Extract session key for DSF authentication
+    std::string session_key = dsf ? GUI::into_u8(connect_msg) : std::string();
+
+    // preFlight: For standalone RRF, rr_reply can return stale/wrong data due to race conditions
+    // with other HTTP clients (e.g. Duet Web Control). We retry each query up to 3 times,
+    // validating the response via parse_mcode_response(). DSF returns replies inline so no retry needed.
+    const int max_attempts = dsf ? 1 : 3;
+
     // Send M566 (jerk) - required
-    if (send_gcode("M566", response, error, connectionType))
+    for (int attempt = 0; attempt < max_attempts; ++attempt)
     {
-        result.m566 = parse_mcode_response(response, "M566");
-    }
-    else
-    {
-        success = false;
+        if (send_gcode("M566", response, error, connectionType, session_key))
+        {
+            result.m566 = parse_mcode_response(response, "M566");
+            if (!result.m566.empty())
+                break;
+        }
+        else
+        {
+            success = false;
+            break; // Connection error, don't retry
+        }
     }
 
     // Send M201 (max acceleration) - required
-    if (send_gcode("M201", response, error, connectionType))
+    for (int attempt = 0; attempt < max_attempts; ++attempt)
     {
-        result.m201 = parse_mcode_response(response, "M201");
-    }
-    else
-    {
-        success = false;
+        if (send_gcode("M201", response, error, connectionType, session_key))
+        {
+            result.m201 = parse_mcode_response(response, "M201");
+            if (!result.m201.empty())
+                break;
+        }
+        else
+        {
+            success = false;
+            break;
+        }
     }
 
     // Send M203 (max feedrate) - required
-    if (send_gcode("M203", response, error, connectionType))
+    for (int attempt = 0; attempt < max_attempts; ++attempt)
     {
-        result.m203 = parse_mcode_response(response, "M203");
-    }
-    else
-    {
-        success = false;
+        if (send_gcode("M203", response, error, connectionType, session_key))
+        {
+            result.m203 = parse_mcode_response(response, "M203");
+            if (!result.m203.empty())
+                break;
+        }
+        else
+        {
+            success = false;
+            break;
+        }
     }
 
     // Send M204 (print/travel acceleration) - optional
-    if (send_gcode("M204", response, error, connectionType))
+    for (int attempt = 0; attempt < max_attempts; ++attempt)
     {
-        result.m204 = parse_mcode_response(response, "M204");
+        if (send_gcode("M204", response, error, connectionType, session_key))
+        {
+            result.m204 = parse_mcode_response(response, "M204");
+            if (!result.m204.empty())
+                break;
+        }
+        else
+            break;
     }
 
     // Send M207 (firmware retraction) - optional
-    if (send_gcode("M207", response, error, connectionType))
+    for (int attempt = 0; attempt < max_attempts; ++attempt)
     {
-        result.m207 = parse_mcode_response(response, "M207");
+        if (send_gcode("M207", response, error, connectionType, session_key))
+        {
+            result.m207 = parse_mcode_response(response, "M207");
+            if (!result.m207.empty())
+                break;
+        }
+        else
+            break;
     }
 
     disconnect(connectionType);

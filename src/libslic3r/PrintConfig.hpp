@@ -124,10 +124,11 @@ enum class MachineLimitsUsage
 
 enum PrintHostType
 {
-    htLocalLink,
-    htOctoPrint,
-    htMoonraker,
+    htRapid,
     htDuet,
+    htMoonraker,
+    htOctoPrint,
+    htLocalLink,
     htFlashAir,
     htAstroBox,
     htRepetier,
@@ -998,8 +999,8 @@ PRINT_CONFIG_CLASS_DEFINE(
         (ConfigOptionFloatOrPercent, bridge_infill_perimeter_overlap))((ConfigOptionFloat, infill_speed))(
         (ConfigOptionBool, interlock_perimeters_enabled))((ConfigOptionInt, interlock_perimeter_count))(
         (ConfigOptionPercent, interlock_perimeter_strength))((ConfigOptionFloatOrPercent, interlock_perimeter_overlap))(
-        (ConfigOptionInt, interlocking_perimeter_extruder))(
-        (ConfigOptionEnum<InterlockFlowDetection>, interlock_flow_detection))
+        (ConfigOptionInt, interlocking_perimeter_extruder))((ConfigOptionEnum<InterlockFlowDetection>,
+                                                             interlock_flow_detection))
     // Ironing options
     ((ConfigOptionBool, ironing))((ConfigOptionEnum<IroningType>, ironing_type))(
         (ConfigOptionPercent, ironing_flowrate))((ConfigOptionFloat, ironing_spacing))((ConfigOptionFloat,
@@ -1159,11 +1160,11 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
         (ConfigOptionFloat, first_layer_acceleration))((ConfigOptionInts, first_layer_bed_temperature))(
         (ConfigOptionFloatOrPercent, first_layer_extrusion_width))((ConfigOptionFloatOrPercent, first_layer_height))(
         (ConfigOptionFloatOrPercent, first_layer_speed))((ConfigOptionFloatOrPercent, first_layer_infill_speed))(
-        (ConfigOptionFloatOrPercent, first_layer_travel_speed))((ConfigOptionInts, first_layer_temperature))((ConfigOptionIntsNullable, idle_temperature))(
-        (ConfigOptionInts, full_fan_speed_layer))((ConfigOptionFloat, infill_acceleration))(
-        (ConfigOptionBool, infill_first))((ConfigOptionInts, max_fan_speed))((ConfigOptionFloats, max_layer_height))(
-        (ConfigOptionInts, min_fan_speed))((ConfigOptionFloats, min_layer_height))((ConfigOptionFloat,
-                                                                                    max_print_height))(
+        (ConfigOptionFloatOrPercent, first_layer_travel_speed))((ConfigOptionInts, first_layer_temperature))(
+        (ConfigOptionIntsNullable, idle_temperature))((ConfigOptionInts, full_fan_speed_layer))(
+        (ConfigOptionFloat, infill_acceleration))((ConfigOptionBool, infill_first))((ConfigOptionInts, max_fan_speed))(
+        (ConfigOptionFloats, max_layer_height))((ConfigOptionInts, min_fan_speed))(
+        (ConfigOptionFloats, min_layer_height))((ConfigOptionFloat, max_print_height))(
         (ConfigOptionFloats, min_print_speed))((ConfigOptionFloat, min_skirt_length))((ConfigOptionString, notes))(
         (ConfigOptionString, custom_parameters_print))((ConfigOptionFloats, nozzle_diameter))(
         (ConfigOptionFloats, print_nozzle_diameters))((ConfigOptionBools, print_high_flow_nozzle))(

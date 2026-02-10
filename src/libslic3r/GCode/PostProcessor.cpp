@@ -174,7 +174,7 @@ static int run_script(const std::string &script, const std::string &gcode, std::
 #include <cstdlib> // getenv()
 #include <sstream>
 
-#include <boost/process/v2.hpp>
+#include <boost/process.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/readable_pipe.hpp>
 #include <boost/asio/read.hpp>

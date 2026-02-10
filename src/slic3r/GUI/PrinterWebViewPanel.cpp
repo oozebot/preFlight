@@ -1,8 +1,8 @@
 ///|/ Copyright (c) preFlight 2025+ oozeBot, LLC
 ///|/
-///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
+///|/ Released under AGPLv3 or higher
 ///|/
-#include "preFlight.PrinterWebViewPanel.hpp"
+#include "PrinterWebViewPanel.hpp"
 #include "WebView.hpp"
 #include "GUI_App.hpp"
 #include "GUI.hpp"
@@ -43,6 +43,7 @@ void PrinterWebViewPanel::CreateWebView()
         WebView::webview_create(m_webview, this, wxString(""), std::vector<std::string>{});
         m_sizer->Add(m_webview, 1, wxEXPAND);
         m_webview_created = true;
+
         Layout();
     }
     else
@@ -57,6 +58,10 @@ void PrinterWebViewPanel::LoadURL(const wxString &url)
         return;
 
     m_current_url = url;
+
+#ifdef __linux__
+    m_needs_initial_refresh = true;
+#endif
 
     // Build URL with authentication if needed
     wxString auth_url = BuildAuthenticatedURL(url);
@@ -136,6 +141,28 @@ bool PrinterWebViewPanel::IsLoaded() const
 wxString PrinterWebViewPanel::GetCurrentURL() const
 {
     return m_current_url;
+}
+
+void PrinterWebViewPanel::OnBecameVisible()
+{
+#ifdef __linux__
+    // WebKit2GTK: some printer interfaces (e.g. Mainsail) show a stale
+    // read-only view on first load.  Re-navigating to the same URL once
+    // the panel is visible (equivalent to the user pressing F5) fixes it.
+    if (m_needs_initial_refresh && m_webview && !m_current_url.empty())
+    {
+        m_needs_initial_refresh = false;
+        CallAfter(
+            [this]()
+            {
+                if (m_webview && !m_current_url.empty())
+                {
+                    wxString auth_url = BuildAuthenticatedURL(m_current_url);
+                    m_webview->LoadURL(auth_url);
+                }
+            });
+    }
+#endif
 }
 
 void PrinterWebViewPanel::sys_color_changed()

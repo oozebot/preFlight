@@ -58,6 +58,7 @@ public:
     void SetBadgeVisible(bool visible);
     void SetBulletColor(const wxColour &color); // Show colored bullet before icon
     void SetCompact(bool compact);              // Use smaller header, icons, and font for sub-tabs
+    void SetCollapsible(bool collapsible);      // When false: always expanded, no chevron, no click-to-collapse
 
     // Styling
     void SetHeaderBackgroundColor(const StateColor &color);
@@ -110,6 +111,7 @@ private:
     bool m_expanded;
     bool m_header_hovered;
     bool m_compact;
+    bool m_collapsible{true};
 
     // Styling
     StateColor m_header_bg_color;

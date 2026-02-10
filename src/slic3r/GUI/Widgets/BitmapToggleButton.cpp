@@ -44,7 +44,7 @@ BitmapToggleButton::BitmapToggleButton(wxWindow *parent, const wxString &label, 
         SetForegroundColour(parent->GetForegroundColour());
     }
 #elif __WXGTK3__
-    SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+    SetBackgroundColour(Slic3r::GUI::wxGetApp().get_window_default_clr());
 #endif
 
     Bind(wxEVT_TOGGLEBUTTON,

@@ -5,12 +5,11 @@
 #pragma once
 
 #include <wx/panel.h>
-#include <wx/button.h>
 #include <vector>
 #include <functional>
 #include <memory>
 
-#include "preFlight.PrinterConnectionChecker.hpp"
+#include "PrinterConnectionChecker.hpp"
 
 namespace Slic3r
 {
@@ -80,7 +79,7 @@ public:
 private:
     struct TabButton
     {
-        wxButton *button;
+        wxPanel *button;
         TabType type;
         std::function<void()> callback;
         bool enabled;
@@ -88,21 +87,22 @@ private:
 
     void OnButtonClick(TabType type);
     void UpdateButtonStyles();
-    wxButton *CreateStyledButton(const wxString &label);
+    wxPanel *CreateStyledButton(const wxString &label);
 
     void UpdateColors();
 
     std::vector<TabButton> m_tabs;
     TabType m_selected_tab{TAB_PREPARE};
 
-    wxButton *m_slice_button{nullptr};
+    wxPanel *m_slice_button{nullptr};
     std::function<void()> m_slice_callback;
     std::function<void()> m_export_callback;
     std::function<void()> m_send_to_printer_callback;
     bool m_has_sliced_object{false};
     bool m_slice_button_pressed{false};
     bool m_slice_button_enabled{true};
-    bool m_show_dropdown{false}; // Dropdown only shown in Export mode when printer connected
+    bool m_slice_tab_enabled{true}; // Whether current tab allows slicing
+    bool m_show_dropdown{false};    // Dropdown only shown in Export mode when printer connected
 
     wxColour m_color_bg_normal;
     wxColour m_color_bg_hover;
@@ -112,19 +112,26 @@ private:
     wxColour m_color_text_disabled;
     wxColour m_color_border;
 
-    // Settings dropdown button
-    wxButton *m_settings_dropdown_btn{nullptr};
+    // Settings dropdown button (shown when collapsed)
+    wxPanel *m_settings_dropdown_btn{nullptr};
     std::function<void(TabType)> m_settings_callback;
 
+    // Individual settings buttons (shown when expanded)
+    wxPanel *m_print_settings_btn{nullptr};
+    wxPanel *m_filament_settings_btn{nullptr};
+    wxPanel *m_printer_settings_btn{nullptr};
+    bool m_settings_expanded{false};
+
+    void UpdateSettingsLayout(bool force = false);
+
     // Printer webview tab members
-    wxButton *m_printer_webview_btn{nullptr};
+    wxPanel *m_printer_webview_btn{nullptr};
     std::unique_ptr<PrinterConnectionChecker> m_connection_checker;
     PrinterConnectionChecker::State m_connection_state{PrinterConnectionChecker::State::Unknown};
     wxString m_printer_webview_name;
     std::function<void()> m_printer_webview_callback;
     int m_printer_webview_sizer_index{-1}; // Index in sizer for insertion/removal
 };
-
 
 } // namespace GUI
 } // namespace Slic3r

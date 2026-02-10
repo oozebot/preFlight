@@ -61,13 +61,17 @@
 #include <fstream>
 #include <string_view>
 
+#ifdef __linux__
+#include <boost/filesystem.hpp>
+#endif
+
 #include "GUI_App.hpp"
 #include "UnsavedChangesDialog.hpp"
 #include "MsgDialog.hpp"
 #include "TopBar.hpp"
 #include "ModernTabBar.hpp"
 #include "Widgets/CustomMenu.hpp"
-#include "preFlight.PrinterWebViewPanel.hpp"
+#include "PrinterWebViewPanel.hpp"
 #include "GUI_Factories.hpp"
 #include "GUI_ObjectList.hpp"
 #include "GalleryDialog.hpp"
@@ -376,6 +380,37 @@ MainFrame::MainFrame(const int font_point_size)
              event.Skip();
          });
 
+#ifdef _WIN32
+    // Pause OpenGL canvas rendering during window drag to prevent sluggish movement on high-DPI displays.
+    // The DPIAware template already suppresses DPI rescaling during drag; this extends that to skip the
+    // continuous idle-driven GL renders that are expensive at 4K resolution.
+    Bind(wxEVT_MOVE_START,
+         [this](wxMoveEvent &event)
+         {
+             event.Skip();
+             if (m_plater)
+             {
+                 if (auto *c = m_plater->canvas3D())
+                     c->pause_rendering();
+                 if (auto *c = m_plater->get_current_canvas3D())
+                     c->pause_rendering();
+             }
+         });
+
+    Bind(wxEVT_MOVE_END,
+         [this](wxMoveEvent &event)
+         {
+             event.Skip();
+             if (m_plater)
+             {
+                 if (auto *c = m_plater->canvas3D())
+                     c->resume_rendering();
+                 if (auto *c = m_plater->get_current_canvas3D())
+                     c->resume_rendering();
+             }
+         });
+#endif
+
     wxGetApp().persist_window_geometry(this, true);
     wxGetApp().persist_window_geometry(&m_settings_dialog, true);
 
@@ -444,10 +479,8 @@ void MainFrame::update_layout()
         m_tabpanel->Hide();
         m_tmp_top_bar->Hide();
         m_plater->Hide();
-#ifdef _WIN32
         if (m_customMenuBar != nullptr)
             m_customMenuBar->Hide();
-#endif
 
         Layout();
     };
@@ -500,14 +533,12 @@ void MainFrame::update_layout()
         m_plater->Reparent(this);
         m_plater->Layout();
 
-#ifdef _WIN32
-        // Add custom menu bar at the top (Windows only)
+        // Add custom menu bar at the top
         if (m_customMenuBar != nullptr)
         {
             m_main_sizer->Add(m_customMenuBar, 0, wxEXPAND);
             m_customMenuBar->Show();
         }
-#endif // _WIN32
 
         if (m_modern_tabbar != nullptr)
         {
@@ -545,14 +576,12 @@ void MainFrame::update_layout()
         const int sel = m_tabpanel->GetSelection();
 
         m_plater->Reparent(this);
-#ifdef _WIN32
-        // Add custom menu bar at the top (Windows only)
+        // Add custom menu bar at the top
         if (m_customMenuBar != nullptr)
         {
             m_main_sizer->Add(m_customMenuBar, 0, wxEXPAND);
             m_customMenuBar->Show();
         }
-#endif // _WIN32
         m_main_sizer->Add(m_tmp_top_bar, 0, wxEXPAND | wxTOP, 1);
         m_main_sizer->Add(m_plater, 1, wxEXPAND | wxTOP, 1);
         m_plater->Layout();
@@ -568,14 +597,12 @@ void MainFrame::update_layout()
     }
     case ESettingsLayout::GCodeViewer:
     {
-#ifdef _WIN32
-        // Add custom menu bar at the top (Windows only)
+        // Add custom menu bar at the top
         if (m_customMenuBar != nullptr)
         {
             m_main_sizer->Add(m_customMenuBar, 0, wxEXPAND);
             m_customMenuBar->Show();
         }
-#endif // _WIN32
         m_main_sizer->Add(m_plater, 1, wxEXPAND);
         m_plater->set_default_bed_shape();
 #if ENABLE_HACK_GCODEVIEWER_SLOW_ON_MAC
@@ -636,10 +663,24 @@ void MainFrame::update_layout()
 // Called when closing the application and when switching the application language.
 void MainFrame::shutdown()
 {
-#ifdef _WIN32
     // Clean up custom popup menus before any window destruction starts
     CustomMenu::CleanupAllMenus();
 
+#ifdef __linux__
+    // Destroy the WebKit2GTK webview early so its sub-processes
+    // (WebKitWebProcess, WebKitNetworkProcess) shut down cleanly
+    // before the rest of the window hierarchy is torn down.
+    if (m_printer_webview_panel)
+    {
+        if (m_content_panel && m_content_panel->GetSizer())
+            m_content_panel->GetSizer()->Detach(m_printer_webview_panel);
+        m_printer_webview_panel->Destroy();
+        m_printer_webview_panel = nullptr;
+        m_printer_webview_tab_added = false;
+    }
+#endif
+
+#ifdef _WIN32
     if (m_hDeviceNotify)
     {
         ::UnregisterDeviceNotification(HDEVNOTIFY(m_hDeviceNotify));
@@ -1173,42 +1214,105 @@ void MainFrame::add_printer_webview_tab(const wxString &url)
     if (!m_content_panel)
         return;
 
-    // Create the PrinterWebViewPanel
-    m_printer_webview_panel = new PrinterWebViewPanel(m_content_panel);
-    m_content_panel->GetSizer()->Add(m_printer_webview_panel, 1, wxEXPAND);
-    m_printer_webview_panel->Hide(); // Initially hidden
+    // Store URL for external browser fallback
+    m_printer_url = url;
 
     // Get printer name and config from physical_printers
     auto &phys_printers = wxGetApp().preset_bundle->physical_printers;
     wxString printer_name = from_u8(phys_printers.get_selected_printer_name());
     auto *dpc = phys_printers.get_selected_printer_config();
 
-    // Set authentication on panel before loading URL
-    if (dpc)
+    // On Linux without GPU/DRI3 support (VMs, RDP, etc.), WebKit2GTK crashes.
+    // Fall back to opening the URL in the system's default browser.
+    bool webview_available = true;
+#ifdef __linux__
     {
-        auto auth_opt = dpc->option<ConfigOptionEnum<AuthorizationType>>("printhost_authorization_type");
-        if (auth_opt && auth_opt->value == AuthorizationType::atKeyPassword)
+        namespace fs = boost::filesystem;
+        bool has_render_node = false;
+        if (fs::exists("/dev/dri"))
         {
-            m_printer_webview_panel->SetAPIKey(dpc->opt_string("printhost_apikey"));
+            for (auto &entry : fs::directory_iterator("/dev/dri"))
+            {
+                if (entry.path().filename().string().find("renderD") == 0)
+                {
+                    has_render_node = true;
+                    break;
+                }
+            }
+        }
+        if (!has_render_node)
+        {
+            webview_available = false;
+            BOOST_LOG_TRIVIAL(warning) << "PrinterWebView: No GPU render node detected (/dev/dri/renderD* missing). "
+                                       << "Embedded printer webview disabled - use external browser instead.";
+        }
+    }
+#endif
+
+    if (webview_available)
+    {
+        // Create the PrinterWebViewPanel
+        m_printer_webview_panel = new PrinterWebViewPanel(m_content_panel);
+        if (m_printer_webview_panel->IsLoaded())
+        {
+            m_content_panel->GetSizer()->Add(m_printer_webview_panel, 1, wxEXPAND);
+            m_printer_webview_panel->Hide(); // Initially hidden
+
+            // Set authentication on panel before loading URL
+            if (dpc)
+            {
+                auto auth_opt = dpc->option<ConfigOptionEnum<AuthorizationType>>("printhost_authorization_type");
+                if (auth_opt && auth_opt->value == AuthorizationType::atKeyPassword)
+                {
+                    m_printer_webview_panel->SetAPIKey(dpc->opt_string("printhost_apikey"));
+                }
+                else
+                {
+                    m_printer_webview_panel->SetCredentials(dpc->opt_string("printhost_user"),
+                                                            dpc->opt_string("printhost_password"));
+                }
+            }
         }
         else
         {
-            m_printer_webview_panel->SetCredentials(dpc->opt_string("printhost_user"),
-                                                    dpc->opt_string("printhost_password"));
+            // Webview backend failed to initialize
+            m_printer_webview_panel->Destroy();
+            m_printer_webview_panel = nullptr;
+            webview_available = false;
+            BOOST_LOG_TRIVIAL(warning) << "PrinterWebView: WebView backend failed to initialize. "
+                                       << "Embedded printer webview disabled.";
         }
     }
 
-    // Add tab to ModernTabBar with callback
+    // Add tab to ModernTabBar with callback - works regardless of webview availability
+    // (shows printer name + connection status dot)
     if (m_modern_tabbar)
     {
-        m_modern_tabbar->ShowPrinterWebViewTab(printer_name, [this]() { show_printer_webview_content(); });
+        if (m_printer_webview_panel)
+        {
+            // Webview available: clicking tab shows embedded webview
+            m_modern_tabbar->ShowPrinterWebViewTab(printer_name, [this]() { show_printer_webview_content(); });
+        }
+        else
+        {
+            // No webview: clicking tab opens URL in default browser directly
+            // (skip the hyperlink suppression dialog — the user explicitly clicked the printer tab)
+            m_modern_tabbar->ShowPrinterWebViewTab(printer_name,
+                                                   [this]()
+                                                   {
+                                                       if (!m_printer_url.empty())
+                                                           wxLaunchDefaultBrowser(m_printer_url);
+                                                   });
+        }
 
-        // Set up connection checker with printer config
+        // Connection checker works regardless of webview
         m_modern_tabbar->SetPrinterConfig(dpc);
     }
 
-    // Load URL (after credentials are set)
-    m_printer_webview_panel->LoadURL(url);
+    // Load URL in webview if available
+    if (m_printer_webview_panel)
+        m_printer_webview_panel->LoadURL(url);
+
     m_printer_webview_tab_added = true;
 }
 
@@ -1240,6 +1344,7 @@ void MainFrame::remove_printer_webview_tab()
         m_printer_webview_panel = nullptr;
     }
 
+    m_printer_url.clear();
     m_printer_webview_tab_added = false;
 }
 
@@ -1293,6 +1398,7 @@ void MainFrame::show_printer_webview_content()
 
     // Show webview panel
     m_printer_webview_panel->Show();
+    m_printer_webview_panel->OnBecameVisible();
     m_content_panel->Layout();
 }
 
@@ -1675,7 +1781,10 @@ static wxMenu *generate_help_menu()
 
     append_menu_item(helpMenu, wxID_ANY, wxString::Format(_L("%s &Website"), SLIC3R_APP_NAME),
                      wxString::Format(_L("Open the %s website in your browser"), SLIC3R_APP_NAME),
-                     [](wxCommandEvent &) { wxGetApp().open_web_page_localized("https://github.com/oozebot/preFlight"); });
+                     [](wxCommandEvent &) {
+                         wxGetApp().open_browser_with_warning_dialog("https://github.com/oozebot/preFlight", nullptr,
+                                                                     false);
+                     });
     // // TRN Item from "Help" menu
     // append_menu_item(helpMenu, wxID_ANY, wxString::Format(_L("&Quick Start"), SLIC3R_APP_NAME),
     //     wxString::Format(_L("Open the %s website in your browser"), SLIC3R_APP_NAME),
@@ -1689,8 +1798,7 @@ static wxMenu *generate_help_menu()
     helpMenu->AppendSeparator();
     append_menu_item(helpMenu, wxID_ANY, _L("Software &Releases"),
                      _L("Open the software releases page in your browser"),
-                     [](wxCommandEvent &)
-                     {
+                     [](wxCommandEvent &) {
                          wxGetApp().open_browser_with_warning_dialog("https://github.com/oozebot/preFlight/releases",
                                                                      nullptr, false);
                      });
@@ -1709,8 +1817,7 @@ static wxMenu *generate_help_menu()
                      [](wxCommandEvent &) { Slic3r::GUI::desktop_open_datadir_folder(); });
     append_menu_item(helpMenu, wxID_ANY, _L("Report an I&ssue"),
                      wxString::Format(_L("Report an issue on %s"), SLIC3R_APP_NAME),
-                     [](wxCommandEvent &)
-                     {
+                     [](wxCommandEvent &) {
                          wxGetApp().open_browser_with_warning_dialog("https://github.com/oozebot/preFlight/issues/new",
                                                                      nullptr, false);
                      });
@@ -2211,11 +2318,16 @@ void MainFrame::init_menubar_as_editor()
     init_macos_application_menu(m_menubar, this);
 #endif // __APPLE__
 
-#ifdef _WIN32
+#ifndef __APPLE__
     // Hide native menu bar visually but keep it for keyboard accelerators
+#ifdef _WIN32
     ::SetMenu(GetHWND(), NULL);
+#else
+    // preFlight: On GTK, hide the native menu bar; accelerators still work via the attached GtkAccelGroup
+    m_menubar->Show(false);
+#endif
 
-    // Create custom menu bar for Windows (fully themed popup menus)
+    // Create custom menu bar (fully themed popup menus)
     m_customMenuBar = new CustomMenuBar(this);
     m_customMenuBar->SetEventHandler(this);
     m_customMenuBar->Append(fileMenu, _L("&File"));
@@ -2226,7 +2338,7 @@ void MainFrame::init_menubar_as_editor()
     m_customMenuBar->Append(wxGetApp().get_config_menu(this), _L("&Configuration"));
     m_customMenuBar->Append(helpMenu, _L("&Help"));
     m_customMenuBar->Hide(); // Will be shown in update_layout()
-#endif                       // _WIN32
+#endif                       // !__APPLE__
 
 #endif
 
@@ -2350,11 +2462,16 @@ void MainFrame::init_menubar_as_gcodeviewer()
     init_macos_application_menu(m_menubar, this);
 #endif // __APPLE__
 
-#ifdef _WIN32
+#ifndef __APPLE__
     // Hide native menu bar visually but keep it for keyboard accelerators
+#ifdef _WIN32
     ::SetMenu(GetHWND(), NULL);
+#else
+    // preFlight: On GTK, hide the native menu bar; accelerators still work via the attached GtkAccelGroup
+    m_menubar->Show(false);
+#endif
 
-    // Create custom menu bar for Windows (fully themed popup menus)
+    // Create custom menu bar (fully themed popup menus)
     m_customMenuBar = new CustomMenuBar(this);
     m_customMenuBar->SetEventHandler(this);
     m_customMenuBar->Append(fileMenu, _L("&File"));
@@ -2363,7 +2480,7 @@ void MainFrame::init_menubar_as_gcodeviewer()
     m_customMenuBar->Append(wxGetApp().get_config_menu(this), _L("&Configuration"));
     m_customMenuBar->Append(helpMenu, _L("&Help"));
     m_customMenuBar->Hide(); // Will be shown in update_layout()
-#endif                       // _WIN32
+#endif                       // !__APPLE__
 }
 
 void MainFrame::update_menubar()

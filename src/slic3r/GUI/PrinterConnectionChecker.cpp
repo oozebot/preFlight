@@ -1,8 +1,8 @@
 ///|/ Copyright (c) preFlight 2025+ oozeBot, LLC
 ///|/
-///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
+///|/ Released under AGPLv3 or higher
 ///|/
-#include "preFlight.PrinterConnectionChecker.hpp"
+#include "PrinterConnectionChecker.hpp"
 #include "GUI_App.hpp"
 
 #include "libslic3r/PrintConfig.hpp"

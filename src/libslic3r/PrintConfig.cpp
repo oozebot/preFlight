@@ -99,8 +99,9 @@ static const t_config_enum_values s_keys_map_MachineLimitsUsage{{"emit_to_gcode"
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(MachineLimitsUsage)
 
 static const t_config_enum_values s_keys_map_PrintHostType{
-    {"locallink", htLocalLink}, {"octoprint", htOctoPrint}, {"moonraker", htMoonraker}, {"duet", htDuet},
-    {"flashair", htFlashAir},   {"astrobox", htAstroBox},   {"repetier", htRepetier},   {"mks", htMKS},
+    {"rapid", htRapid},         {"duet", htDuet},           {"moonraker", htMoonraker},
+    {"octoprint", htOctoPrint}, {"locallink", htLocalLink}, {"flashair", htFlashAir},
+    {"astrobox", htAstroBox},   {"repetier", htRepetier},   {"mks", htMKS},
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PrintHostType)
 
@@ -3051,17 +3052,18 @@ void PrintConfigDef::init_fff_params()
     def->tooltip = L("Slic3r can upload G-code files to a printer host. This field must contain "
                      "the kind of the host.");
     def->set_enum<PrintHostType>(
-        std::initializer_list<std::pair<std::string_view, std::string_view>>{{"locallink", "LocalLink"},
-                                                                             {"octoprint", "OctoPrint"},
-                                                                             {"moonraker", "Klipper (via Moonraker)"},
+        std::initializer_list<std::pair<std::string_view, std::string_view>>{{"rapid", "oozeBot Rapid"},
                                                                              {"duet", "Duet"},
+                                                                             {"moonraker", "Klipper"},
+                                                                             {"octoprint", "OctoPrint"},
+                                                                             {"locallink", "LocalLink"},
                                                                              {"flashair", "FlashAir"},
                                                                              {"astrobox", "AstroBox"},
                                                                              {"repetier", "Repetier"},
                                                                              {"mks", "MKS"}});
     def->mode = comAdvanced;
     def->cli = ConfigOptionDef::nocli;
-    def->set_default_value(new ConfigOptionEnum<PrintHostType>(htLocalLink));
+    def->set_default_value(new ConfigOptionEnum<PrintHostType>(htRapid));
 
     def = this->add("only_retract_when_crossing_perimeters", coBool);
     def->label = L("Only retract when crossing perimeters");

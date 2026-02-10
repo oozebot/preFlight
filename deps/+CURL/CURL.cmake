@@ -56,7 +56,9 @@ if (UNIX AND NOT APPLE)
   # On non-apple UNIX platforms, finding the location of OpenSSL certificates is necessary at runtime, as there is no standard location usable across platforms.
   # The OPENSSL_CERT_OVERRIDE flag is understood by PrusaSlicer and will trigger the search of certificates at initial application launch. 
   # Then ask the user for consent about the correctness of the found location.
-  set (_patch_command echo set_target_properties(CURL::libcurl PROPERTIES INTERFACE_COMPILE_DEFINITIONS OPENSSL_CERT_OVERRIDE) >> CMake/curl-config.cmake.in)
+  # preFlight: On Linux static builds, CURL::libcurl is an ALIAS target (to CURL::libcurl_static)
+  # and set_target_properties cannot be used on ALIAS targets. Target the static lib directly.
+  set (_patch_command echo set_target_properties(CURL::libcurl_static PROPERTIES INTERFACE_COMPILE_DEFINITIONS OPENSSL_CERT_OVERRIDE) >> CMake/curl-config.cmake.in)
 endif ()
 
 add_cmake_project(CURL

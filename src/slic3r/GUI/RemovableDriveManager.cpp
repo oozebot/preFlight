@@ -36,7 +36,7 @@
 #include <pwd.h>
 #include <boost/filesystem.hpp>
 #include <boost/system/error_code.hpp>
-#include <boost/process/v2.hpp>
+#include <boost/process.hpp>
 #include <boost/asio/io_context.hpp>
 #include <boost/asio/readable_pipe.hpp>
 #include <boost/asio/read.hpp>

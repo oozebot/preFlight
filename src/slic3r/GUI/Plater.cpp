@@ -1277,10 +1277,10 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path> &input_
         auto path = input_files[i];
         // On Windows, we swap slashes to back slashes, see GH #6803 as read_from_file() does not understand slashes on Windows thus it assignes full path to names of loaded objects.
         path.make_preferred();
-#else   // _WIN32
+#else // _WIN32
         // Don't make a copy on Posix. Slash is a path separator, back slashes are not accepted as a substitute.
         const auto &path = input_files[i];
-#endif  // _WIN32
+#endif // _WIN32
         in_temp = (path.parent_path() == temp_path);
         const boost::filesystem::path filename = path.filename();
 
@@ -4151,11 +4151,6 @@ void Plater::priv::on_right_click(RBtnEvent &evt)
         Vec2d mouse_position = evt.data.first;
         GLCanvas3D &canvas = *q->canvas3D();
         wxPoint position(static_cast<int>(mouse_position.x()), static_cast<int>(mouse_position.y()));
-#ifdef __linux__
-        // For some reason on Linux the menu isn't displayed if position is
-        // specified (even though the position is sane).
-        position = wxDefaultPosition;
-#endif
         canvas.apply_retina_scale(mouse_position);
         canvas.set_popup_menu_position(mouse_position);
 
@@ -4179,6 +4174,11 @@ void Plater::priv::on_right_click(RBtnEvent &evt)
         }
         else
         {
+#ifdef __linux__
+            // Native PopupMenu on Linux/GTK has issues when an explicit position is specified,
+            // so fall back to default positioning (near the mouse cursor) for the native path.
+            position = wxDefaultPosition;
+#endif
             // Fallback to native menu
             canvas.get_wxglcanvas()->PopupMenu(menu, position);
             canvas.clear_popup_menu_position();

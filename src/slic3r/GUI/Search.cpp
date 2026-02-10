@@ -629,7 +629,7 @@ SearchDialog::SearchDialog(OptionsSearcher *searcher, wxWindow *parent)
 #if _WIN32
     GUI::wxGetApp().UpdateDarkUI(this);
 #elif __WXGTK__
-    SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+    SetBackgroundColour(GUI::wxGetApp().get_window_default_clr());
 #endif
 
     int em = em_unit();
@@ -642,6 +642,11 @@ SearchDialog::SearchDialog(OptionsSearcher *searcher, wxWindow *parent)
 #endif
     );
     GUI::wxGetApp().UpdateDarkUI(search_list);
+#ifndef _WIN32
+    // preFlight: theme the search list on Linux/macOS (UpdateDarkUI is Windows-only)
+    search_list->SetBackgroundColour(GUI::wxGetApp().get_window_default_clr());
+    search_list->SetForegroundColour(GUI::wxGetApp().get_label_clr_default());
+#endif
     search_list_model = new SearchListModel(this);
     search_list->AssociateModel(search_list_model);
 

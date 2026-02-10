@@ -63,7 +63,7 @@ CopyrightsDialog::CopyrightsDialog()
 #ifdef _WIN32
     wxGetApp().UpdateDarkUI(this);
 #else
-    this->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+    this->SetBackgroundColour(wxGetApp().get_window_default_clr());
 #endif
 
     int em = em_unit();
@@ -143,7 +143,7 @@ void CopyrightsDialog::fill_entries()
 
 wxString CopyrightsDialog::get_html_text()
 {
-    wxColour bgr_clr = wxGetApp().get_window_default_clr(); //wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
+    wxColour bgr_clr = wxGetApp().get_window_default_clr(); //wxGetApp().get_window_default_clr();
 
     const auto text_clr = wxGetApp().get_label_clr_default();
     const auto text_clr_str = encode_color(ColorRGB(text_clr.Red(), text_clr.Green(), text_clr.Blue()));
@@ -220,7 +220,7 @@ AboutDialog::AboutDialog()
     SetFont(wxGetApp().normal_font());
     int em = wxGetApp().em_unit();
 
-    wxColour bgr_clr = wxGetApp().get_window_default_clr(); //wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW);
+    wxColour bgr_clr = wxGetApp().get_window_default_clr(); //wxGetApp().get_window_default_clr();
     SetBackgroundColour(bgr_clr);
     wxBoxSizer *hsizer = new wxBoxSizer(wxHORIZONTAL);
 

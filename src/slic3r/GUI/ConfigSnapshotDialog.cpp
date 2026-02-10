@@ -50,9 +50,7 @@ static wxString generate_html_row(const Config::Snapshot &snapshot, bool row_eve
     wxString text = "<tr bgcolor=\"";
     text += snapshot_active
                 ? dark_mode ? "#208a20" : "#B3FFCB"
-                : (row_even
-                       ? get_color(
-                             wxGetApp().get_window_default_clr() /*wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW)*/)
+                : (row_even    ? get_color(wxGetApp().get_window_default_clr() /*wxGetApp().get_window_default_clr()*/)
                    : dark_mode ? "#656565"
                                : "#D5D5D5");
     text += "\">";
@@ -127,8 +125,7 @@ static wxString generate_html_page(const Config::SnapshotDB &snapshot_db, const 
     bool dark_mode = wxGetApp().dark_mode();
     wxString text = "<html>"
                     "<body bgcolor=\"" +
-                    get_color(
-                        wxGetApp().get_window_default_clr() /*wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW)*/) +
+                    get_color(wxGetApp().get_window_default_clr() /*wxGetApp().get_window_default_clr()*/) +
                     "\" cellspacing=\"2\" cellpadding=\"0\" border=\"0\" link=\"#800000\">"
                     "<font color=\"" +
                     get_color(wxGetApp().get_label_clr_default()) + "\">";
@@ -154,7 +151,7 @@ ConfigSnapshotDialog::ConfigSnapshotDialog(const Config::SnapshotDB &snapshot_db
 #ifdef _WIN32
     wxGetApp().UpdateDarkUI(this);
 #else
-    this->SetBackgroundColour(wxSystemSettings::GetColour(wxSYS_COLOUR_WINDOW));
+    this->SetBackgroundColour(wxGetApp().get_window_default_clr());
 #endif
 
     wxBoxSizer *vsizer = new wxBoxSizer(wxVERTICAL);

@@ -546,13 +546,13 @@ void OG_CustomCtrl::on_sidebar_visibility_changed()
     if (opt_group)
         opt_group->update_section_checkbox_from_rows();
 
-    // Trigger sidebar rebuild to reflect visibility changes
+    // Update sidebar visibility in-place (show/hide rows, groups, sections)
     // Use CallAfter to avoid potential issues during paint/event handling
     wxTheApp->CallAfter(
         []()
         {
             if (wxGetApp().plater())
-                wxGetApp().sidebar().rebuild_settings_panels();
+                wxGetApp().sidebar().update_sidebar_visibility();
         });
 }
 
