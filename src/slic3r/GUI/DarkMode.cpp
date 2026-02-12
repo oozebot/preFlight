@@ -233,7 +233,7 @@ bool IsDarkModeEnabled()
 
 void SetDarkTitleBar(HWND hwnd)
 {
-    if (!hwnd)
+    if (!hwnd || !IsWindow(hwnd))
         return;
 
     BOOL darkMode = g_darkModeEnabled ? TRUE : FALSE;
@@ -264,7 +264,7 @@ void SetDarkTitleBar(HWND hwnd)
 
 void AllowDarkModeForWindow(HWND hwnd)
 {
-    if (!hwnd || !g_darkModeSupported)
+    if (!hwnd || !IsWindow(hwnd) || !g_darkModeSupported)
         return;
 
     if (g_allowDarkModeForWindow)
@@ -278,7 +278,7 @@ void AllowDarkModeForWindow(HWND hwnd)
 
 void SetDarkExplorerTheme(HWND hwnd)
 {
-    if (!hwnd)
+    if (!hwnd || !IsWindow(hwnd))
         return;
 
     // Title bar color follows our theme (light/dark)

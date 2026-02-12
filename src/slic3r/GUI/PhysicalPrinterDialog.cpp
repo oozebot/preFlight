@@ -857,8 +857,10 @@ void PhysicalPrinterDialog::update_host_type(bool printer_change)
     wxArrayString types;
     int last_in_conf = m_config->option("host_type")->getInt(); //  this is real position in last choice
 
-    // Append localized enum_labels
+    // Build the filtered dropdown list and a mapping from dropdown index to enum index.
+    // This replaces fragile index-offset math that broke when enum order changed.  // preFlight: fix host type mapping
     assert(ht->m_opt.enum_def->labels().size() == ht->m_opt.enum_def->values().size());
+    std::vector<int> dropdown_to_enum; // dropdown_to_enum[dropdown_idx] = enum_idx
     for (size_t i = 0; i < ht->m_opt.enum_def->labels().size(); ++i)
     {
         wxString label = _(ht->m_opt.enum_def->label(i));
@@ -868,26 +870,29 @@ void PhysicalPrinterDialog::update_host_type(bool printer_change)
             if (!link.supported)
                 continue;
         }
-
+        dropdown_to_enum.push_back((int) i);
         types.Add(label);
     }
 
     Choice *choice = dynamic_cast<Choice *>(ht);
     choice->set_values(types);
-    int index_in_choice = (printer_change ? std::clamp(last_in_conf - ((int) ht->m_opt.enum_def->values().size() -
-                                                                       (int) types.size()),
-                                                       0, (int) ht->m_opt.enum_def->values().size() - 1)
-                                          : last_in_conf);
-    choice->set_value(index_in_choice);
-    if (link.supported && link.label == _(ht->m_opt.enum_def->label(index_in_choice)))
-        m_config->set_key_value("host_type", new ConfigOptionEnum<PrintHostType>(htLocalLink));
-    else
+
+    // Find the dropdown index that corresponds to the stored enum value
+    int index_in_choice = 0;
+    for (size_t i = 0; i < dropdown_to_enum.size(); ++i)
     {
-        int host_type = std::clamp(index_in_choice + ((int) ht->m_opt.enum_def->values().size() - (int) types.size()),
-                                   0, (int) ht->m_opt.enum_def->values().size() - 1);
-        PrintHostType type = static_cast<PrintHostType>(host_type);
-        m_config->set_key_value("host_type", new ConfigOptionEnum<PrintHostType>(type));
+        if (dropdown_to_enum[i] == last_in_conf)
+        {
+            index_in_choice = (int) i;
+            break;
+        }
     }
+
+    choice->set_value(index_in_choice);
+
+    // Map dropdown selection back to the correct enum value
+    PrintHostType type = static_cast<PrintHostType>(dropdown_to_enum[index_in_choice]);
+    m_config->set_key_value("host_type", new ConfigOptionEnum<PrintHostType>(type));
 }
 
 wxString PhysicalPrinterDialog::get_printer_name()

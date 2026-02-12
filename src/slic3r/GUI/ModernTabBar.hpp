@@ -120,6 +120,7 @@ private:
     wxPanel *m_print_settings_btn{nullptr};
     wxPanel *m_filament_settings_btn{nullptr};
     wxPanel *m_printer_settings_btn{nullptr};
+    wxPanel *m_search_btn{nullptr};
     bool m_settings_expanded{false};
 
     void UpdateSettingsLayout(bool force = false);

@@ -60,6 +60,7 @@ class SlicedInfo;
 class ConfigOptionsGroup;
 class FreqChangedParams;
 class Tab;
+class SidebarTabBar;
 
 /**
  * TabbedSettingsPanel - Base class for settings panels with fixed tab headers
@@ -591,6 +592,9 @@ public:
     void update_mode();
     void update_ui_from_settings();
 
+    // Tabbed/unified sidebar mode
+    void SetTabbedMode(bool tabbed);
+
     // Scaling
     void msw_rescale();
     void sys_color_changed();
@@ -636,6 +640,7 @@ private:
     void CreateInfoSections();
 
     void OnSectionExpandChanged(const wxString &section_name, bool expanded);
+    void ApplyTabVisibility();
 
     // Preset combo selection handler
     void on_select_preset(wxCommandEvent &evt);
@@ -655,12 +660,20 @@ private:
     // Main layout
     wxScrolledWindow *m_scrolled_panel;
     wxBoxSizer *m_main_sizer;
+    SidebarTabBar *m_tab_bar{nullptr};
+    bool m_tabbed_mode{true};
 
     // Collapsible sections
     CollapsibleSection *m_printer_section;
     CollapsibleSection *m_filament_section;
     CollapsibleSection *m_process_section;
     CollapsibleSection *m_objects_section;
+
+    // Compact labels shown on Objects tab in tabbed mode (hidden in unified mode)
+    wxStaticText *m_print_pinned_label{nullptr};
+    wxStaticText *m_printer_pinned_label{nullptr};
+    wxStaticText *m_nozzle_pinned_label{nullptr};
+    wxStaticText *m_nozzle_unified_label{nullptr}; // Non-bold label in filament sizer (rebuilt dynamically)
 
     // Section contents
     wxPanel *m_printer_content;

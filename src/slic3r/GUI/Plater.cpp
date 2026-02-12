@@ -855,32 +855,122 @@ void Plater::priv::init()
     // Preview events:
     preview->get_wxglcanvas()->Bind(EVT_GLCANVAS_QUESTION_MARK, [](SimpleEvent &) { wxGetApp().keyboard_shortcuts(); });
     preview->get_wxglcanvas()->Bind(EVT_GLCANVAS_UPDATE_BED_SHAPE, [this](SimpleEvent &) { q->set_bed_shape(); });
-    preview->get_wxglcanvas()->Bind(EVT_GLCANVAS_RIGHT_CLICK,
-                                    [this](RBtnEvent &evt)
-                                    {
-                                        // Show Notes menu on right-click in Preview (read-only view)
-                                        wxMenu menu;
-                                        append_menu_item(
-                                            &menu, wxID_ANY, _L("Notes"), _L("View project notes"),
-                                            [this](wxCommandEvent &) { this->notes_dialog.show(-1); }, "note", nullptr);
-                                        Vec2d mouse_position = evt.data.first;
-                                        wxPoint position(static_cast<int>(mouse_position.x()),
-                                                         static_cast<int>(mouse_position.y()));
-                                        // Use CustomMenu for consistent theming
-                                        auto customMenu = CustomMenu::FromWxMenu(&menu, preview->get_wxglcanvas());
-                                        if (customMenu)
+    preview->get_wxglcanvas()->Bind(
+        EVT_GLCANVAS_RIGHT_CLICK,
+        [this](RBtnEvent &evt)
+        {
+            wxMenu menu;
+
+            // preFlight: Check if user clicked on a shell volume for clipping.
+            // Shell volumes always have geometry loaded after slicing, even if
+            // the shells toggle is off, so we raycast regardless of visibility.
+            GLCanvas3D *canvas3d = preview->get_canvas3d();
+            int clicked_object_id = -1;
+            if (canvas3d != nullptr)
+            {
+                GCodeViewer &gcode_viewer = canvas3d->get_gcode_viewer();
+                const GLVolumeCollection &shells = gcode_viewer.get_shells_volumes();
+                if (!shells.volumes.empty())
+                {
+                    // Build a ray from the camera through the mouse position.
+                    // evt.data.first is in logical (wxWidget) coordinates.
+                    // get_canvas_size() returns physical pixels on retina, so
+                    // convert the mouse pos to physical first.
+                    const Camera &camera = this->camera;
+                    const Size cnv_size = canvas3d->get_canvas_size();
+                    const double scale = static_cast<double>(cnv_size.get_scale_factor());
+                    Vec2d mouse = evt.data.first * scale;
+
+                    double ndc_x = (2.0 * mouse.x() / cnv_size.get_width()) - 1.0;
+                    double ndc_y = 1.0 - (2.0 * mouse.y() / cnv_size.get_height());
+
+                    Eigen::Matrix4d vp = camera.get_projection_matrix().matrix() * camera.get_view_matrix().matrix();
+                    Eigen::Matrix4d inv_vp = vp.inverse();
+
+                    Vec4d near_w = inv_vp * Vec4d(ndc_x, ndc_y, -1.0, 1.0);
+                    Vec4d far_w = inv_vp * Vec4d(ndc_x, ndc_y, 1.0, 1.0);
+                    near_w /= near_w.w();
+                    far_w /= far_w.w();
+
+                    Vec3d ray_origin = near_w.head<3>();
+                    Vec3d ray_dir = (far_w.head<3>() - near_w.head<3>()).normalized();
+
+                    // Ray-AABB test against every shell volume (ignore is_active —
+                    // volumes exist even when the shells overlay is toggled off).
+                    double best_t = std::numeric_limits<double>::max();
+                    for (const GLVolume *vol : shells.volumes)
+                    {
+                        if (vol == nullptr || vol->composite_id.volume_id < 0)
+                            continue;
+
+                        const BoundingBoxf3 &bb = vol->transformed_bounding_box();
+                        double tmin = -std::numeric_limits<double>::max();
+                        double tmax = std::numeric_limits<double>::max();
+                        bool miss = false;
+                        for (int a = 0; a < 3; ++a)
+                        {
+                            if (std::abs(ray_dir[a]) < 1e-12)
+                            {
+                                if (ray_origin[a] < bb.min[a] || ray_origin[a] > bb.max[a])
+                                {
+                                    miss = true;
+                                    break;
+                                }
+                            }
+                            else
+                            {
+                                double t1 = (bb.min[a] - ray_origin[a]) / ray_dir[a];
+                                double t2 = (bb.max[a] - ray_origin[a]) / ray_dir[a];
+                                if (t1 > t2)
+                                    std::swap(t1, t2);
+                                tmin = std::max(tmin, t1);
+                                tmax = std::min(tmax, t2);
+                            }
+                        }
+                        if (!miss && tmin <= tmax && tmax >= 0.0 && tmin < best_t)
+                        {
+                            best_t = tmin;
+                            clicked_object_id = vol->composite_id.object_id;
+                        }
+                    }
+                }
+            }
+
+            // Build CustomMenu directly (no wxMenu intermediate) to
+            // avoid use-after-free when FromWxMenu captures a raw
+            // wxMenu* that gets destroyed on dismiss.
+            auto customMenu = std::shared_ptr<CustomMenu>(new CustomMenu());
+
+            // Add Clipping Plane option if an object was clicked
+            if (clicked_object_id >= 0)
+            {
+                int clipId = wxNewId();
+                customMenu->Append(clipId, _L("Clipping Plane"), *get_bmp_bundle("clip_plane"));
+                customMenu->SetCallback(clipId,
+                                        [this, clicked_object_id]()
                                         {
-                                            customMenu->KeepAliveUntilDismissed(customMenu);
-                                            if (!customMenu->GetParent())
-                                                customMenu->Create(preview->get_wxglcanvas());
-                                            wxPoint screenPos = preview->get_wxglcanvas()->ClientToScreen(position);
-                                            customMenu->ShowAt(screenPos, preview->get_wxglcanvas());
-                                        }
-                                        else
-                                        {
-                                            preview->get_wxglcanvas()->PopupMenu(&menu, position);
-                                        }
-                                    });
+                                            GLCanvas3D *cnv = preview->get_canvas3d();
+                                            if (cnv != nullptr)
+                                                cnv->get_gcode_viewer().get_preview_clip_controller().activate(
+                                                    clicked_object_id);
+                                        });
+            }
+
+            // Always show Notes option
+            {
+                int notesId = wxNewId();
+                customMenu->Append(notesId, _L("Notes"), *get_bmp_bundle("note"));
+                customMenu->SetCallback(notesId, [this]() { this->notes_dialog.show(-1); });
+            }
+
+            Vec2d mouse_position = evt.data.first;
+            wxPoint position(static_cast<int>(mouse_position.x()), static_cast<int>(mouse_position.y()));
+            customMenu->KeepAliveUntilDismissed(customMenu);
+            if (!customMenu->GetParent())
+                customMenu->Create(preview->get_wxglcanvas());
+            wxPoint screenPos = preview->get_wxglcanvas()->ClientToScreen(position);
+            customMenu->ShowAt(screenPos, preview->get_wxglcanvas());
+        });
     if (wxGetApp().is_editor())
     {
         preview->get_wxglcanvas()->Bind(EVT_GLCANVAS_TAB, [this](SimpleEvent &) { select_next_view_3D(); });
@@ -1277,10 +1367,10 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path> &input_
         auto path = input_files[i];
         // On Windows, we swap slashes to back slashes, see GH #6803 as read_from_file() does not understand slashes on Windows thus it assignes full path to names of loaded objects.
         path.make_preferred();
-#else // _WIN32
+#else   // _WIN32
         // Don't make a copy on Posix. Slash is a path separator, back slashes are not accepted as a substitute.
         const auto &path = input_files[i];
-#endif // _WIN32
+#endif  // _WIN32
         in_temp = (path.parent_path() == temp_path);
         const boost::filesystem::path filename = path.filename();
 
@@ -3503,6 +3593,16 @@ void Plater::priv::set_current_panel(wxPanel *panel)
 
     wxPanel *old_panel = current_panel;
     current_panel = panel;
+
+    // preFlight: Deactivate preview clip controller when navigating away from Preview
+    if (old_panel == preview && panel != preview)
+    {
+        GCodeViewer &gcode_viewer = preview->get_canvas3d()->get_gcode_viewer();
+        if (gcode_viewer.get_preview_clip_controller().is_active())
+            gcode_viewer.get_preview_clip_controller().deactivate();
+        gcode_viewer.get_libvgcode_viewer().reset_clipping_plane();
+    }
+
     // to reduce flickering when changing view, first set as visible the new current panel
     for (wxPanel *p : panels)
     {

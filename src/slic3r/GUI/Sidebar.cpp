@@ -24,6 +24,7 @@
 #include "PhysicalPrinterDialog.hpp"
 #include "MsgDialog.hpp"
 
+#include <wx/dcbuffer.h>
 #include <wx/stattext.h>
 #include <wx/combobox.h>
 #include <wx/button.h>
@@ -566,7 +567,11 @@ public:
 
 ObjectInfo::ObjectInfo(wxWindow *parent) : wxStaticBoxSizer(new FlatStaticBox(parent, wxID_ANY, _L("Info")), wxVERTICAL)
 {
+#ifdef _WIN32
+    // Windows only: wxBG_STYLE_PAINT needed for MSWWindowProc border painting.
+    // On GTK3, this would interfere with FlatStaticBox's custom draw handler.
     GetStaticBox()->SetBackgroundStyle(wxBG_STYLE_PAINT);
+#endif
     GetStaticBox()->SetFont(wxGetApp().bold_font());
     wxGetApp().UpdateDarkUI(GetStaticBox());
 
@@ -617,7 +622,16 @@ ObjectInfo::ObjectInfo(wxWindow *parent) : wxStaticBoxSizer(new FlatStaticBox(pa
     label_volume = init_info_label(&info_volume, _L("Volume"), volume_info_sizer);
 
     init_info_label(&info_facets, _L("Facets"));
+#ifdef __WXGTK__
+    // preFlight: FlatStaticBox removes GtkFrame label, so content starts at top.
+    // Add top padding to clear the custom-drawn border/label (label height + gap).
+    // Use em/2 left/right/bottom margin since GTK has no native wxStaticBox
+    // internal padding (matches OptionsGroup::activate() pattern).
+    AddSpacer(em * 3 / 2);
+    Add(grid_sizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, em / 2);
+#else
     Add(grid_sizer, 0, wxEXPAND);
+#endif
 
     info_manifold = new wxStaticText(parent, wxID_ANY, "");
     info_manifold->SetFont(wxGetApp().small_font());
@@ -628,7 +642,11 @@ ObjectInfo::ObjectInfo(wxWindow *parent) : wxStaticBoxSizer(new FlatStaticBox(pa
     auto *sizer_manifold = new wxBoxSizer(wxHORIZONTAL);
     sizer_manifold->Add(manifold_warning_icon, 0, wxLEFT, GetIconMargin());
     sizer_manifold->Add(info_manifold, 0, wxLEFT, GetIconMargin());
+#ifdef __WXGTK__
+    Add(sizer_manifold, 0, wxEXPAND | wxTOP | wxLEFT | wxRIGHT | wxBOTTOM, em / 2);
+#else
     Add(sizer_manifold, 0, wxEXPAND | wxTOP, em / 2);
+#endif
 
     sla_hidden_items = {
         label_volume,
@@ -1497,6 +1515,9 @@ wxPanel *PrintSettingsPanel::BuildLayersContent()
         auto *adv_group = CreateFlatStaticBoxSizer(content, _L("Advanced"));
         CreateSettingRow(content, adv_group, "perimeter_generator", _L("Perimeter generator"));
         CreateSettingRow(content, adv_group, "seam_position", _L("Seam position"));
+        CreateSettingRow(content, adv_group, "seam_notch", _L("Nip/Tuck seams"));
+        CreateSettingRow(content, adv_group, "seam_notch_width", _L("Nip/Tuck width"));
+        CreateSettingRow(content, adv_group, "seam_notch_angle", _L("Nip/Tuck corner threshold"));
         CreateSettingRow(content, adv_group, "seam_gap_distance", _L("Seam gap"));
         CreateSettingRow(content, adv_group, "staggered_inner_seams", _L("Staggered inner seams"));
         CreateSettingRow(content, adv_group, "external_perimeters_first", _L("External perimeters first"));
@@ -2705,9 +2726,13 @@ void PrintSettingsPanel::ApplyToggleLogic()
     bool have_perimeters = config.opt_int("perimeters") > 0;
     for (const char *el :
          {"extra_perimeters", "extra_perimeters_on_overhangs", "thin_walls", "overhangs", "seam_position",
-          "staggered_inner_seams", "external_perimeters_first", "external_perimeter_extrusion_width", "perimeter_speed",
-          "small_perimeter_speed", "external_perimeter_speed", "enable_dynamic_overhang_speeds"})
+          "staggered_inner_seams", "seam_notch", "seam_notch_width", "seam_notch_angle", "external_perimeters_first",
+          "external_perimeter_extrusion_width", "perimeter_speed", "small_perimeter_speed", "external_perimeter_speed",
+          "enable_dynamic_overhang_speeds"})
         ToggleOption(el, have_perimeters);
+
+    ToggleOption("seam_notch_width", have_perimeters && config.opt_bool("seam_notch"));
+    ToggleOption("seam_notch_angle", have_perimeters && config.opt_bool("seam_notch"));
 
     // Dynamic overhang speeds depend on enable_dynamic_overhang_speeds
     bool have_dynamic_overhang = have_perimeters && config.opt_bool("enable_dynamic_overhang_speeds");
@@ -8667,6 +8692,222 @@ void ProcessSection::sys_color_changed()
 // Sidebar Implementation
 // ============================================================================
 
+// ============================================================================
+// SidebarTabBar - Horizontal tab strip for sidebar navigation
+// ============================================================================
+
+class SidebarTabBar : public wxPanel
+{
+public:
+    struct TabItem
+    {
+        wxString label;
+        std::string icon_name;
+        wxBitmapBundle icon_bundle;
+    };
+
+    SidebarTabBar(wxWindow *parent) : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxNO_BORDER)
+    {
+        SetBackgroundStyle(wxBG_STYLE_PAINT);
+
+        // Define the 4 tabs with their icons (same icons used by CollapsibleSection headers)
+        // Objects first — lightest to render, best for fast startup
+        m_tabs = {
+            {_L("Objects"), "shape_gallery", {}},
+            {_L("Print"), "cog", {}},
+            {_L("Filament"), "spool", {}},
+            {_L("Printer"), "printer", {}},
+        };
+
+        // Load icon bundles
+        for (auto &tab : m_tabs)
+            tab.icon_bundle = *get_bmp_bundle(tab.icon_name);
+
+        // Calculate height: compact style, DPI-aware
+        int em = wxGetApp().em_unit();
+        int bar_height = em * 28 / 10; // 2.8em - compact but readable
+        SetMinSize(wxSize(-1, bar_height));
+
+        Bind(wxEVT_PAINT, &SidebarTabBar::OnPaint, this);
+        Bind(wxEVT_LEFT_DOWN, &SidebarTabBar::OnMouseDown, this);
+        Bind(wxEVT_MOTION, &SidebarTabBar::OnMouseMove, this);
+        Bind(wxEVT_LEAVE_WINDOW, &SidebarTabBar::OnMouseLeave, this);
+    }
+
+    void SetActiveTab(int index)
+    {
+        if (index >= 0 && index < (int) m_tabs.size() && index != m_active_tab)
+        {
+            m_active_tab = index;
+            Refresh();
+            if (m_on_tab_changed)
+                m_on_tab_changed(index);
+        }
+    }
+
+    int GetActiveTab() const { return m_active_tab; }
+
+    void SetOnTabChanged(std::function<void(int)> cb) { m_on_tab_changed = std::move(cb); }
+
+    // Called on theme/DPI change
+    void UpdateAppearance()
+    {
+        for (auto &tab : m_tabs)
+            tab.icon_bundle = *get_bmp_bundle(tab.icon_name);
+
+        int em = wxGetApp().em_unit();
+        int bar_height = em * 28 / 10;
+        SetMinSize(wxSize(-1, bar_height));
+        Refresh();
+    }
+
+private:
+    void OnPaint(wxPaintEvent &)
+    {
+        wxAutoBufferedPaintDC dc(this);
+        wxSize size = GetClientSize();
+        int em = wxGetApp().em_unit();
+        bool is_dark = wxGetApp().dark_mode();
+
+        // Background - use section header background for visual weight
+        wxColour bg_color = is_dark ? UIColors::SectionHeaderBackgroundDark()
+                                    : UIColors::SectionHeaderBackgroundLight();
+        dc.SetBackground(wxBrush(bg_color));
+        dc.Clear();
+
+        if (m_tabs.empty())
+            return;
+
+        int tab_count = (int) m_tabs.size();
+        int tab_width = size.GetWidth() / tab_count;
+        int icon_size = em * 16 / 10; // 1.6em logical icon size
+        int padding = em * 6 / 10;    // 0.6em padding
+
+        // Colors
+        wxColour text_normal = is_dark ? UIColors::TabTextNormalDark() : UIColors::TabTextNormalLight();
+        wxColour text_selected = is_dark ? UIColors::TabTextSelectedDark() : UIColors::TabTextSelectedLight();
+        wxColour bg_selected = is_dark ? UIColors::TabBackgroundSelectedDark() : UIColors::TabBackgroundSelectedLight();
+        wxColour bg_hover = is_dark ? UIColors::TabBackgroundHoverDark() : UIColors::TabBackgroundHoverLight();
+        wxColour divider_color = is_dark ? UIColors::HeaderDividerDark() : UIColors::HeaderDividerLight();
+        wxColour accent_color = UIColors::AccentPrimary(); // preFlight orange for active indicator
+
+        // Font - use bold font to match CollapsibleSection accordion headers
+        wxFont font = wxGetApp().bold_font();
+        dc.SetFont(font);
+
+        for (int i = 0; i < tab_count; i++)
+        {
+            int x = i * tab_width;
+            int w = (i == tab_count - 1) ? (size.GetWidth() - x) : tab_width; // Last tab gets remaining width
+            wxRect tab_rect(x, 0, w, size.GetHeight());
+
+            // Draw tab background
+            if (i == m_active_tab)
+            {
+                dc.SetBrush(wxBrush(bg_selected));
+                dc.SetPen(*wxTRANSPARENT_PEN);
+                dc.DrawRectangle(tab_rect);
+
+                // Active indicator - orange line at bottom (3px)
+                int indicator_height = em * 3 / 10;
+                if (indicator_height < 2)
+                    indicator_height = 2;
+                dc.SetBrush(wxBrush(accent_color));
+                dc.DrawRectangle(x + 1, size.GetHeight() - indicator_height, w - 2, indicator_height);
+            }
+            else if (i == m_hovered_tab)
+            {
+                dc.SetBrush(wxBrush(bg_hover));
+                dc.SetPen(*wxTRANSPARENT_PEN);
+                dc.DrawRectangle(tab_rect);
+            }
+
+            // Draw icon + text centered in tab
+            const auto &tab = m_tabs[i];
+            wxBitmap icon = tab.icon_bundle.GetBitmapFor(this);
+
+            // Scale icon to desired logical size if needed
+            wxSize icon_sz = icon.IsOk() ? icon.GetSize() : wxSize(0, 0);
+
+            wxSize text_sz = dc.GetTextExtent(tab.label);
+            int content_width = (icon.IsOk() ? icon_sz.GetWidth() + padding : 0) + text_sz.GetWidth();
+            int content_x = x + (w - content_width) / 2;
+            int center_y = (size.GetHeight()) / 2;
+
+            // Draw icon
+            if (icon.IsOk())
+            {
+                int icon_y = center_y - icon_sz.GetHeight() / 2;
+                dc.DrawBitmap(icon, content_x, icon_y, true);
+                content_x += icon_sz.GetWidth() + padding;
+            }
+
+            // Draw text
+            dc.SetTextForeground(i == m_active_tab ? text_selected : text_normal);
+            int text_y = center_y - text_sz.GetHeight() / 2;
+            dc.DrawText(tab.label, content_x, text_y);
+
+            // Draw divider between tabs (not after last tab)
+            if (i < tab_count - 1)
+            {
+                int divider_x = x + w - 1;
+                int divider_margin = size.GetHeight() / 4; // Vertical margin for divider
+                dc.SetPen(wxPen(divider_color, 1));
+                dc.DrawLine(divider_x, divider_margin, divider_x, size.GetHeight() - divider_margin);
+            }
+        }
+
+        // Bottom border line
+        dc.SetPen(wxPen(divider_color, 1));
+        dc.DrawLine(0, size.GetHeight() - 1, size.GetWidth(), size.GetHeight() - 1);
+    }
+
+    void OnMouseDown(wxMouseEvent &evt)
+    {
+        int tab = HitTest(evt.GetPosition());
+        if (tab >= 0)
+            SetActiveTab(tab);
+    }
+
+    void OnMouseMove(wxMouseEvent &evt)
+    {
+        int tab = HitTest(evt.GetPosition());
+        if (tab != m_hovered_tab)
+        {
+            m_hovered_tab = tab;
+            SetCursor(tab >= 0 ? wxCursor(wxCURSOR_HAND) : wxNullCursor);
+            Refresh();
+        }
+    }
+
+    void OnMouseLeave(wxMouseEvent &)
+    {
+        if (m_hovered_tab >= 0)
+        {
+            m_hovered_tab = -1;
+            Refresh();
+        }
+    }
+
+    int HitTest(const wxPoint &pt) const
+    {
+        if (m_tabs.empty())
+            return -1;
+        int tab_width = GetClientSize().GetWidth() / (int) m_tabs.size();
+        if (tab_width <= 0)
+            return -1;
+        int idx = pt.x / tab_width;
+        if (idx >= 0 && idx < (int) m_tabs.size())
+            return idx;
+        return -1;
+    }
+
+    std::vector<TabItem> m_tabs;
+    int m_active_tab{0};
+    int m_hovered_tab{-1};
+    std::function<void(int)> m_on_tab_changed;
+};
+
 Sidebar::Sidebar(Plater *parent)
     : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL)
     , m_plater(parent)
@@ -8727,18 +8968,23 @@ void Sidebar::BuildUI()
 
     m_main_sizer = new wxBoxSizer(wxVERTICAL);
 
-    // Scrolled panel for sections - match old Sidebar exactly
+    // Read tabbed mode preference
+    m_tabbed_mode = wxGetApp().app_config->get_bool("use_tabbed_sidebar");
+
+    // Tab bar - horizontal navigation strip
+    m_tab_bar = new SidebarTabBar(this);
+    m_tab_bar->SetOnTabChanged([this](int /*tab_index*/) { ApplyTabVisibility(); });
+    m_main_sizer->Add(m_tab_bar, 0, wxEXPAND);
+
+    // Scrolled panel for sections
     m_scrolled_panel = new wxScrolledWindow(this);
     m_scrolled_panel->SetScrollRate(0, 5);
     m_scrolled_panel->ShowScrollbars(wxSHOW_SB_NEVER, wxSHOW_SB_NEVER);
 
     SetFont(wxGetApp().normal_font());
 #ifdef _WIN32
-    wxGetApp().UpdateDarkUI(this);
-    wxGetApp().UpdateDarkUI(m_scrolled_panel);
-    // UNIFIED THEMING: Always apply DarkMode_Explorer for scrollbar theming
-    NppDarkMode::SetDarkExplorerTheme(m_scrolled_panel->GetHWND());
     m_scrolled_panel->SetDoubleBuffered(true);
+    // Dark mode theming deferred to CallAfter — HWNDs aren't valid during construction
 #endif
 
     auto *scroll_sizer = new wxBoxSizer(wxVERTICAL);
@@ -8750,9 +8996,10 @@ void Sidebar::BuildUI()
     CreateObjectsSection();
 
     // Order: Print Settings, Filament Settings, Printer Settings, Object Settings
-    scroll_sizer->Add(m_process_section, 0, wxEXPAND | wxALL, em / 4);
+    scroll_sizer->Add(m_process_section, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, em / 4);
     scroll_sizer->Add(m_filament_section, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, em / 4);
     scroll_sizer->Add(m_printer_section, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, em / 4);
+
     // Object Settings gets proportion 1 to fill remaining space (ObjectList expands)
     scroll_sizer->Add(m_objects_section, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, em / 4);
 
@@ -8763,13 +9010,35 @@ void Sidebar::BuildUI()
 
     SetSizer(m_main_sizer);
 
+    // Set initial visibility inline — lightweight state-only, no HWND operations.
+    // This prevents the white flash without generating invalid window handle errors.
+    if (m_tabbed_mode)
+    {
+        // Objects tab (0) is default: show process + printer (collapsed pinned only), hide filament
+        m_filament_section->Show(false);
+        // Sections are created collapsed, so content containers are already hidden.
+        // Just ensure objects content is visible.
+    }
+    else
+    {
+        m_tab_bar->Show(false);
+    }
+
     // Bind preset combo selection handler - this triggers actual preset changes
     this->Bind(wxEVT_COMBOBOX, &Sidebar::on_select_preset, this);
 
-    // Force layout recalculation after window is fully shown to avoid dead space
+    // Full visibility setup + layout after window is fully realized (has valid HWNDs)
     CallAfter(
         [this]()
         {
+#ifdef _WIN32
+            // Deferred dark mode theming — HWNDs are now valid
+            wxGetApp().UpdateDarkUI(this);
+            wxGetApp().UpdateDarkUI(m_scrolled_panel);
+            if (m_scrolled_panel->GetHWND())
+                NppDarkMode::SetDarkExplorerTheme(m_scrolled_panel->GetHWND());
+#endif
+            ApplyTabVisibility();
             if (m_objects_section)
                 m_objects_section->Layout();
             m_scrolled_panel->FitInside();
@@ -8780,6 +9049,134 @@ void Sidebar::BuildUI()
 
     // Bind dead space click handlers to commit field changes
     BindDeadSpaceHandlers(m_scrolled_panel);
+}
+
+void Sidebar::ApplyTabVisibility()
+{
+    if (!m_tab_bar || !m_process_section || !m_filament_section || !m_printer_section || !m_objects_section)
+        return;
+
+    wxSizer *scroll_sizer = m_scrolled_panel->GetSizer();
+    if (!scroll_sizer)
+        return;
+
+    // Guard: only Freeze/Thaw and Layout when the native window exists.
+    // During BuildUI, HWNDs may not exist yet — Show/Hide still sets wx internal state correctly.
+    bool realized = (GetHandle() != nullptr);
+    if (realized)
+        Freeze();
+
+    // All 4 sections in sizer order (process, filament, printer, objects)
+    CollapsibleSection *all_sections[] = {m_process_section, m_filament_section, m_printer_section, m_objects_section};
+    bool show_pinned_labels = false;
+
+    if (m_tabbed_mode)
+    {
+        m_tab_bar->Show();
+        int active = m_tab_bar->GetActiveTab();
+        // Tab order: 0=Objects, 1=Print, 2=Filament, 3=Printer
+
+        // Thaw any frozen sections before changing visibility
+        for (auto *s : all_sections)
+        {
+            if (s->IsFrozen())
+                s->Thaw();
+        }
+
+        // First: hide all sections, hide all headers, collapse content
+        for (auto *s : all_sections)
+        {
+            s->Show(false);
+            s->SetHeaderVisible(false);
+            if (wxWindow *cc = s->GetContentContainer())
+                cc->Show(false);
+        }
+
+        if (active == 0) // Objects tab — show preset combos + object list
+        {
+            show_pinned_labels = true;
+
+            // Show Print section collapsed (only pinned combo visible), proportion 0
+            m_process_section->Show(true);
+            if (wxSizerItem *item = scroll_sizer->GetItem(m_process_section))
+                item->SetProportion(0);
+
+            // Show Printer section collapsed (only pinned combo + nozzle/filament rows), proportion 0
+            m_printer_section->Show(true);
+            if (wxSizerItem *item = scroll_sizer->GetItem(m_printer_section))
+                item->SetProportion(0);
+
+            // Show Objects section expanded, proportion 1 to fill remaining space
+            m_objects_section->Show(true);
+            if (wxWindow *cc = m_objects_section->GetContentContainer())
+                cc->Show(true);
+            if (wxSizerItem *item = scroll_sizer->GetItem(m_objects_section))
+                item->SetProportion(1);
+        }
+        else
+        {
+            // Map active tab to section: 1=Print, 2=Filament, 3=Printer
+            CollapsibleSection *tab_sections[] = {nullptr, m_process_section, m_filament_section, m_printer_section};
+            CollapsibleSection *active_section = tab_sections[active];
+            if (active_section)
+            {
+                active_section->Show(true);
+                if (wxWindow *cc = active_section->GetContentContainer())
+                    cc->Show(true);
+                if (wxSizerItem *item = scroll_sizer->GetItem(active_section))
+                    item->SetProportion(1);
+            }
+        }
+    }
+    else
+    {
+        // Unified mode: hide tab bar, show all sections with headers and original proportions
+        m_tab_bar->Hide();
+        for (auto *s : all_sections)
+        {
+            if (s->IsFrozen())
+                s->Thaw();
+        }
+        // Sizer order: process(0), filament(0), printer(0), objects(1)
+        int proportions[] = {0, 0, 0, 1};
+        for (int i = 0; i < 4; i++)
+        {
+            all_sections[i]->Show();
+            all_sections[i]->SetHeaderVisible(true);
+            // Restore content container visibility to match expanded state
+            if (wxWindow *cc = all_sections[i]->GetContentContainer())
+                cc->Show(all_sections[i]->IsExpanded());
+            if (wxSizerItem *item = scroll_sizer->GetItem(all_sections[i]))
+                item->SetProportion(proportions[i]);
+        }
+    }
+
+    // Show/hide compact labels and separator for Objects tab in tabbed mode
+    if (m_print_pinned_label)
+        m_print_pinned_label->Show(show_pinned_labels);
+    if (m_printer_pinned_label)
+        m_printer_pinned_label->Show(show_pinned_labels);
+    if (m_nozzle_pinned_label)
+        m_nozzle_pinned_label->Show(show_pinned_labels);
+    // Hide the non-bold unified label when the bold tabbed label is shown (and vice versa)
+    if (m_nozzle_unified_label)
+        m_nozzle_unified_label->Show(!show_pinned_labels);
+
+    if (realized)
+    {
+        m_scrolled_panel->FitInside();
+        m_scrolled_panel->Layout();
+        Layout();
+        Thaw();
+    }
+}
+
+void Sidebar::SetTabbedMode(bool tabbed)
+{
+    if (m_tabbed_mode == tabbed)
+        return;
+    m_tabbed_mode = tabbed;
+    ApplyTabVisibility();
 }
 
 void Sidebar::BindDeadSpaceHandlers(wxWindow *root)
@@ -8864,6 +9261,13 @@ void Sidebar::CreatePrinterSection()
     m_printer_content->SetForegroundColour(SidebarColors::Foreground());
     auto *pinned_sizer = new wxBoxSizer(wxVERTICAL);
 
+    // Compact label — shown only on Objects tab in tabbed mode
+    m_printer_pinned_label = new wxStaticText(m_printer_content, wxID_ANY, _L("Printer:"));
+    m_printer_pinned_label->SetFont(wxGetApp().bold_font());
+    m_printer_pinned_label->SetForegroundColour(SidebarColors::Foreground());
+    m_printer_pinned_label->Hide();
+    pinned_sizer->Add(m_printer_pinned_label, 0, wxLEFT | wxTOP, em / 2);
+
     // Printer preset combo with save button
     m_combo_printer = new PlaterPresetComboBox(m_printer_content, Preset::TYPE_PRINTER);
     m_combo_printer->SetMinSize(wxSize(1, -1)); // Allow combo to shrink
@@ -8915,6 +9319,14 @@ void Sidebar::CreatePrinterSection()
     combo_sizer->Add(m_btn_edit_physical_printer, 0, wxALIGN_CENTER_VERTICAL);
 
     pinned_sizer->Add(combo_sizer, 0, wxEXPAND | wxALL, em / 2);
+
+    // Compact label for nozzle/filament rows — shown only on Objects tab in tabbed mode
+    m_nozzle_pinned_label = new wxStaticText(m_printer_content, wxID_ANY,
+                                             _L("Nozzle diameter / Filament per extruder:"));
+    m_nozzle_pinned_label->SetFont(wxGetApp().bold_font());
+    m_nozzle_pinned_label->SetForegroundColour(SidebarColors::Foreground());
+    m_nozzle_pinned_label->Hide();
+    pinned_sizer->Add(m_nozzle_pinned_label, 0, wxLEFT | wxTOP, em / 2);
 
     // Filament combos for each extruder (quick selection without needing to go to Filaments section)
     m_printer_filament_sizer = new wxBoxSizer(wxVERTICAL);
@@ -9008,6 +9420,13 @@ void Sidebar::CreateProcessSection()
     pinned_panel->SetBackgroundColour(SidebarColors::Background());
     pinned_panel->SetForegroundColour(SidebarColors::Foreground());
     auto *pinned_sizer = new wxBoxSizer(wxVERTICAL);
+
+    // Compact label — shown only on Objects tab in tabbed mode
+    m_print_pinned_label = new wxStaticText(pinned_panel, wxID_ANY, _L("Print Settings:"));
+    m_print_pinned_label->SetFont(wxGetApp().bold_font());
+    m_print_pinned_label->SetForegroundColour(SidebarColors::Foreground());
+    m_print_pinned_label->Hide();
+    pinned_sizer->Add(m_print_pinned_label, 0, wxLEFT | wxTOP, em / 2);
 
     m_combo_print = new PlaterPresetComboBox(pinned_panel, Preset::TYPE_PRINT);
     m_combo_print->SetMinSize(wxSize(1, -1)); // Allow combo to shrink
@@ -9205,12 +9624,14 @@ void Sidebar::UpdatePrinterFilamentCombos()
         m_printer_nozzle_spins.clear();
         m_printer_filament_combos.clear();
 
-        // Add header label
-        auto *header_label = new wxStaticText(m_printer_content, wxID_ANY,
-                                              _L("Nozzle diameter / Filament per extruder:"));
-        // Apply theming to label - unified accessor handles both themes
-        header_label->SetForegroundColour(SidebarColors::Foreground());
-        m_printer_filament_sizer->Add(header_label, 0, wxBOTTOM, em / 4);
+        // Add header label (non-bold, shown in unified mode; hidden when bold tabbed label is visible)
+        m_nozzle_unified_label = new wxStaticText(m_printer_content, wxID_ANY,
+                                                  _L("Nozzle diameter / Filament per extruder:"));
+        m_nozzle_unified_label->SetForegroundColour(SidebarColors::Foreground());
+        // Hide if tabbed mode Objects tab is active (bold label replaces it)
+        if (m_tabbed_mode && m_tab_bar && m_tab_bar->GetActiveTab() == 0)
+            m_nozzle_unified_label->Hide();
+        m_printer_filament_sizer->Add(m_nozzle_unified_label, 0, wxBOTTOM, em / 4);
 
         // Add nozzle spin + filament combo rows
         for (size_t i = 0; i < extruder_count; ++i)
@@ -10096,6 +10517,9 @@ void Sidebar::msw_rescale()
     SetMinSize(wxSize(width, -1));
     SetSize(wxSize(width, -1));
 
+    if (m_tab_bar)
+        m_tab_bar->UpdateAppearance();
+
     if (m_printer_section)
         m_printer_section->msw_rescale();
     if (m_filament_section)
@@ -10158,6 +10582,9 @@ void Sidebar::sys_color_changed()
 #ifdef _WIN32
     wxWindowUpdateLocker noUpdates(this);
 #endif
+
+    if (m_tab_bar)
+        m_tab_bar->UpdateAppearance();
 
     // Use unified color accessor - no dark_mode() check needed
     wxColour bg_color = SidebarColors::Background();

@@ -23,6 +23,7 @@
 
 #include <string>
 #include <optional>
+#include <limits>
 
 namespace libvgcode
 {
@@ -180,6 +181,10 @@ public:
     size_t get_used_cpu_memory() const;
     size_t get_used_gpu_memory() const;
 
+    // preFlight: clipping plane for preview clipping feature
+    void set_clipping_plane(float nx, float ny, float nz, float offset);
+    void reset_clipping_plane();
+
 #if VGCODE_ENABLE_COG_AND_TOOL_MARKERS
     Vec3 get_cog_marker_position() const { return m_cog_marker.get_position(); }
 
@@ -253,6 +258,9 @@ private:
 
     bool m_initialized{false};
 
+    // preFlight: clipping plane data {nx, ny, nz, offset}, default clips nothing
+    std::array<float, 4> m_clipping_plane{0.0f, 0.0f, 1.0f, std::numeric_limits<float>::max()};
+
     //
     // The OpenGL element used to represent all toolpath segments
     //
@@ -320,6 +328,7 @@ private:
     int m_uni_segments_height_width_angle_tex_id{-1};
     int m_uni_segments_colors_tex_id{-1};
     int m_uni_segments_segment_index_tex_id{-1};
+    int m_uni_segments_clipping_plane_id{-1};
     //
     // Caches for OpenGL uniforms id for options shader
     //
@@ -329,6 +338,7 @@ private:
     int m_uni_options_height_width_angle_tex_id{-1};
     int m_uni_options_colors_tex_id{-1};
     int m_uni_options_segment_index_tex_id{-1};
+    int m_uni_options_clipping_plane_id{-1};
 #if VGCODE_ENABLE_COG_AND_TOOL_MARKERS
     //
     // Caches for OpenGL uniforms id for cog marker shader

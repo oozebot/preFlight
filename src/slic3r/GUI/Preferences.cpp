@@ -547,6 +547,12 @@ void PreferencesDialog::build()
     };
 
     append_bool_option(
+        m_optgroup_gui, "use_tabbed_sidebar", L("Use tabbed sidebar layout"),
+        L("If enabled, the sidebar shows a tab bar to switch between Print, Filament, Printer, and Object settings. "
+          "If disabled, all settings sections are shown stacked in a single scrollable view."),
+        app_config->get_bool("use_tabbed_sidebar"));
+
+    append_bool_option(
         m_optgroup_gui, "seq_top_layer_only", L("Sequential slider applied only to top layer"),
         L("If enabled, changes made using the sequential slider, in preview, apply only to gcode top layer. "
           "If disabled, changes made using the sequential slider, in preview, apply to the whole gcode."),

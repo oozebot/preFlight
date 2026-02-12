@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Isometric cube faces (light fills for depth) -->
+  <!-- Top face -->
+  <polygon points="8,2 14,5 8,8 2,5" fill="#FFFFFF" fill-opacity="0.12"/>
+  <!-- Left face -->
+  <polygon points="2,5 8,8 8,14 2,11" fill="#FFFFFF" fill-opacity="0.06"/>
+  <!-- Right face -->
+  <polygon points="14,5 14,11 8,14 8,8" fill="#FFFFFF" fill-opacity="0.03"/>
+
+  <!-- Cube wireframe (white edges) -->
+  <path d="M8,2 L14,5 L14,11 L8,14 L2,11 L2,5 Z" fill="none" stroke="#FFFFFF" stroke-width="0.9" stroke-linejoin="round"/>
+  <line x1="8" y1="8" x2="8" y2="14" stroke="#FFFFFF" stroke-width="0.6" opacity="0.4"/>
+  <line x1="2" y1="5" x2="8" y2="8" stroke="#FFFFFF" stroke-width="0.6" opacity="0.4"/>
+  <line x1="14" y1="5" x2="8" y2="8" stroke="#FFFFFF" stroke-width="0.6" opacity="0.4"/>
+
+  <!-- 45-degree cut plane through edge midpoints (orange) -->
+  <polygon points="5,3.5 14,8 11,12.5 2,8" fill="#EAA032" fill-opacity="0.75" stroke="#EAA032" stroke-width="0.6"/>
+</svg>

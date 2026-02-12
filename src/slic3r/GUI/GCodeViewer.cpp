@@ -1767,6 +1767,11 @@ void GCodeViewer::update_shells_color_by_extruder(const DynamicPrintConfig *conf
 
 void GCodeViewer::reset()
 {
+    // preFlight: Deactivate clip controller and reset clipping plane before resetting
+    if (m_preview_clip_controller.is_active())
+        m_preview_clip_controller.deactivate();
+    m_viewer.reset_clipping_plane();
+
     m_viewer.reset();
 
     m_paths_bounding_box.reset();
@@ -1792,6 +1797,9 @@ void GCodeViewer::render()
         return;
 
     render_toolpaths();
+
+    // preFlight: Render the clipping plane ImGui overlay if active
+    m_preview_clip_controller.render_imgui();
 
     float legend_height = 0.0f;
     if (m_viewer.get_layers_count() > 0)
@@ -2661,6 +2669,53 @@ void GCodeViewer::render_shells()
     if (m_shells.volumes.empty() || (!m_shells.visible && !m_shells.force_visible))
         return;
 
+    // preFlight: When preview clip controller is active, render only the clipped object shell
+    if (m_preview_clipping_plane.has_value())
+    {
+        GLShaderProgram *shader = wxGetApp().get_shader("gouraud_light_clip");
+        if (shader == nullptr)
+            return;
+
+        shader->start_using();
+        shader->set_uniform("emission_factor", 0.1f);
+
+        const Camera &camera = wxGetApp().plater()->get_camera();
+        Transform3d view_matrix = camera.get_view_matrix();
+        view_matrix.translate(s_multiple_beds.get_bed_translation(s_multiple_beds.get_active_bed()));
+        const Transform3d &projection_matrix = camera.get_projection_matrix();
+
+        const std::array<double, 4> &clip_plane = m_preview_clipping_plane.value();
+
+        glsafe(::glDisable(GL_BLEND));
+        glsafe(::glDepthMask(true));
+
+        const ColorRGBA shell_color(Theme::Secondary::R_NORM, Theme::Secondary::G_NORM, Theme::Secondary::B_NORM, 1.0f);
+
+        for (GLVolume *volume : m_shells.volumes.volumes)
+        {
+            if (volume == nullptr || !volume->is_active || volume->composite_id.volume_id < 0)
+                continue;
+
+            const Transform3d world_matrix = volume->world_matrix();
+            const Matrix3d view_normal_matrix = view_matrix.matrix().block(0, 0, 3, 3) *
+                                                world_matrix.matrix().block(0, 0, 3, 3).inverse().transpose();
+
+            shader->set_uniform("clipping_plane", clip_plane);
+            shader->set_uniform("volume_world_matrix", world_matrix);
+            shader->set_uniform("view_model_matrix", view_matrix * world_matrix);
+            shader->set_uniform("projection_matrix", projection_matrix);
+            shader->set_uniform("view_normal_matrix", view_normal_matrix);
+
+            volume->model.set_color(shell_color);
+            volume->render();
+        }
+
+        glsafe(::glDepthMask(true));
+        shader->set_uniform("emission_factor", 0.0f);
+        shader->stop_using();
+        return;
+    }
+
     // Get max Z height from shell volumes' bounding box
     double max_z = 0.0;
     for (const GLVolume *volume : m_shells.volumes.volumes)
@@ -2791,8 +2846,8 @@ void GCodeViewer::render_legend(float &legend_height)
     ImFont *legend_font = imgui.get_legend_font();
     if (legend_font)
         ImGui::PushFont(legend_font);
-    ImGuiPureWrap::begin(std::string("Legend"),
-                         ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove);
+    ImGuiPureWrap::begin(std::string("Legend"), ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoResize |
+                                                    ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoScrollbar);
     const bool legend_collapsed = ImGui::IsWindowCollapsed();
 
     enum class EItemType : unsigned char
@@ -3951,7 +4006,8 @@ void GCodeViewer::render_legend(float &legend_height)
                 ImGui::TableSetColumnIndex(0);
                 ImGuiPureWrap::text_colored(ImGuiPureWrap::COL_ORANGE_LIGHT, (_u8L("First layer") + ":").c_str());
                 ImGui::TableSetColumnIndex(1);
-                ImGuiPureWrap::text_colored(LEGEND_TEXT_COLOR, short_time_ui(get_time_dhms(layers_times.front())).c_str());
+                ImGuiPureWrap::text_colored(LEGEND_TEXT_COLOR,
+                                            short_time_ui(get_time_dhms(layers_times.front())).c_str());
             }
             ImGui::TableSetColumnIndex(2);
             ImGuiPureWrap::text_colored(ImGuiPureWrap::COL_ORANGE_LIGHT, (_u8L("Total") + ":").c_str());

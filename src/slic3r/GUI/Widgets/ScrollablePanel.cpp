@@ -63,24 +63,33 @@ void ScrollablePanel::ScrollToPosition(int position)
 
 void ScrollablePanel::ScrollToChild(wxWindow *child)
 {
-    if (!child || child->GetParent() != m_content)
+    if (!child || !m_content)
         return;
 
-    wxPoint childPos = child->GetPosition();
+    // Walk up the parent chain to compute the child's position relative to m_content.
+    // This handles deeply nested children (e.g. field widgets inside OG_CustomCtrl inside Page).
+    wxPoint posInContent(0, 0);
+    for (wxWindow *w = child; w && w != m_content; w = w->GetParent())
+    {
+        wxPoint p = w->GetPosition();
+        posInContent.x += p.x;
+        posInContent.y += p.y;
+    }
+
     wxSize childSize = child->GetSize();
     wxSize mySize = GetClientSize();
 
     // Get child's position relative to visible area
-    int childTop = childPos.y - m_scrollPosition;
+    int childTop = posInContent.y - m_scrollPosition;
     int childBottom = childTop + childSize.y;
 
     if (childTop < 0)
     {
-        ScrollToPosition(childPos.y);
+        ScrollToPosition(posInContent.y);
     }
     else if (childBottom > mySize.y)
     {
-        ScrollToPosition(childPos.y + childSize.y - mySize.y);
+        ScrollToPosition(posInContent.y + childSize.y - mySize.y);
     }
 }
 

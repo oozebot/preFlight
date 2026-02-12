@@ -294,8 +294,13 @@ bool DesktopIntegrationDialog::needs_path_update()
 
     // Determine the current executable path (same logic as perform_desktop_integration)
     std::string current_path;
+    const char *flatpak_id = std::getenv("FLATPAK_ID");
     const char *appimage_env = std::getenv("APPIMAGE");
-    if (appimage_env)
+    if (flatpak_id)
+    {
+        current_path = std::string("flatpak run ") + flatpak_id;
+    }
+    else if (appimage_env)
     {
         try
         {
@@ -310,7 +315,8 @@ bool DesktopIntegrationDialog::needs_path_update()
     {
         current_path = boost::dll::program_location().string();
     }
-    current_path = escape_string(current_path);
+    if (!flatpak_id)
+        current_path = escape_string(current_path);
 
     BOOST_LOG_TRIVIAL(debug) << "Desktop integration path check: file=" << exec_path_in_file
                              << " current=" << current_path;
@@ -326,10 +332,17 @@ void DesktopIntegrationDialog::perform_desktop_integration()
 {
     BOOST_LOG_TRIVIAL(debug) << __FUNCTION__;
     BOOST_LOG_TRIVIAL(debug) << "performing desktop integration.";
-    // Path to appimage
+    // Determine executable path based on runtime environment
     const char *appimage_env = std::getenv("APPIMAGE");
+    const char *flatpak_id = std::getenv("FLATPAK_ID");
     std::string excutable_path;
-    if (appimage_env)
+    if (flatpak_id)
+    {
+        // Flatpak: launch via flatpak run
+        excutable_path = std::string("flatpak run ") + flatpak_id;
+        BOOST_LOG_TRIVIAL(debug) << "Flatpak detected, Exec path: " << excutable_path;
+    }
+    else if (appimage_env)
     {
         try
         {
@@ -347,7 +360,7 @@ void DesktopIntegrationDialog::perform_desktop_integration()
     }
     else
     {
-        // not appimage - find executable
+        // not appimage or flatpak - find executable
         excutable_path = boost::dll::program_location().string();
         //excutable_path = wxStandardPaths::Get().GetExecutablePath().string();
         BOOST_LOG_TRIVIAL(debug) << "non-appimage path to executable: " << excutable_path;
@@ -359,9 +372,9 @@ void DesktopIntegrationDialog::perform_desktop_integration()
         }
     }
 
-    // Escape ' characters in appimage, other special symbols will be esacaped in desktop file by 'excutable_path'
-    //boost::replace_all(excutable_path, "'", "'\\''");
-    excutable_path = escape_string(excutable_path);
+    // Escape path for non-Flatpak (Flatpak uses "flatpak run <id>" which must not be quoted)
+    if (!flatpak_id)
+        excutable_path = escape_string(excutable_path);
 
     // Find directories icons and applications
     // $XDG_DATA_HOME defines the base directory relative to which user specific data files should be stored.
@@ -403,39 +416,55 @@ void DesktopIntegrationDialog::perform_desktop_integration()
     std::string target_dir_icons;
     std::string target_dir_desktop;
 
-    // slicer icon
-    // iterate thru target_candidates to find icons folder
-    for (size_t i = 0; i < target_candidates.size(); ++i)
+    // Flatpak: XDG candidates include read-only /app/share (which has pre-existing files from
+    // cmake install, causing false positives). Go directly to $HOME/.local/share which is made
+    // accessible to the host via --filesystem=xdg-data in the manifest.
+    if (flatpak_id)
     {
-        // preFlight: Copy SVG icon from resources_dir()/icons to target_dir_icons/icons/
-        if (contains_path_dir(target_candidates[i], "icons"))
+        create_path(into_u8(wxFileName::GetHomeDir()), ".local/share/icons" + icon_theme_dirs);
+        target_dir_icons = GUI::format("%1%/.local/share", wxFileName::GetHomeDir());
+        std::string icon_path = GUI::format("%1%/icons/preFlight.svg", resources_dir());
+        std::string dest_path = GUI::format("%1%/icons/%2%preFlight%3%.svg", target_dir_icons, icon_theme_path,
+                                            version_suffix);
+        if (!contains_path_dir(target_dir_icons, "icons") || !copy_icon(icon_path, dest_path))
+            target_dir_icons.clear();
+    }
+    else
+    {
+        // slicer icon
+        // iterate thru target_candidates to find icons folder
+        for (size_t i = 0; i < target_candidates.size(); ++i)
         {
-            target_dir_icons = target_candidates[i];
-            std::string icon_path = GUI::format("%1%/icons/preFlight.svg", resources_dir());
-            std::string dest_path = GUI::format("%1%/icons/%2%preFlight%3%.svg", target_dir_icons, icon_theme_path,
-                                                version_suffix);
-            if (copy_icon(icon_path, dest_path))
-                break; // success
-            else
-                target_dir_icons.clear(); // copying failed
-        }
-        // if all failed - try creating default home folder
-        if (i == target_candidates.size() - 1)
-        {
-            // create $HOME/.local/share
-            create_path(into_u8(wxFileName::GetHomeDir()), ".local/share/icons" + icon_theme_dirs);
-            // copy icon
-            target_dir_icons = GUI::format("%1%/.local/share", wxFileName::GetHomeDir());
-            std::string icon_path = GUI::format("%1%/icons/preFlight.svg", resources_dir());
-            std::string dest_path = GUI::format("%1%/icons/%2%preFlight%3%.svg", target_dir_icons, icon_theme_path,
-                                                version_suffix);
-            if (!contains_path_dir(target_dir_icons, "icons") || !copy_icon(icon_path, dest_path))
+            // preFlight: Copy SVG icon from resources_dir()/icons to target_dir_icons/icons/
+            if (contains_path_dir(target_candidates[i], "icons"))
             {
-                // every attempt failed - icon wont be present
-                target_dir_icons.clear();
+                target_dir_icons = target_candidates[i];
+                std::string icon_path = GUI::format("%1%/icons/preFlight.svg", resources_dir());
+                std::string dest_path = GUI::format("%1%/icons/%2%preFlight%3%.svg", target_dir_icons, icon_theme_path,
+                                                    version_suffix);
+                if (copy_icon(icon_path, dest_path))
+                    break; // success
+                else
+                    target_dir_icons.clear(); // copying failed
+            }
+            // if all failed - try creating default home folder
+            if (i == target_candidates.size() - 1)
+            {
+                // create $HOME/.local/share
+                create_path(into_u8(wxFileName::GetHomeDir()), ".local/share/icons" + icon_theme_dirs);
+                // copy icon
+                target_dir_icons = GUI::format("%1%/.local/share", wxFileName::GetHomeDir());
+                std::string icon_path = GUI::format("%1%/icons/preFlight.svg", resources_dir());
+                std::string dest_path = GUI::format("%1%/icons/%2%preFlight%3%.svg", target_dir_icons, icon_theme_path,
+                                                    version_suffix);
+                if (!contains_path_dir(target_dir_icons, "icons") || !copy_icon(icon_path, dest_path))
+                {
+                    // every attempt failed - icon wont be present
+                    target_dir_icons.clear();
+                }
             }
         }
-    }
+    } // !flatpak_id
     if (target_dir_icons.empty())
     {
         BOOST_LOG_TRIVIAL(error) << "Copying preFlight icon to icons directory failed.";
@@ -448,13 +477,16 @@ void DesktopIntegrationDialog::perform_desktop_integration()
 
     // desktop file
     // iterate thru target_candidates to find applications folder
+    // Flatpak: Exec= must not quote the command (it's "flatpak run <id>", not a single path)
+    std::string exec_line = flatpak_id ? GUI::format("Exec=%1% %%F", excutable_path)
+                                       : GUI::format("Exec=\"%1%\" %%F", excutable_path);
 
     std::string desktop_file = GUI::format(
         "[Desktop Entry]\n"
         "Name=preFlight%1%\n"
         "GenericName=3D Printing Software\n"
         "Icon=preFlight%2%\n"
-        "Exec=\"%3%\" %%F\n"
+        "%3%\n"
         "Terminal=false\n"
         "Type=Application\n"
         "MimeType=model/stl;application/vnd.ms-3mfdocument;application/prs.wavefront-obj;application/x-amf;\n"
@@ -462,56 +494,74 @@ void DesktopIntegrationDialog::perform_desktop_integration()
         "Keywords=3D;Printing;Slicer;slice;3D;printer;convert;gcode;stl;obj;amf;SLA\n"
         "StartupNotify=false\n"
         "StartupWMClass=preFlight\n",
-        name_suffix, version_suffix, excutable_path);
+        name_suffix, version_suffix, exec_line);
 
-    bool candidate_found = false;
-    for (size_t i = 0; i < target_candidates.size(); ++i)
+    // Flatpak: write directly to $HOME/.local/share (host-accessible via xdg-data permission)
+    if (flatpak_id)
     {
-        if (contains_path_dir(target_candidates[i], "applications"))
+        create_path(into_u8(wxFileName::GetHomeDir()), ".local/share/applications");
+        target_dir_desktop = GUI::format("%1%/.local/share", wxFileName::GetHomeDir());
+        std::string path = GUI::format("%1%/applications/preFlight%2%.desktop", target_dir_desktop, version_suffix);
+        if (!create_desktop_file(path, desktop_file))
         {
-            target_dir_desktop = target_candidates[i];
-            // Write slicer desktop file
-            std::string path = GUI::format("%1%/applications/preFlight%2%.desktop", target_dir_desktop, version_suffix);
-            if (create_desktop_file(path, desktop_file))
+            BOOST_LOG_TRIVIAL(error) << "Performing desktop integration failed - could not create desktop file";
+            show_error(nullptr, _L("Performing desktop integration failed - could not create desktop file."));
+            return;
+        }
+        BOOST_LOG_TRIVIAL(debug) << "preFlight.desktop file installation success (Flatpak).";
+    }
+    else
+    {
+        bool candidate_found = false;
+        for (size_t i = 0; i < target_candidates.size(); ++i)
+        {
+            if (contains_path_dir(target_candidates[i], "applications"))
             {
-                candidate_found = true;
-                BOOST_LOG_TRIVIAL(debug) << "preFlight.desktop file installation success.";
-                break;
+                target_dir_desktop = target_candidates[i];
+                // Write slicer desktop file
+                std::string path = GUI::format("%1%/applications/preFlight%2%.desktop", target_dir_desktop,
+                                               version_suffix);
+                if (create_desktop_file(path, desktop_file))
+                {
+                    candidate_found = true;
+                    BOOST_LOG_TRIVIAL(debug) << "preFlight.desktop file installation success.";
+                    break;
+                }
+                else
+                {
+                    // write failed - try another path
+                    BOOST_LOG_TRIVIAL(debug) << "Attempt to preFlight.desktop file installation failed. failed path: "
+                                             << target_candidates[i];
+                    target_dir_desktop.clear();
+                }
+            }
+        }
+        // if all failed - try creating default home folder
+        if (!candidate_found)
+        {
+            // create $HOME/.local/share
+            create_path(into_u8(wxFileName::GetHomeDir()), ".local/share/applications");
+            // create desktop file
+            target_dir_desktop = GUI::format("%1%/.local/share", wxFileName::GetHomeDir());
+            std::string path = GUI::format("%1%/applications/preFlight%2%.desktop", target_dir_desktop, version_suffix);
+            if (contains_path_dir(target_dir_desktop, "applications"))
+            {
+                if (!create_desktop_file(path, desktop_file))
+                {
+                    // Desktop file not written - end desktop integration
+                    BOOST_LOG_TRIVIAL(error) << "Performing desktop integration failed - could not create desktop file";
+                    return;
+                }
             }
             else
             {
-                // write failed - try another path
-                BOOST_LOG_TRIVIAL(debug) << "Attempt to preFlight.desktop file installation failed. failed path: "
-                                         << target_candidates[i];
-                target_dir_desktop.clear();
-            }
-        }
-    }
-    // if all failed - try creating default home folder
-    if (!candidate_found)
-    {
-        // create $HOME/.local/share
-        create_path(into_u8(wxFileName::GetHomeDir()), ".local/share/applications");
-        // create desktop file
-        target_dir_desktop = GUI::format("%1%/.local/share", wxFileName::GetHomeDir());
-        std::string path = GUI::format("%1%/applications/preFlight%2%.desktop", target_dir_desktop, version_suffix);
-        if (contains_path_dir(target_dir_desktop, "applications"))
-        {
-            if (!create_desktop_file(path, desktop_file))
-            {
                 // Desktop file not written - end desktop integration
-                BOOST_LOG_TRIVIAL(error) << "Performing desktop integration failed - could not create desktop file";
+                BOOST_LOG_TRIVIAL(error)
+                    << "Performing desktop integration failed because the application directory was not found.";
                 return;
             }
         }
-        else
-        {
-            // Desktop file not written - end desktop integration
-            BOOST_LOG_TRIVIAL(error)
-                << "Performing desktop integration failed because the application directory was not found.";
-            return;
-        }
-    }
+    } // !flatpak_id
     assert(!target_dir_desktop.empty());
     if (target_dir_desktop.empty())
     {
@@ -544,18 +594,20 @@ void DesktopIntegrationDialog::perform_desktop_integration()
         }
 
         // Desktop file
+        std::string exec_line_viewer = flatpak_id ? GUI::format("Exec=%1% --gcodeviewer %%F", excutable_path)
+                                                  : GUI::format("Exec=\"%1%\" --gcodeviewer %%F", excutable_path);
         std::string desktop_file_viewer = GUI::format("[Desktop Entry]\n"
                                                       "Name=preFlight Gcode Viewer%1%\n"
                                                       "GenericName=3D Printing Software\n"
                                                       "Icon=preFlight-gcodeviewer%2%\n"
-                                                      "Exec=\"%3%\" --gcodeviewer %%F\n"
+                                                      "%3%\n"
                                                       "Terminal=false\n"
                                                       "Type=Application\n"
                                                       "MimeType=text/x.gcode;\n"
                                                       "Categories=Graphics;3DGraphics;\n"
                                                       "Keywords=3D;Printing;Slicer;\n"
                                                       "StartupNotify=false\n",
-                                                      name_suffix, version_suffix, excutable_path);
+                                                      name_suffix, version_suffix, exec_line_viewer);
         std::string desktop_path = GUI::format("%1%/applications/preFlightGcodeViewer%2%.desktop", target_dir_desktop,
                                                version_suffix);
         if (create_desktop_file(desktop_path, desktop_file_viewer))
@@ -639,10 +691,15 @@ void DesktopIntegrationDialog::undo_desktop_integration()
 void DesktopIntegrationDialog::perform_downloader_desktop_integration()
 {
     BOOST_LOG_TRIVIAL(debug) << "performing downloader desktop integration.";
-    // Path to appimage
+    // Determine executable path based on runtime environment
     const char *appimage_env = std::getenv("APPIMAGE");
+    const char *flatpak_id = std::getenv("FLATPAK_ID");
     std::string excutable_path;
-    if (appimage_env)
+    if (flatpak_id)
+    {
+        excutable_path = std::string("flatpak run ") + flatpak_id;
+    }
+    else if (appimage_env)
     {
         try
         {
@@ -660,7 +717,7 @@ void DesktopIntegrationDialog::perform_downloader_desktop_integration()
     }
     else
     {
-        // not appimage - find executable
+        // not appimage or flatpak - find executable
         excutable_path = boost::dll::program_location().string();
         //excutable_path = wxStandardPaths::Get().GetExecutablePath().string();
         BOOST_LOG_TRIVIAL(debug) << "non-appimage path to executable: " << excutable_path;
@@ -672,9 +729,9 @@ void DesktopIntegrationDialog::perform_downloader_desktop_integration()
         }
     }
 
-    // Escape ' characters in appimage, other special symbols will be esacaped in desktop file by 'excutable_path'
-    //boost::replace_all(excutable_path, "'", "'\\''");
-    excutable_path = escape_string(excutable_path);
+    // Escape path for non-Flatpak (Flatpak uses "flatpak run <id>" which must not be quoted)
+    if (!flatpak_id)
+        excutable_path = escape_string(excutable_path);
 
     // Find directories icons and applications
     // $XDG_DATA_HOME defines the base directory relative to which user specific data files should be stored.

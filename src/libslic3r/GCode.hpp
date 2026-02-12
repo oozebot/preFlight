@@ -306,8 +306,7 @@ private:
         // For sequential print, the instance of the object to be printing has to be defined.
         const size_t single_object_instance_idx);
 
-    std::string extrude_perimeters(const PrintRegion &region,
-                                   const std::vector<GCode::ExtrusionOrder::Perimeter> &perimeters,
+    std::string extrude_perimeters(const PrintRegion &region, std::vector<GCode::ExtrusionOrder::Perimeter> &perimeters,
                                    const InstanceToPrint &print_instance);
 
     std::string extrude_infill_ranges(const std::vector<InfillRange> &infill_ranges, const std::string &commment);
@@ -320,7 +319,7 @@ private:
                              const bool is_first);
 
     std::string extrude_slices(const InstanceToPrint &print_instance, const ObjectLayerToPrint &layer_to_print,
-                               const std::vector<SliceExtrusions> &slices_extrusions);
+                               std::vector<SliceExtrusions> &slices_extrusions);
 
     std::string extrude_support(const std::vector<GCode::ExtrusionOrder::SupportPath> &support_extrusions);
 
@@ -428,7 +427,7 @@ private:
     float m_last_layer_z{0.0f};
     float m_max_layer_z{0.0f};
     float m_last_width{0.0f};
-    double m_last_interlocking_flow_multiplier{-1.0};  // -1.0 = sentinel, ensures first interlocking gets comment
+    double m_last_interlocking_flow_multiplier{-1.0}; // -1.0 = sentinel, ensures first interlocking gets comment
     std::optional<Vec3d> m_previous_layer_last_position;
     std::optional<Vec3d> m_previous_layer_last_position_before_wipe;
     bool m_moved_to_first_layer_point{false};

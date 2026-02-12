@@ -178,6 +178,15 @@ ObjectManipulation::ObjectManipulation(wxWindow *parent) : OG_Settings(parent, t
 
     const int border = wxOSX ? 0 : 4;
     const int em = wxGetApp().em_unit();
+
+#ifdef __WXGTK__
+    // preFlight: On GTK3, GtkFixed draws children in creation order. The FlatStaticBox
+    // must be created before child controls so it's drawn underneath them (background
+    // first, controls on top). Without this, the FlatStaticBox's background fill
+    // paints over the controls, making the panel appear blank.
+    m_og->activate();
+    m_og->sizer->Clear(true);
+#endif
     m_main_grid_sizer = new wxFlexGridSizer(2, em / 3, em / 3);
     m_main_grid_sizer->SetFlexibleDirection(wxBOTH);
 
@@ -580,9 +589,18 @@ ObjectManipulation::ObjectManipulation(wxWindow *parent) : OG_Settings(parent, t
 
     m_main_grid_sizer->Add(m_check_inch);
 
-    m_og->activate();
+    m_og->activate(); // No-op on GTK (already activated above); creates sizer on Windows/macOS
     m_og->sizer->Clear(true);
+#ifdef __WXGTK__
+    // preFlight: FlatStaticBox removes the GtkFrame label, so content starts at top.
+    // Add top padding to clear the custom-drawn border/label (label height + gap).
+    m_og->sizer->AddSpacer(em * 3 / 2);
+    // preFlight: On GTK, no native wxStaticBox internal padding exists (GtkFrame
+    // internals were removed). Use em/2 margin to match OptionsGroup::activate().
+    m_og->sizer->Add(m_main_grid_sizer, 1, wxEXPAND | wxALL, em / 2);
+#else
     m_og->sizer->Add(m_main_grid_sizer, 1, wxEXPAND | wxALL, border);
+#endif
 
     // Apply correct theme colors after all controls are created
     sys_color_changed();

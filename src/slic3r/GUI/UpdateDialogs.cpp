@@ -27,6 +27,7 @@
 #include "../Utils/AppUpdater.hpp"
 #include "GUI.hpp"
 #include "GUI_App.hpp"
+#include "Widgets/ScrollablePanel.hpp"
 #include "I18N.hpp"
 #include "ConfigWizard.hpp"
 #include "wxExtensions.hpp"
@@ -117,15 +118,23 @@ AppUpdateAvailableDialog::AppUpdateAvailableDialog(const Semver &ver_current, co
     content_sizer->Add(versions);
     content_sizer->AddSpacer(GetScaledVertSpacing());
 
-    // Release notes section
+    // Release notes section - preFlight: use ScrollablePanel for themed scrollbar
     if (!release_notes.empty())
     {
         const int em = wxGetApp().em_unit();
-        auto *html = new wxHtmlWindow(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxHW_SCROLLBAR_AUTO);
+
+        auto *scroll_panel = new ScrollablePanel(this, wxID_ANY);
+        scroll_panel->sys_color_changed();
+
+        auto *content_panel = scroll_panel->GetContentPanel();
+
+        // Create HTML window with no native scrollbar; ScrollablePanel handles scrolling
+        auto *html = new wxHtmlWindow(content_panel, wxID_ANY, wxDefaultPosition, wxSize(44 * em, 100),
+                                      wxHW_SCROLLBAR_NEVER);
 
         wxColour text_clr = wxGetApp().get_label_clr_default();
         auto text_clr_str = encode_color(ColorRGB(text_clr.Red(), text_clr.Green(), text_clr.Blue()));
-        auto bgr_clr_str  = wxGetApp().get_html_bg_color(this);
+        auto bgr_clr_str = wxGetApp().get_html_bg_color(this);
 
         wxFont font = GetFont();
         int font_size = font.GetPointSize();
@@ -133,11 +142,24 @@ AppUpdateAvailableDialog::AppUpdateAvailableDialog(const Semver &ver_current, co
         html->SetFonts(font.GetFaceName(), wxEmptyString, sizes);
         html->SetBorders(em / 5);
 
-        html->SetPage(format_wxstr("<html><body bgcolor=%1%><font color=%2%>%3%</font></body></html>",
-                                   bgr_clr_str, text_clr_str, from_u8(release_notes)));
+        html->SetPage(format_wxstr("<html><body bgcolor=%1%><font color=%2%>%3%</font></body></html>", bgr_clr_str,
+                                   text_clr_str, from_u8(release_notes)));
 
-        html->SetMinSize(wxSize(45 * em, 30 * em));
-        content_sizer->Add(html, 1, wxEXPAND);
+        // Size the HTML widget to its full content height so ScrollablePanel can scroll it
+        int contentHeight = 30 * em;
+        if (auto *ir = html->GetInternalRepresentation())
+            contentHeight = ir->GetHeight() + 2 * (em / 5);
+        html->SetMinSize(wxSize(-1, contentHeight));
+
+        auto *html_sizer = new wxBoxSizer(wxVERTICAL);
+        html_sizer->Add(html, 1, wxEXPAND);
+        scroll_panel->SetSizer(html_sizer);
+
+        // Forward mouse wheel from HTML widget to ScrollablePanel
+        html->Bind(wxEVT_MOUSEWHEEL, [scroll_panel](wxMouseEvent &evt) { wxPostEvent(scroll_panel, evt); });
+
+        scroll_panel->SetMinSize(wxSize(45 * em, 30 * em));
+        content_sizer->Add(scroll_panel, 1, wxEXPAND);
         content_sizer->AddSpacer(GetScaledVertSpacing());
     }
 

@@ -343,6 +343,9 @@ class GLCanvas3D
         Vec2d position{DBL_MAX, DBL_MAX};
         Vec3d scene_position{DBL_MAX, DBL_MAX, DBL_MAX};
         bool ignore_left_up{false};
+#ifdef __linux__
+        bool left_down_on_canvas{false}; // preFlight: tracks genuine LeftDown to filter GTK phantom LeftUp events
+#endif
         Drag drag;
 
         void set_start_position_2D_as_invalid() { drag.start_position_2D = Drag::Invalid_2D_Point; }
@@ -739,7 +742,11 @@ public:
 
     void set_as_dirty() { m_dirty = true; }
     void pause_rendering() { m_rendering_paused = true; }
-    void resume_rendering() { m_rendering_paused = false; m_dirty = true; }
+    void resume_rendering()
+    {
+        m_rendering_paused = false;
+        m_dirty = true;
+    }
     void requires_check_outside_state() { m_requires_check_outside_state = true; }
 
     unsigned int get_volumes_count() const { return (unsigned int) m_volumes.volumes.size(); }
@@ -761,6 +768,8 @@ private:
 public:
     void init_gcode_viewer() { m_gcode_viewer.init(); }
     void reset_gcode_toolpaths() { m_gcode_viewer.reset(); }
+    GCodeViewer &get_gcode_viewer() { return m_gcode_viewer; }
+    const GCodeViewer &get_gcode_viewer() const { return m_gcode_viewer; }
     const GCodeViewer::SequentialView &get_gcode_sequential_view() const
     {
         return m_gcode_viewer.get_sequential_view();

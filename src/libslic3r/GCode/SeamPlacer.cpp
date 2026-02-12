@@ -137,6 +137,13 @@ Params Placer::get_params(const DynamicPrintConfig &config)
     params.rear_tolerance = 1.0;
     params.rear_y_offset = 20;
     params.aligned.jump_visibility_threshold = 0.6;
+    // preFlight: snap-to-reference at 1/3 nozzle diameter to prevent seam drift
+    {
+        const auto *nozzle_diameters = config.opt<ConfigOptionFloats>("nozzle_diameter");
+        const double nozzle_d = (nozzle_diameters && !nozzle_diameters->empty()) ? nozzle_diameters->values.front()
+                                                                                 : 0.4;
+        params.aligned.snap_tolerance = nozzle_d / 3.0;
+    }
     params.max_distance = 5.0;
     params.perimeter.oversampling_max_distance = 0.2;
     params.perimeter.embedding_threshold = 0.5;

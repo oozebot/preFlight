@@ -29,6 +29,7 @@
 
 class CheckBox;
 class TextInput;
+class ScrollBar;
 
 namespace Slic3r
 {
@@ -39,6 +40,7 @@ namespace Search
 {
 
 class SearchDialog;
+class SearchResultsPanel;
 
 struct InputInfo
 {
@@ -173,28 +175,26 @@ public:
 //------------------------------------------
 //          SearchDialog
 //------------------------------------------
-class SearchListModel;
 class SearchDialog : public GUI::DPIDialog
 {
     wxString search_str;
 
-    bool prevent_list_events{false};
+    // preFlight: filter input within the dialog itself
+    TextInput *m_filter_input{nullptr};
 
-    wxDataViewCtrl *search_list{nullptr};
-    SearchListModel *search_list_model{nullptr};
+    // preFlight: owner-drawn results panel with custom ScrollBar (replaces wxDataViewCtrl)
+    SearchResultsPanel *m_results_panel{nullptr};
+    ScrollBar *m_scrollbar{nullptr};
+    ScalableBitmap m_icons[6];
+
     CheckBox *check_category{nullptr};
     CheckBox *check_english{nullptr};
 
     OptionsSearcher *searcher{nullptr};
 
     void OnKeyDown(wxKeyEvent &event);
-
-    void OnActivate(wxDataViewEvent &event);
-    void OnSelect(wxDataViewEvent &event);
-
     void OnCheck(wxCommandEvent &event);
-    void OnMotion(wxMouseEvent &event);
-    void OnLeftDown(wxMouseEvent &event);
+    void OnResultClicked(wxCommandEvent &event);
 
     void update_list();
 
@@ -203,7 +203,7 @@ public:
     ~SearchDialog();
 
     void Popup(wxPoint position = wxDefaultPosition);
-    void ProcessSelection(wxDataViewItem selection);
+    void ProcessSelection(int row_index);
 
     void msw_rescale();
     void on_sys_color_changed() override;
@@ -213,44 +213,6 @@ public:
 
 protected:
     void on_dpi_changed(const wxRect &suggested_rect) override { msw_rescale(); }
-};
-
-// ----------------------------------------------------------------------------
-// SearchListModel
-// ----------------------------------------------------------------------------
-
-class SearchListModel : public wxDataViewVirtualListModel
-{
-    std::vector<std::pair<wxString, int>> m_values;
-    ScalableBitmap m_icon[6];
-
-public:
-    enum
-    {
-#ifdef __WXMSW__
-        colIconMarkedText,
-#else
-        colIcon,
-        colMarkedText,
-#endif
-        colMax
-    };
-
-    SearchListModel(wxWindow *parent);
-
-    // helper methods to change the model
-
-    void Clear();
-    void Prepend(const std::string &text);
-    void sys_color_changed();
-
-    // implementation of base class virtuals to define model
-
-    unsigned int GetColumnCount() const override { return colMax; }
-    wxString GetColumnType(unsigned int col) const override;
-    void GetValueByRow(wxVariant &variant, unsigned int row, unsigned int col) const override;
-    bool GetAttrByRow(unsigned int row, unsigned int col, wxDataViewItemAttr &attr) const override { return true; }
-    bool SetValueByRow(const wxVariant &variant, unsigned int row, unsigned int col) override { return false; }
 };
 
 } // namespace Search

@@ -1,5 +1,24 @@
 # preFlight Changelog
 
+## v0.9.3
+
+### New Features
+- **Nip/Tuck Seams**: V-notch on external perimeters to hide seams
+- **Seam Vertical Alignment**: Stable reference-position tracking prevents seam drift between layers; painted enforcer regions auto-center the seam at the enforcer centroid
+- **Preview Clipping Plane**: Right-click any object in sliced preview to activate an interactive cross-section plane that cuts through toolpaths and shell meshes for analysis
+- **Tabbed Sidebar Layout**: Tabbed sidebar as an alternative to the accordion layout, toggled via Preferences > GUI
+- **Search Settings**: New search dialog with dedicated button in tab bar
+
+### Bug Fixes
+- Fix printer host type dropdown using fragile index offsets, replaced with explicit enum mapping
+- Add defensive HWND validity checks in dark mode title bar and explorer theme calls
+
+### Linux
+- Fix blank Object Manipulation panel and Info panel overlap on GTK3
+- Fix Wayland negative-width assertion in sidebar custom controls
+- Update install paths and desktop file branding for preFlight
+- AppImage now uses pre-split libraries with system GPU drivers on modern distros and bundled fallback on older systems
+
 ## v0.9.2
 
 ### New Features

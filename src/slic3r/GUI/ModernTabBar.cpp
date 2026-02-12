@@ -157,6 +157,8 @@ ModernTabBar::ModernTabBar(wxWindow *parent)
                                    m_filament_settings_btn->Refresh();
                                if (m_printer_settings_btn)
                                    m_printer_settings_btn->Refresh();
+                               if (m_search_btn)
+                                   m_search_btn->Refresh();
                                if (m_settings_dropdown_btn)
                                    m_settings_dropdown_btn->Refresh();
                            }
@@ -266,6 +268,28 @@ void ModernTabBar::AddSettingsDropdownButton(std::function<void(TabType)> callba
     m_filament_settings_btn = create_individual_settings_btn(_L("Filament Settings"), TAB_FILAMENTS);
     m_printer_settings_btn = create_individual_settings_btn(_L("Printer Settings"), TAB_PRINTERS);
 
+    // --- preFlight: Search action button (always visible with expanded settings) ---
+    {
+        m_search_btn = CreateStyledButton(_L("Search Settings"));
+
+        m_search_btn->Bind(wxEVT_LEFT_UP, [](wxMouseEvent &) { wxGetApp().show_search_dialog(); });
+        m_search_btn->Bind(wxEVT_ENTER_WINDOW,
+                           [this](wxMouseEvent &)
+                           {
+                               m_search_btn->SetBackgroundColour(m_color_bg_hover);
+                               m_search_btn->Refresh();
+                           });
+        m_search_btn->Bind(wxEVT_LEAVE_WINDOW,
+                           [this](wxMouseEvent &)
+                           {
+                               m_search_btn->SetBackgroundColour(m_color_bg_normal);
+                               m_search_btn->Refresh();
+                           });
+
+        m_search_btn->Hide();
+        GetSizer()->Add(m_search_btn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, GetScaledSmallMargin());
+    }
+
     // --- Create collapsed Settings dropdown button (shown when not enough space) ---
 
     m_settings_dropdown_btn = new wxPanel(this, wxID_ANY, wxDefaultPosition, GetScaledButtonSize(), wxBORDER_NONE);
@@ -330,6 +354,11 @@ void ModernTabBar::AddSettingsDropdownButton(std::function<void(TabType)> callba
             filament_item->SetBitmap(*get_bmp_bundle("spool"));
             wxMenuItem *printer_item = menu.Append(static_cast<int>(TAB_PRINTERS), _L("Printer Settings"));
             printer_item->SetBitmap(*get_bmp_bundle("printer"));
+            menu.AppendSeparator();
+            // preFlight: use wxID_HIGHEST+1 to avoid collision with TabType enum values
+            const int search_menu_id = wxID_HIGHEST + 1;
+            wxMenuItem *search_item = menu.Append(search_menu_id, _L("Search Settings"));
+            search_item->SetBitmap(*get_bmp_bundle("search"));
 
             // Position menu at bottom-left of button (like standard menu bar menus)
             wxPoint menu_pos(0, m_settings_dropdown_btn->GetSize().y);
@@ -344,6 +373,7 @@ void ModernTabBar::AddSettingsDropdownButton(std::function<void(TabType)> callba
                                         [select_settings_tab]() { select_settings_tab(TAB_FILAMENTS); });
                 customMenu->SetCallback(static_cast<int>(TAB_PRINTERS),
                                         [select_settings_tab]() { select_settings_tab(TAB_PRINTERS); });
+                customMenu->SetCallback(search_menu_id, []() { wxGetApp().show_search_dialog(); });
 
                 customMenu->KeepAliveUntilDismissed(customMenu);
                 if (!customMenu->GetParent())
@@ -355,10 +385,10 @@ void ModernTabBar::AddSettingsDropdownButton(std::function<void(TabType)> callba
             {
                 // Fallback to native menu
                 int selection = m_settings_dropdown_btn->GetPopupMenuSelectionFromUser(menu, menu_pos);
-                if (selection != wxID_NONE)
-                {
+                if (selection == search_menu_id)
+                    wxGetApp().show_search_dialog();
+                else if (selection != wxID_NONE)
                     select_settings_tab(static_cast<TabType>(selection));
-                }
             }
         });
 
@@ -407,8 +437,8 @@ void ModernTabBar::UpdateSettingsLayout(bool force)
     if (m_slice_button && m_slice_button->IsShown())
         fixed_width += GetScaledSliceButtonWidth() + GetScaledMargin();
 
-    // Calculate width for expanded mode (3 individual buttons)
-    int expanded_settings_width = 3 * (btn_w + margin);
+    // Calculate width for expanded mode (3 individual settings buttons + search button)
+    int expanded_settings_width = 4 * (btn_w + margin);
 
     int total_expanded = fixed_width + expanded_settings_width;
 
@@ -428,6 +458,8 @@ void ModernTabBar::UpdateSettingsLayout(bool force)
         m_print_settings_btn->Show();
         m_filament_settings_btn->Show();
         m_printer_settings_btn->Show();
+        if (m_search_btn)
+            m_search_btn->Show();
         m_settings_dropdown_btn->Hide();
     }
     else
@@ -436,6 +468,8 @@ void ModernTabBar::UpdateSettingsLayout(bool force)
         m_print_settings_btn->Hide();
         m_filament_settings_btn->Hide();
         m_printer_settings_btn->Hide();
+        if (m_search_btn)
+            m_search_btn->Hide();
         m_settings_dropdown_btn->Show();
     }
 
@@ -459,7 +493,18 @@ void ModernTabBar::SelectTab(TabType type)
         m_printer_webview_btn->Refresh();
     }
 
-    // Find and execute callback
+    // preFlight: settings tabs (Print/Filament/Printer) are not in m_tabs —
+    // they are handled via m_settings_callback from AddSettingsDropdownButton.
+    if (m_settings_callback && (type == TAB_PRINT_SETTINGS || type == TAB_FILAMENTS || type == TAB_PRINTERS))
+    {
+        m_selected_tab = type;
+        UpdateButtonStyles();
+        UpdateSliceButtonVisibility();
+        m_settings_callback(type);
+        return;
+    }
+
+    // Find and execute callback for regular tabs (Prepare, Preview, etc.)
     for (auto &tab : m_tabs)
     {
         if (tab.type == type && tab.enabled)
@@ -563,6 +608,14 @@ void ModernTabBar::UpdateButtonStyles()
     update_settings_btn(m_print_settings_btn, TAB_PRINT_SETTINGS);
     update_settings_btn(m_filament_settings_btn, TAB_FILAMENTS);
     update_settings_btn(m_printer_settings_btn, TAB_PRINTERS);
+
+    // Search button is an action button, never selected
+    if (m_search_btn)
+    {
+        m_search_btn->SetBackgroundColour(m_color_bg_normal);
+        m_search_btn->SetForegroundColour(m_color_text_normal);
+        m_search_btn->Refresh();
+    }
 }
 
 wxPanel *ModernTabBar::CreateStyledButton(const wxString &label)
@@ -705,7 +758,7 @@ void ModernTabBar::sys_color_changed()
     }
 
     // Update individual settings button colors
-    for (wxPanel *btn : {m_print_settings_btn, m_filament_settings_btn, m_printer_settings_btn})
+    for (wxPanel *btn : {m_print_settings_btn, m_filament_settings_btn, m_printer_settings_btn, m_search_btn})
     {
         if (btn)
             btn->Refresh();
@@ -736,7 +789,7 @@ void ModernTabBar::msw_rescale()
     }
 
     // Update individual settings buttons
-    for (wxPanel *btn : {m_print_settings_btn, m_filament_settings_btn, m_printer_settings_btn})
+    for (wxPanel *btn : {m_print_settings_btn, m_filament_settings_btn, m_printer_settings_btn, m_search_btn})
     {
         if (btn)
         {
@@ -774,7 +827,7 @@ void ModernTabBar::msw_rescale()
     }
     if (m_settings_dropdown_btn)
         m_settings_dropdown_btn->Refresh();
-    for (wxPanel *btn : {m_print_settings_btn, m_filament_settings_btn, m_printer_settings_btn})
+    for (wxPanel *btn : {m_print_settings_btn, m_filament_settings_btn, m_printer_settings_btn, m_search_btn})
     {
         if (btn)
             btn->Refresh();
@@ -1246,8 +1299,9 @@ void ModernTabBar::ShowPrinterWebViewTab(const wxString &printerName, std::funct
     // The sizer structure is: spacer(0), tabs(1..n), settings_dropdown, stretch_spacer, slice_button
     // Count: initial spacer + tabs + settings_dropdown = 1 + m_tabs.size() + 1
     // We want to insert after settings_dropdown, before stretch spacer
-    // Sizer structure: spacer(0), tabs(1..n), 3 individual settings btns, settings dropdown, [webview here]
-    int settings_btn_count = (m_print_settings_btn ? 3 : 0) + (m_settings_dropdown_btn ? 1 : 0);
+    // Sizer structure: spacer(0), tabs(1..n), 3 individual settings btns, search btn, settings dropdown, [webview here]
+    int settings_btn_count = (m_print_settings_btn ? 3 : 0) + (m_search_btn ? 1 : 0) +
+                             (m_settings_dropdown_btn ? 1 : 0);
     m_printer_webview_sizer_index = 1 + static_cast<int>(m_tabs.size()) + settings_btn_count;
 
     sizer->Insert(m_printer_webview_sizer_index, m_printer_webview_btn, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT,

@@ -12,6 +12,7 @@
 #include "libslic3r/ExtrusionRole.hpp"
 #include "libslic3r/GCode/GCodeProcessor.hpp"
 #include "GLModel.hpp"
+#include "preFlight.PreviewClipController.hpp"
 
 #include "LibVGCode/LibVGCodeWrapper.hpp"
 // needed for tech VGCODE_ENABLE_COG_AND_TOOL_MARKERS
@@ -19,6 +20,7 @@
 
 #include <cstdint>
 #include <float.h>
+#include <optional>
 #include <set>
 #include <unordered_set>
 
@@ -464,6 +466,40 @@ void set_shell_progress_height(double height)
     m_shells.progress_height = height;
 }
 
+// preFlight: Preview clipping plane support
+PreviewClipController &get_preview_clip_controller()
+{
+    return m_preview_clip_controller;
+}
+const PreviewClipController &get_preview_clip_controller() const
+{
+    return m_preview_clip_controller;
+}
+GLVolumeCollection &get_shells_volumes()
+{
+    return m_shells.volumes;
+}
+bool are_shells_visible() const
+{
+    return m_shells.visible;
+}
+void set_shells_visible(bool visible)
+{
+    m_shells.visible = visible;
+}
+libvgcode::Viewer &get_libvgcode_viewer()
+{
+    return m_viewer;
+}
+void set_preview_clipping_plane(const std::array<double, 4> &plane)
+{
+    m_preview_clipping_plane = plane;
+}
+void reset_preview_clipping_plane()
+{
+    m_preview_clipping_plane.reset();
+}
+
 void export_toolpaths_to_obj(const char *filename) const;
 
 void toggle_gcode_window_visibility()
@@ -508,6 +544,10 @@ void load_wipetower_shell(const Print &print);
 void render_toolpaths();
 void render_shells();
 void render_legend(float &legend_height);
+
+// preFlight: Preview clipping plane
+PreviewClipController m_preview_clip_controller;
+std::optional<std::array<double, 4>> m_preview_clipping_plane; // set by PreviewClipController
 }; // namespace GUI
 
 } // namespace Slic3r

@@ -32,6 +32,8 @@ public:
     void sys_color_changed() { Refresh(); }
     void msw_rescale();
 
+    static int GetScaledScrollbarWidth();
+
 private:
     void OnPaint(wxPaintEvent &event);
     void OnMouse(wxMouseEvent &event);
@@ -58,7 +60,6 @@ private:
 
     // DPI scaling - these are now methods instead of constants
     static int GetScaledMinThumbSize();
-    static int GetScaledScrollbarWidth();
     static int GetScaledCornerRadius();
     static int GetScaledInset();
 

@@ -127,6 +127,9 @@ void AppConfig::set_defaults()
         if (get("remember_output_path_removable").empty())
             set("remember_output_path_removable", "1");
 
+        if (get("use_tabbed_sidebar").empty())
+            set("use_tabbed_sidebar", "1");
+
         if (get("use_custom_toolbar_size").empty())
             set("use_custom_toolbar_size", "0");
 

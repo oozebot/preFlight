@@ -14,6 +14,8 @@
 #include <windows.h>
 #endif
 
+class ScrollBar;
+
 class TextInput : public wxNavigationEnabled<StaticBox>
 {
     wxSize labelSize;
@@ -22,6 +24,7 @@ class TextInput : public wxNavigationEnabled<StaticBox>
     StateColor label_color;
     StateColor text_color;
     Slic3r::GUI::ThemedTextCtrl *text_ctrl{nullptr};
+    ScrollBar *m_scrollbar{nullptr}; // preFlight: custom themed scrollbar for multiline
 #ifdef _WIN32
     HBRUSH m_hEditBgBrush = NULL; // Native GDI brush for WM_CTLCOLOREDIT response
 #endif
@@ -105,6 +108,7 @@ private:
     void render(wxDC &dc);
 
     void messureSize();
+    void SyncScrollbar(); // preFlight: sync custom scrollbar with text_ctrl scroll state
 
     DECLARE_EVENT_TABLE()
 };

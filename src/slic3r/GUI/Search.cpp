@@ -11,7 +11,6 @@
 #include <boost/optional.hpp>
 #include <boost/nowide/convert.hpp>
 
-#include "wx/dataview.h"
 #include "wx/numformatter.h"
 
 #include "libslic3r/PrintConfig.hpp"
@@ -23,10 +22,14 @@
 #include "Tab.hpp"
 
 #define FTS_FUZZY_MATCH_IMPLEMENTATION
-#include "ExtraRenderers.hpp"
 #include "fts_fuzzy_match.h"
 
 #include "imgui/imconfig.h"
+#include "Widgets/ScrollBar.hpp"
+#include "Widgets/TextInput.hpp"
+#include "Widgets/UIColors.hpp"
+
+#include <wx/dcbuffer.h>
 
 using boost::optional;
 
@@ -487,16 +490,8 @@ static bool has_focus(wxWindow *win)
 
 void OptionsSearcher::update_dialog_position()
 {
-    if (search_dialog)
-    {
-        wxPoint old_pos = search_dialog->GetPosition();
-        wxSize dialog_size = search_dialog->GetSize();
-        wxSize search_size = search_input->GetSize();
-        int x_offset = search_size.GetWidth() - dialog_size.GetWidth() + 5; // +5 to account for the -5 margin
-        wxPoint pos = search_input->GetScreenPosition() + wxPoint(x_offset, search_size.y);
-        if (old_pos != pos)
-            search_dialog->SetPosition(pos);
-    }
+    // preFlight: dialog is centered on parent at creation and user-movable via title bar;
+    // no need to reposition it on every show.
 }
 
 void OptionsSearcher::check_and_hide_dialog()
@@ -540,22 +535,9 @@ void OptionsSearcher::show_dialog(bool show /*= true*/)
     update_dialog_position();
 
     search_string();
-    search_input->SetSelection(-1, -1);
 
+    // preFlight: the dialog has its own filter input that receives focus in Popup()
     search_dialog->Popup();
-
-    GUI::wxGetApp().CallAfter(
-        [this]()
-        {
-            if (search_input && !search_input->HasFocus())
-            {
-                search_input->SetFocus();
-                if (search_input->GetTextCtrl())
-                {
-                    search_input->GetTextCtrl()->SetFocus();
-                }
-            }
-        });
 }
 
 void OptionsSearcher::dlg_sys_color_changed()
@@ -612,17 +594,402 @@ void OptionsSearcher::add_key(const std::string &opt_key, Preset::Type type, con
 }
 
 //------------------------------------------
-//          SearchDialog
+//          SearchResultsPanel
 //------------------------------------------
 
+// preFlight: Owner-drawn search results list with custom ScrollBar.
+// Replaces wxDataViewCtrl + SearchListModel for consistent warm-themed scrollbars.
+
+// Maps icon marker characters to icon indices 0-5
 static const std::map<const char, int> icon_idxs = {
     {ImGui::PrintIconMarker, 0},    {ImGui::PrinterIconMarker, 1},  {ImGui::PrinterSlaIconMarker, 2},
     {ImGui::FilamentIconMarker, 3}, {ImGui::MaterialIconMarker, 4}, {ImGui::PreferencesButton, 5},
 };
 
+struct SearchResultRow
+{
+    int icon_index{0};
+    wxString display_text;
+    std::vector<std::pair<size_t, size_t>> highlight_ranges; // (start, length) pairs
+};
+
+class SearchResultsPanel : public wxPanel
+{
+public:
+    SearchResultsPanel(wxWindow *parent, ScrollBar *scrollbar)
+        : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxFULL_REPAINT_ON_RESIZE | wxWANTS_CHARS)
+        , m_scrollbar(scrollbar)
+    {
+        SetBackgroundStyle(wxBG_STYLE_PAINT);
+
+        Bind(wxEVT_PAINT, &SearchResultsPanel::OnPaint, this);
+        Bind(wxEVT_SIZE, &SearchResultsPanel::OnSize, this);
+        Bind(wxEVT_MOUSEWHEEL, &SearchResultsPanel::OnMouseWheel, this);
+        Bind(wxEVT_MOTION, &SearchResultsPanel::OnMotion, this);
+        Bind(wxEVT_LEFT_DOWN, &SearchResultsPanel::OnLeftDown, this);
+        Bind(wxEVT_LEAVE_WINDOW, &SearchResultsPanel::OnLeaveWindow, this);
+
+        if (m_scrollbar)
+        {
+            m_scrollbar->Bind(wxEVT_SCROLL_THUMBTRACK, &SearchResultsPanel::OnScroll, this);
+            m_scrollbar->Bind(wxEVT_SCROLL_THUMBRELEASE, &SearchResultsPanel::OnScroll, this);
+        }
+    }
+
+    void SetItems(const std::vector<FoundOption> &found_options, ScalableBitmap icons[6])
+    {
+        m_icons = icons;
+        m_rows.clear();
+        m_rows.reserve(found_options.size());
+
+        for (const FoundOption &opt : found_options)
+        {
+            SearchResultRow row;
+            ParseMarkedLabel(opt.marked_label, row);
+            m_rows.push_back(std::move(row));
+        }
+
+        m_selected = m_rows.empty() ? -1 : 0;
+        m_hovered = -1;
+        m_scroll_offset = 0;
+        UpdateScrollbar();
+        Refresh();
+    }
+
+    void Clear()
+    {
+        m_rows.clear();
+        m_selected = -1;
+        m_hovered = -1;
+        m_scroll_offset = 0;
+        UpdateScrollbar();
+        Refresh();
+    }
+
+    int GetSelection() const { return m_selected; }
+
+    void SetSelection(int index)
+    {
+        if (index >= 0 && index < static_cast<int>(m_rows.size()))
+        {
+            m_selected = index;
+            EnsureVisible(index);
+            Refresh();
+        }
+    }
+
+    void SelectNext()
+    {
+        if (m_selected < static_cast<int>(m_rows.size()) - 1)
+            SetSelection(m_selected + 1);
+    }
+
+    void SelectPrev()
+    {
+        if (m_selected > 0)
+            SetSelection(m_selected - 1);
+    }
+
+    int GetItemCount() const { return static_cast<int>(m_rows.size()); }
+
+    void sys_color_changed()
+    {
+        SetBackgroundColour(UIColors::InputBackground());
+        Refresh();
+    }
+
+    void msw_rescale()
+    {
+        UpdateScrollbar();
+        Refresh();
+    }
+
+private:
+    int RowHeight() const { return static_cast<int>(GUI::wxGetApp().em_unit() * 1.8); }
+
+    int HitTest(const wxPoint &pos) const
+    {
+        if (m_rows.empty())
+            return -1;
+        int row = (pos.y + m_scroll_offset) / RowHeight();
+        if (row < 0 || row >= static_cast<int>(m_rows.size()))
+            return -1;
+        return row;
+    }
+
+    void EnsureVisible(int index)
+    {
+        if (index < 0 || index >= static_cast<int>(m_rows.size()))
+            return;
+
+        const int rowH = RowHeight();
+        const int visibleHeight = GetClientSize().y;
+        const int rowTop = index * rowH;
+        const int rowBottom = rowTop + rowH;
+
+        if (rowTop < m_scroll_offset)
+            m_scroll_offset = rowTop;
+        else if (rowBottom > m_scroll_offset + visibleHeight)
+            m_scroll_offset = rowBottom - visibleHeight;
+
+        if (m_scrollbar)
+            m_scrollbar->SetThumbPosition(m_scroll_offset);
+    }
+
+    void UpdateScrollbar()
+    {
+        if (!m_scrollbar)
+            return;
+
+        const int totalHeight = static_cast<int>(m_rows.size()) * RowHeight();
+        const int visibleHeight = GetClientSize().y;
+
+        if (totalHeight > visibleHeight && visibleHeight > 0)
+        {
+            m_scrollbar->SetScrollbar(m_scroll_offset, visibleHeight, totalHeight, visibleHeight);
+            m_scrollbar->Show();
+        }
+        else
+        {
+            m_scrollbar->Hide();
+            m_scroll_offset = 0;
+        }
+    }
+
+    void ParseMarkedLabel(const std::string &marked_label, SearchResultRow &row)
+    {
+        if (marked_label.empty())
+            return;
+
+        // First character is the icon marker
+        const char icon_c = marked_label[0];
+        auto it = icon_idxs.find(icon_c);
+        row.icon_index = (it != icon_idxs.end()) ? it->second : 0;
+
+        // Parse remaining text, extracting highlight ranges from ColorMarkerStart/End
+        row.display_text.clear();
+        row.highlight_ranges.clear();
+
+        bool in_highlight = false;
+        size_t highlight_start = 0;
+
+        for (size_t i = 1; i < marked_label.size(); ++i)
+        {
+            char c = marked_label[i];
+            if (c == ImGui::ColorMarkerStart)
+            {
+                in_highlight = true;
+                highlight_start = row.display_text.length();
+            }
+            else if (c == ImGui::ColorMarkerEnd)
+            {
+                if (in_highlight)
+                {
+                    size_t len = row.display_text.length() - highlight_start;
+                    if (len > 0)
+                        row.highlight_ranges.emplace_back(highlight_start, len);
+                    in_highlight = false;
+                }
+            }
+            else
+            {
+                row.display_text += c;
+            }
+        }
+    }
+
+    // --- Event handlers ---
+
+    void OnPaint(wxPaintEvent &event)
+    {
+        wxAutoBufferedPaintDC dc(this);
+        const wxSize clientSize = GetClientSize();
+        bool is_dark = GUI::wxGetApp().dark_mode();
+
+        wxColour bgColor = UIColors::InputBackground();
+        dc.SetBackground(wxBrush(bgColor));
+        dc.Clear();
+
+        if (m_rows.empty())
+            return;
+
+        const int rowH = RowHeight();
+        const int em = GUI::wxGetApp().em_unit();
+        const int iconAreaWidth = em * 2;
+        const int textLeftMargin = em / 2;
+        const int leftPadding = em / 2;
+
+        // Visible row range
+        int firstVisible = m_scroll_offset / rowH;
+        int lastVisible = (m_scroll_offset + clientSize.y + rowH - 1) / rowH;
+        firstVisible = std::max(0, firstVisible);
+        lastVisible = std::min(lastVisible, static_cast<int>(m_rows.size()) - 1);
+
+        dc.SetFont(GetFont().IsOk() ? GetFont() : GUI::wxGetApp().normal_font());
+
+        wxColour normalTextColor = UIColors::InputForeground();
+        wxColour highlightTextColor = UIColors::AccentPrimary();
+        wxColour selectedBg = UIColors::HighlightBackground();
+        wxColour hoveredBg = is_dark ? wxColour(33, 38, 45) : wxColour(235, 228, 218);
+
+        for (int i = firstVisible; i <= lastVisible; ++i)
+        {
+            const SearchResultRow &row = m_rows[i];
+            int y = i * rowH - m_scroll_offset;
+            wxRect rowRect(0, y, clientSize.x, rowH);
+
+            // Selection/hover background
+            if (i == m_selected)
+            {
+                dc.SetPen(*wxTRANSPARENT_PEN);
+                dc.SetBrush(wxBrush(selectedBg));
+                dc.DrawRectangle(rowRect);
+            }
+            else if (i == m_hovered)
+            {
+                dc.SetPen(*wxTRANSPARENT_PEN);
+                dc.SetBrush(wxBrush(hoveredBg));
+                dc.DrawRectangle(rowRect);
+            }
+
+            // Icon
+            if (m_icons && row.icon_index >= 0 && row.icon_index < 6)
+            {
+                const ScalableBitmap &icon = m_icons[row.icon_index];
+                if (icon.bmp().IsOk())
+                {
+                    wxBitmap bmp = icon.bmp().GetBitmapFor(this);
+                    int iconY = y + (rowH - bmp.GetHeight()) / 2;
+                    int iconX = leftPadding + (iconAreaWidth - bmp.GetWidth()) / 2;
+                    dc.DrawBitmap(bmp, iconX, iconY, true);
+                }
+            }
+
+            // Text with highlight segments
+            int textX = leftPadding + iconAreaWidth + textLeftMargin;
+            int textY = y + (rowH - dc.GetCharHeight()) / 2;
+
+            if (row.highlight_ranges.empty())
+            {
+                dc.SetTextForeground(normalTextColor);
+                dc.DrawText(row.display_text, textX, textY);
+            }
+            else
+            {
+                // Build highlight flags
+                size_t textLen = row.display_text.length();
+                std::vector<bool> highlighted(textLen, false);
+                for (const auto &range : row.highlight_ranges)
+                {
+                    for (size_t j = range.first; j < range.first + range.second && j < textLen; ++j)
+                        highlighted[j] = true;
+                }
+
+                int curX = textX;
+                size_t pos = 0;
+                while (pos < textLen)
+                {
+                    bool isHighlighted = highlighted[pos];
+                    size_t runStart = pos;
+                    while (pos < textLen && highlighted[pos] == isHighlighted)
+                        ++pos;
+
+                    wxString segment = row.display_text.Mid(runStart, pos - runStart);
+                    dc.SetTextForeground(isHighlighted ? highlightTextColor : normalTextColor);
+                    dc.DrawText(segment, curX, textY);
+                    curX += dc.GetTextExtent(segment).x;
+                }
+            }
+        }
+    }
+
+    void OnSize(wxSizeEvent &event)
+    {
+        UpdateScrollbar();
+        event.Skip();
+    }
+
+    void OnMouseWheel(wxMouseEvent &event)
+    {
+        const int totalHeight = static_cast<int>(m_rows.size()) * RowHeight();
+        const int visibleHeight = GetClientSize().y;
+        if (totalHeight <= visibleHeight)
+            return;
+
+        int rotation = event.GetWheelRotation();
+        int delta = event.GetWheelDelta();
+        if (delta == 0)
+            return;
+        int scrollAmount = (rotation / delta) * RowHeight() * 3;
+
+        int maxScroll = std::max(0, totalHeight - visibleHeight);
+        m_scroll_offset = std::max(0, std::min(m_scroll_offset - scrollAmount, maxScroll));
+
+        if (m_scrollbar)
+            m_scrollbar->SetThumbPosition(m_scroll_offset);
+        Refresh();
+    }
+
+    void OnScroll(wxScrollEvent &event)
+    {
+        m_scroll_offset = event.GetPosition();
+        Refresh();
+    }
+
+    void OnMotion(wxMouseEvent &event)
+    {
+        int newHover = HitTest(event.GetPosition());
+        if (newHover != m_hovered)
+        {
+            m_hovered = newHover;
+            Refresh();
+        }
+    }
+
+    void OnLeftDown(wxMouseEvent &event)
+    {
+        int clicked = HitTest(event.GetPosition());
+        if (clicked >= 0)
+        {
+            m_selected = clicked;
+            Refresh();
+
+            // Notify SearchDialog via wxEVT_LISTBOX
+            wxCommandEvent selEvent(wxEVT_LISTBOX, GetId());
+            selEvent.SetInt(clicked);
+            selEvent.SetEventObject(this);
+            ProcessWindowEvent(selEvent);
+        }
+    }
+
+    void OnLeaveWindow(wxMouseEvent &event)
+    {
+        if (m_hovered != -1)
+        {
+            m_hovered = -1;
+            Refresh();
+        }
+    }
+
+    // Data
+    std::vector<SearchResultRow> m_rows;
+    ScalableBitmap *m_icons{nullptr};
+
+    // State
+    int m_selected{-1};
+    int m_hovered{-1};
+    int m_scroll_offset{0};
+
+    ScrollBar *m_scrollbar{nullptr};
+};
+
+//------------------------------------------
+//          SearchDialog
+//------------------------------------------
+
 SearchDialog::SearchDialog(OptionsSearcher *searcher, wxWindow *parent)
     : GUI::DPIDialog(parent ? parent : GUI::wxGetApp().tab_panel(), wxID_ANY, _L("Search"), wxDefaultPosition,
-                     wxDefaultSize, wxRESIZE_BORDER)
+                     wxDefaultSize, wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
     , searcher(searcher)
 {
     SetFont(GUI::wxGetApp().normal_font());
@@ -635,41 +1002,56 @@ SearchDialog::SearchDialog(OptionsSearcher *searcher, wxWindow *parent)
     int em = em_unit();
     int border = em;
 
-    search_list = new wxDataViewCtrl(this, wxID_ANY, wxDefaultPosition, wxSize(em * 40, em * 30),
-                                     wxDV_NO_HEADER | wxDV_SINGLE
-#ifdef _WIN32
-                                         | wxBORDER_SIMPLE
-#endif
-    );
-    GUI::wxGetApp().UpdateDarkUI(search_list);
-#ifndef _WIN32
-    // preFlight: theme the search list on Linux/macOS (UpdateDarkUI is Windows-only)
-    search_list->SetBackgroundColour(GUI::wxGetApp().get_window_default_clr());
-    search_list->SetForegroundColour(GUI::wxGetApp().get_label_clr_default());
-#endif
-    search_list_model = new SearchListModel(this);
-    search_list->AssociateModel(search_list_model);
+    // Initialize category icons
+    int icon_id = 0;
+    for (const std::string &icon : {"cog", "printer", "sla_printer", "spool", "resin", "notification_preferences"})
+        m_icons[icon_id++] = ScalableBitmap(this, icon);
 
-#ifdef __WXMSW__
-    search_list->AppendColumn(new wxDataViewColumn("", new BitmapTextRenderer(true, wxDATAVIEW_CELL_INERT),
-                                                   SearchListModel::colIconMarkedText, wxCOL_WIDTH_AUTOSIZE,
-                                                   wxALIGN_LEFT));
-    search_list->GetColumn(SearchListModel::colIconMarkedText)->SetWidth(48 * em_unit());
-#else
-    search_list->AppendBitmapColumn("", SearchListModel::colIcon);
+    // preFlight: filter input field within the dialog
+    m_filter_input = new ::TextInput(this, wxEmptyString, "", "search", wxDefaultPosition, wxSize(em * 50, -1),
+                                     wxTE_PROCESS_ENTER);
+    m_filter_input->SetFont(GUI::wxGetApp().normal_font());
+    GUI::wxGetApp().UpdateDarkUI(m_filter_input);
 
-    wxDataViewTextRenderer *const markupRenderer = new wxDataViewTextRenderer();
+    m_filter_input->Bind(wxEVT_TEXT,
+                         [this](wxCommandEvent &)
+                         {
+                             wxString val = m_filter_input->GetValue();
+                             this->searcher->search(into_u8(val));
+                             this->update_list();
+                         });
 
-#ifdef SUPPORTS_MARKUP
-    markupRenderer->EnableMarkup();
-#endif
+    // Forward key events from the filter input to navigate the results list
+    if (wxTextCtrl *ctrl = m_filter_input->GetTextCtrl())
+    {
+        ctrl->Bind(wxEVT_KEY_DOWN,
+                   [this](wxKeyEvent &e)
+                   {
+                       int key = e.GetKeyCode();
+                       if (key == WXK_UP || key == WXK_DOWN || key == WXK_RETURN || key == WXK_NUMPAD_ENTER)
+                       {
+                           OnKeyDown(e);
+                       }
+                       else if (key == WXK_ESCAPE)
+                       {
+                           this->Hide();
+                       }
+                       else
+                       {
+                           e.Skip();
+                       }
+                   });
+    }
 
-    search_list->AppendColumn(
-        new wxDataViewColumn("", markupRenderer, SearchListModel::colMarkedText, wxCOL_WIDTH_AUTOSIZE, wxALIGN_LEFT));
+    // preFlight: custom ScrollBar + owner-drawn results panel for warm-themed scrollbar
+    m_scrollbar = new ScrollBar(this);
+    m_results_panel = new SearchResultsPanel(this, m_scrollbar);
+    m_results_panel->SetMinSize(wxSize(em * 50, em * 30));
+    m_results_panel->SetFont(GUI::wxGetApp().normal_font());
+    m_results_panel->SetBackgroundColour(UIColors::InputBackground());
 
-    search_list->GetColumn(SearchListModel::colIcon)->SetWidth(3 * em_unit());
-    search_list->GetColumn(SearchListModel::colMarkedText)->SetWidth(40 * em_unit());
-#endif
+    // Handle click-to-activate from the results panel
+    m_results_panel->Bind(wxEVT_LISTBOX, &SearchDialog::OnResultClicked, this);
 
     wxBoxSizer *check_sizer = new wxBoxSizer(wxHORIZONTAL);
 
@@ -690,46 +1072,44 @@ SearchDialog::SearchDialog(OptionsSearcher *searcher, wxWindow *parent)
 
     wxBoxSizer *topSizer = new wxBoxSizer(wxVERTICAL);
 
-    topSizer->Add(search_list, 1, wxEXPAND | wxLEFT | wxTOP | wxRIGHT, border);
+    // preFlight: filter input at top
+    topSizer->Add(m_filter_input, 0, wxEXPAND | wxLEFT | wxTOP | wxRIGHT, border);
+
+    // preFlight: results panel + custom scrollbar side by side
+    wxBoxSizer *list_row = new wxBoxSizer(wxHORIZONTAL);
+    list_row->Add(m_results_panel, 1, wxEXPAND);
+    list_row->Add(m_scrollbar, 0, wxEXPAND);
+
+    topSizer->Add(list_row, 1, wxEXPAND | wxLEFT | wxTOP | wxRIGHT, border);
     topSizer->Add(check_sizer, 0, wxEXPAND | wxALL, border);
-
-    search_list->Bind(wxEVT_DATAVIEW_SELECTION_CHANGED, &SearchDialog::OnSelect, this);
-    search_list->Bind(wxEVT_DATAVIEW_ITEM_ACTIVATED, &SearchDialog::OnActivate, this);
-#ifdef __WXMSW__
-    search_list->GetMainWindow()->Bind(wxEVT_MOTION, &SearchDialog::OnMotion, this);
-    search_list->GetMainWindow()->Bind(wxEVT_LEFT_DOWN, &SearchDialog::OnLeftDown, this);
-#endif //__WXMSW__
-
-    // Under OSX mouse and key states didn't fill after wxEVT_DATAVIEW_SELECTION_CHANGED call
-    // As a result, we can't to identify what kind of actions was done
-    // So, under OSX is used OnKeyDown function to navigate inside the list
-#ifdef __APPLE__
-    search_list->Bind(wxEVT_KEY_DOWN, &SearchDialog::OnKeyDown, this);
-#endif
 
     check_category->Bind(wxEVT_CHECKBOX, &SearchDialog::OnCheck, this);
     if (check_english)
         check_english->Bind(wxEVT_CHECKBOX, &SearchDialog::OnCheck, this);
 
-    //    Bind(wxEVT_MOTION, &SearchDialog::OnMotion, this);
-    //    Bind(wxEVT_LEFT_DOWN, &SearchDialog::OnLeftDown, this);
-
     SetSizer(topSizer);
     topSizer->SetSizeHints(this);
+
+    // preFlight: center on parent so the dialog never appears off-screen
+    CenterOnParent();
 
 #ifdef _WIN32
     GUI::wxGetApp().UpdateDlgDarkUI(this);
 #endif
 }
 
-SearchDialog::~SearchDialog()
-{
-    if (search_list_model)
-        search_list_model->DecRef();
-}
+SearchDialog::~SearchDialog() {}
 
 void SearchDialog::Popup(wxPoint position /*= wxDefaultPosition*/)
 {
+    // Sync the filter input with current search string
+    if (m_filter_input)
+    {
+        wxString current = from_u8(searcher->search_string());
+        if (m_filter_input->GetValue() != current)
+            m_filter_input->SetValue(current);
+    }
+
     update_list();
 
     const OptionViewParameters &params = searcher->view_params;
@@ -737,31 +1117,56 @@ void SearchDialog::Popup(wxPoint position /*= wxDefaultPosition*/)
     if (check_english)
         check_english->SetValue(params.english);
 
-    if (position != wxDefaultPosition)
-        this->SetPosition(position);
-    this->ShowWithoutActivating();
+    // preFlight: center on the main application window each time
+    if (wxWindow *top = GUI::wxGetApp().GetTopWindow())
+    {
+        wxRect frame_rect = top->GetScreenRect();
+        wxSize dlg_size = GetSize();
+        int x = frame_rect.x + (frame_rect.width - dlg_size.x) / 2;
+        int y = frame_rect.y + (frame_rect.height - dlg_size.y) / 2;
+        SetPosition(wxPoint(x, y));
+    }
+    this->Show();
+
+    // Focus the filter input so the user can type immediately
+    if (m_filter_input)
+    {
+        m_filter_input->SetFocus();
+        if (wxTextCtrl *ctrl = m_filter_input->GetTextCtrl())
+        {
+            ctrl->SetFocus();
+            ctrl->SelectAll();
+        }
+    }
 }
 
-void SearchDialog::ProcessSelection(wxDataViewItem selection)
+void SearchDialog::ProcessSelection(int row_index)
 {
-    if (!selection.IsOk())
+    if (row_index < 0 || row_index >= m_results_panel->GetItemCount())
         return;
+
     this->Hide();
 
-    // If call GUI::wxGetApp().sidebar.jump_to_option() directly from here,
-    // then mainframe will not have focus and found option will not be "active" (have cursor) as a result
-    // SearchDialog have to be closed and have to lose a focus
-    // and only after that jump_to_option() function can be called
-    // So, post event to plater:
+    // Post event to mainframe so the dialog loses focus first,
+    // then jump_to_option() can properly activate the found option.
     wxCommandEvent event(wxCUSTOMEVT_JUMP_TO_OPTION);
-    event.SetInt(search_list_model->GetRow(selection));
+    event.SetInt(row_index);
     wxPostEvent(GUI::wxGetApp().mainframe, event);
+}
+
+void SearchDialog::OnResultClicked(wxCommandEvent &event)
+{
+    ProcessSelection(event.GetInt());
 }
 
 void SearchDialog::input_text(wxString input_string)
 {
     if (input_string == searcher->default_string)
         input_string.Clear();
+
+    // Sync the filter input if it differs (avoid re-triggering wxEVT_TEXT loop)
+    if (m_filter_input && m_filter_input->GetValue() != input_string)
+        m_filter_input->SetValue(input_string);
 
     searcher->search(into_u8(input_string));
 
@@ -772,74 +1177,28 @@ void SearchDialog::OnKeyDown(wxKeyEvent &event)
 {
     int key = event.GetKeyCode();
 
-    // change selected item in the list
-    if (key == WXK_UP || key == WXK_DOWN)
+    if (key == WXK_UP)
     {
-        // So, for the next correct navigation, set focus on the search_list
-        search_list->SetFocus();
-
-        auto item = search_list->GetSelection();
-
-        if (item.IsOk())
-        {
-            unsigned selection = search_list_model->GetRow(item);
-
-            if (key == WXK_UP && selection > 0)
-                selection--;
-            if (key == WXK_DOWN && selection < unsigned(search_list_model->GetCount() - 1))
-                selection++;
-
-            prevent_list_events = true;
-            search_list->Select(search_list_model->GetItem(selection));
-            prevent_list_events = false;
-        }
+        m_results_panel->SelectPrev();
     }
-    // process "Enter" pressed
+    else if (key == WXK_DOWN)
+    {
+        m_results_panel->SelectNext();
+    }
     else if (key == WXK_NUMPAD_ENTER || key == WXK_RETURN)
-        ProcessSelection(search_list->GetSelection());
+    {
+        ProcessSelection(m_results_panel->GetSelection());
+    }
     else
-        event.Skip(); // !Needed to have EVT_CHAR generated as well
-}
-
-void SearchDialog::OnActivate(wxDataViewEvent &event)
-{
-    ProcessSelection(event.GetItem());
-}
-
-void SearchDialog::OnSelect(wxDataViewEvent &event)
-{
-    // To avoid selection update from Select() under osx
-    if (prevent_list_events)
-        return;
-
-    // Under OSX mouse and key states didn't fill after wxEVT_DATAVIEW_SELECTION_CHANGED call
-    // As a result, we can't to identify what kind of actions was done
-    // So, under OSX is used OnKeyDown function to navigate inside the list
-#ifndef __APPLE__
-    // wxEVT_DATAVIEW_SELECTION_CHANGED is processed, when selection is changed after mouse click or press the Up/Down arrows
-    // But this two cases should be processed in different way:
-    // Up/Down arrows   -> leave it as it is (just a navigation)
-    // LeftMouseClick   -> call the ProcessSelection function
-    if (wxGetMouseState().LeftIsDown())
-#endif //__APPLE__
-        ProcessSelection(search_list->GetSelection());
+    {
+        event.Skip();
+    }
 }
 
 void SearchDialog::update_list()
 {
-    // Under OSX model->Clear invoke wxEVT_DATAVIEW_SELECTION_CHANGED, so
-    // set prevent_list_events to true already here
-    prevent_list_events = true;
-    search_list_model->Clear();
-
-    const std::vector<FoundOption> &filters = searcher->found_options();
-    for (const FoundOption &item : filters)
-        search_list_model->Prepend(item.label);
-
-    // select first item, if search_list
-    if (search_list_model->GetCount() > 0)
-        search_list->Select(search_list_model->GetItem(0));
-    prevent_list_events = false;
+    // Use marked_label (with ColorMarkerStart/End) for proper accent-color match highlighting
+    m_results_panel->SetItems(searcher->found_options(), m_icons);
 }
 
 void SearchDialog::OnCheck(wxCommandEvent &event)
@@ -853,36 +1212,25 @@ void SearchDialog::OnCheck(wxCommandEvent &event)
     update_list();
 }
 
-void SearchDialog::OnMotion(wxMouseEvent &event)
-{
-    wxDataViewItem item;
-    wxDataViewColumn *col;
-    wxWindow *win = this;
-#ifdef __WXMSW__
-    win = search_list;
-#endif
-    search_list->HitTest(wxGetMousePosition() - win->GetScreenPosition(), item, col);
-    search_list->Select(item);
-
-    event.Skip();
-}
-
-void SearchDialog::OnLeftDown(wxMouseEvent &event)
-{
-    ProcessSelection(search_list->GetSelection());
-}
-
 void SearchDialog::msw_rescale()
 {
     const int &em = em_unit();
-#ifdef __WXMSW__
-    search_list->GetColumn(SearchListModel::colIconMarkedText)->SetWidth(48 * em);
-#else
-    search_list->GetColumn(SearchListModel::colIcon)->SetWidth(3 * em);
-    search_list->GetColumn(SearchListModel::colMarkedText)->SetWidth(45 * em);
-#endif
     const wxSize &size = wxSize(40 * em, 30 * em);
     SetMinSize(size);
+
+    // Re-create icons at new DPI
+    int icon_id = 0;
+    for (const std::string &icon : {"cog", "printer", "sla_printer", "spool", "resin", "notification_preferences"})
+        m_icons[icon_id++] = ScalableBitmap(this, icon);
+
+    if (m_filter_input)
+        m_filter_input->Rescale();
+
+    if (m_scrollbar)
+        m_scrollbar->msw_rescale();
+
+    if (m_results_panel)
+        m_results_panel->msw_rescale();
 
     Fit();
     Refresh();
@@ -893,87 +1241,25 @@ void SearchDialog::on_sys_color_changed()
 #ifdef _WIN32
     GUI::wxGetApp().UpdateAllStaticTextDarkUI(this);
     GUI::wxGetApp().UpdateDarkUI(static_cast<wxButton *>(this->FindWindowById(wxID_CANCEL, this)), true);
-    for (wxWindow *win : std::vector<wxWindow *>{search_list, check_category, check_english})
+    for (wxWindow *win : std::vector<wxWindow *>{check_category, check_english})
         if (win)
             GUI::wxGetApp().UpdateDarkUI(win);
 #endif
 
-    // msw_rescale updates just icons, so use it
-    search_list_model->sys_color_changed();
+    // Update icons for new theme
+    for (ScalableBitmap &bmp : m_icons)
+        bmp.sys_color_changed();
+
+    if (m_filter_input)
+        m_filter_input->SysColorsChanged();
+
+    if (m_scrollbar)
+        m_scrollbar->sys_color_changed();
+
+    if (m_results_panel)
+        m_results_panel->sys_color_changed();
 
     Refresh();
-}
-
-// ----------------------------------------------------------------------------
-// SearchListModel
-// ----------------------------------------------------------------------------
-
-SearchListModel::SearchListModel(wxWindow *parent) : wxDataViewVirtualListModel(0)
-{
-    int icon_id = 0;
-    for (const std::string &icon : {"cog", "printer", "sla_printer", "spool", "resin", "notification_preferences"})
-        m_icon[icon_id++] = ScalableBitmap(parent, icon);
-}
-
-void SearchListModel::Clear()
-{
-    m_values.clear();
-    Reset(0);
-}
-
-void SearchListModel::Prepend(const std::string &label)
-{
-    const char icon_c = label.at(0);
-    int icon_idx = icon_idxs.at(icon_c);
-    wxString str = from_u8(label).Remove(0, 1);
-
-    m_values.emplace_back(str, icon_idx);
-
-    RowPrepended();
-}
-
-void SearchListModel::sys_color_changed()
-{
-    for (ScalableBitmap &bmp : m_icon)
-        bmp.sys_color_changed();
-}
-
-wxString SearchListModel::GetColumnType(unsigned int col) const
-{
-#ifdef __WXMSW__
-    if (col == colIconMarkedText)
-        return "DataViewBitmapText";
-#else
-    if (col == colIcon)
-        return "wxBitmap";
-#endif
-    return "string";
-}
-
-void SearchListModel::GetValueByRow(wxVariant &variant, unsigned int row, unsigned int col) const
-{
-    switch (col)
-    {
-#ifdef __WXMSW__
-    case colIconMarkedText:
-    {
-        const ScalableBitmap &icon = m_icon[m_values[row].second];
-        variant << DataViewBitmapText(m_values[row].first, icon.bmp().GetBitmapFor(icon.parent()));
-        break;
-    }
-#else
-    case colIcon:
-        variant << m_icon[m_values[row].second].bmp().GetBitmapFor(m_icon[m_values[row].second].parent());
-        break;
-    case colMarkedText:
-        variant = m_values[row].first;
-        break;
-#endif
-    case colMax:
-        wxFAIL_MSG("invalid column");
-    default:
-        break;
-    }
 }
 
 } // namespace Search

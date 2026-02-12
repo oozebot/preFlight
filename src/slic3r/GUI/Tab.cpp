@@ -1467,6 +1467,11 @@ void Tab::activate_option(const std::string &opt_key, const wxString &category,
             set_focus(field->getWindow());
     }
 
+    // preFlight: scroll the page view so the found field is visible.
+    // SetFocus alone doesn't scroll our custom ScrollablePanel.
+    if (field && field->getWindow() && m_page_view)
+        m_page_view->ScrollToChild(field->getWindow());
+
     std::vector<std::pair<OG_CustomCtrl *, bool *>> custom_blinking_ctrls = {
         get_custom_ctrl_with_blinking_ptr(opt_key)};
     for (const std::string &another_blinking_opt_key : another_blinking_opt_keys)
@@ -1813,6 +1818,9 @@ void TabPrint::build()
     optgroup = page->new_optgroup_for_sidebar(L("Advanced"));
     optgroup->append_single_option_line("perimeter_generator");
     optgroup->append_single_option_line("seam_position", category_path + "seam-position");
+    optgroup->append_single_option_line("seam_notch", category_path + "seam-notch");
+    optgroup->append_single_option_line("seam_notch_width", category_path + "seam-notch-width");
+    optgroup->append_single_option_line("seam_notch_angle", category_path + "seam-notch-angle");
     optgroup->append_single_option_line("seam_gap_distance", category_path + "seam-gap-distance");
     optgroup->append_single_option_line("staggered_inner_seams", category_path + "staggered-inner-seams");
     optgroup->append_single_option_line("external_perimeters_first", category_path + "external-perimeters-first");
@@ -4394,7 +4402,8 @@ void TabPrinter::build_extruder_pages(size_t n_before_extruders)
                 auto dirty_options = m_presets->current_dirty_options(true);
 #if 1
                 dirty_options.erase(std::remove_if(dirty_options.begin(), dirty_options.end(),
-                                                   [](const std::string &opt) {
+                                                   [](const std::string &opt)
+                                                   {
                                                        return opt.find("extruder_colour") != std::string::npos ||
                                                               opt.find("nozzle_diameter") != std::string::npos;
                                                    }),

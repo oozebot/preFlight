@@ -1,5 +1,4 @@
 ///|/ Copyright (c) preFlight 2025+ oozeBot, LLC
-///|/ Copyright (c) preFlight 2025+ oozeBot, LLC
 ///|/
 ///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
 ///|/
@@ -59,6 +58,7 @@ public:
     void SetBulletColor(const wxColour &color); // Show colored bullet before icon
     void SetCompact(bool compact);              // Use smaller header, icons, and font for sub-tabs
     void SetCollapsible(bool collapsible);      // When false: always expanded, no chevron, no click-to-collapse
+    void SetHeaderVisible(bool visible);        // Show/hide the entire header row
 
     // Styling
     void SetHeaderBackgroundColor(const StateColor &color);

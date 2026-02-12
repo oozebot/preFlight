@@ -33,9 +33,10 @@ RepositoryUpdateUIManager::RepositoryUpdateUIManager(wxWindow *parent, Slic3r::P
 
     m_main_sizer->Add(online_label, 0, wxTOP | wxLEFT | wxBOTTOM, 2 * em);
 
-    auto online_info = new wxStaticText(m_parent, wxID_ANY,
-                                        _L("Please, select online sources you want to update profiles from") + ":");
-    online_info->SetFont(wxGetApp().normal_font());
+    auto online_info = new wxStaticText(
+        m_parent, wxID_ANY,
+        _L("*** Online profile sources are not yet available. This feature is coming in a future update. ***"));
+    online_info->SetFont(wxGetApp().bold_font());
 
     m_main_sizer->Add(online_info, 0, wxLEFT, 3 * em);
 
@@ -167,16 +168,10 @@ void RepositoryUpdateUIManager::fill_grids()
         for (const auto &entry : m_online_entries)
         {
             auto chb = CheckBox::GetNewWin(m_parent, "");
-            CheckBox::SetValue(chb, entry.use);
-            chb->Bind(wxEVT_CHECKBOX,
-                      [this, chb, &entry](wxCommandEvent e)
-                      {
-                          if (CheckBox::GetValue(chb))
-                              m_selected_uuids.emplace(entry.id);
-                          else
-                              m_selected_uuids.erase(entry.id);
-                          check_selection();
-                      });
+            // Online sources not yet implemented - disable and uncheck
+            CheckBox::SetValue(chb, false);
+            chb->Enable(false);
+            m_selected_uuids.erase(entry.id);
             add(chb);
 
             if (entry.not_in_manifest)

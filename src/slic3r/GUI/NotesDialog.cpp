@@ -122,11 +122,16 @@ void NotesDialog::render()
     // Window flags
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoCollapse;
 
+    // preFlight: hide resize grip (window is still resizable by dragging edges)
+    ImGui::PushStyleColor(ImGuiCol_ResizeGrip, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ResizeGripHovered, ImVec4(0, 0, 0, 0));
+    ImGui::PushStyleColor(ImGuiCol_ResizeGripActive, ImVec4(0, 0, 0, 0));
+
     // Set minimum size constraints
-    ImGui::SetNextWindowSizeConstraints(ImVec2(300, 200), ImVec2(FLT_MAX, FLT_MAX));
+    ImGui::SetNextWindowSizeConstraints(ImVec2(600, 200), ImVec2(FLT_MAX, FLT_MAX));
 
     // Set initial size (only on first open)
-    ImGui::SetNextWindowSize(ImVec2(400, 300), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize(ImVec2(600, 300), ImGuiCond_FirstUseEver);
 
     bool is_open = true;
     std::string title = _u8L("Project notes");
@@ -153,6 +158,7 @@ void NotesDialog::render()
         ImGui::EndChild();
     }
     ImGui::End();
+    ImGui::PopStyleColor(3); // ResizeGrip colors
 
     if (!is_open)
         hide();

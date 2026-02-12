@@ -1814,7 +1814,20 @@ bool GUI_App::on_init_inner()
         plater_->update_project_dirty_from_presets();
     }
 
+#ifdef _WIN32
+    // preFlight: keep mainframe invisible during splash to prevent white flash.
+    // The mainframe is larger than the splash bitmap, so its white edges are visible.
+    // Hide it with WS_EX_LAYERED, let it render off-screen, reveal when splash closes.
+    HWND mf_hwnd = mainframe->GetHWND();
+    if (scrn && mf_hwnd)
+    {
+        SetWindowLong(mf_hwnd, GWL_EXSTYLE, GetWindowLong(mf_hwnd, GWL_EXSTYLE) | WS_EX_LAYERED);
+        SetLayeredWindowAttributes(mf_hwnd, 0, 0, LWA_ALPHA);
+    }
+#endif
+
     mainframe->Show(true);
+
     if (scrn)
     {
         // Use a one-shot timer to close splash after delay without blocking UI
@@ -1823,16 +1836,29 @@ bool GUI_App::on_init_inner()
         wxWeakRef<SplashScreen> splash_weak(scrn);
         auto *timer = new wxTimer();
         timer->Bind(wxEVT_TIMER,
-                    [splash_weak, timer](wxTimerEvent &)
+                    [splash_weak, timer
+#ifdef _WIN32
+                     ,
+                     mf_hwnd
+#endif
+        ](wxTimerEvent &)
                     {
                         // Check both wxWeakRef validity AND that window isn't being deleted
                         // to avoid race condition with splash screen's internal timeout
                         if (splash_weak && !splash_weak->IsBeingDeleted())
                             splash_weak->Close();
+#ifdef _WIN32
+                        // Reveal mainframe now that it's fully rendered with dark theme
+                        if (mf_hwnd && IsWindow(mf_hwnd))
+                        {
+                            SetLayeredWindowAttributes(mf_hwnd, 0, 255, LWA_ALPHA);
+                            SetWindowLong(mf_hwnd, GWL_EXSTYLE, GetWindowLong(mf_hwnd, GWL_EXSTYLE) & ~WS_EX_LAYERED);
+                        }
+#endif
                         timer->Stop();
                         delete timer;
                     });
-        timer->StartOnce(1500); // 1.5 seconds after main window shows
+        timer->StartOnce(1000); // 1 second after main window shows
     }
 
     obj_list()->set_min_height();
@@ -2118,10 +2144,13 @@ void GUI_App::UpdateDarkUI(wxWindow *window, bool highlited /* = false*/, bool j
         window->SetForegroundColour(m_color_label_default);
 
     // Apply dark theme to scrollable controls (tree, list, text controls, scrolled windows)
-    if (dynamic_cast<wxScrollHelper *>(window) || dynamic_cast<wxTreeCtrl *>(window) ||
-        dynamic_cast<wxListCtrl *>(window) || dynamic_cast<wxTextCtrl *>(window) || dynamic_cast<wxListBox *>(window))
+    // Guard: window may not be realized yet when called during construction  // preFlight: fix invalid HWND noise
+    HWND hwnd = window->GetHWND();
+    if (hwnd &&
+        (dynamic_cast<wxScrollHelper *>(window) || dynamic_cast<wxTreeCtrl *>(window) ||
+         dynamic_cast<wxListCtrl *>(window) || dynamic_cast<wxTextCtrl *>(window) || dynamic_cast<wxListBox *>(window)))
     {
-        NppDarkMode::SetDarkExplorerTheme(window->GetHWND());
+        NppDarkMode::SetDarkExplorerTheme(hwnd);
     }
 #endif
 }
@@ -2715,6 +2744,10 @@ void GUI_App::update_ui_from_settings()
     }
 #endif
     mainframe->update_ui_from_settings();
+
+    // Apply tabbed sidebar preference change immediately  // preFlight: tabbed sidebar toggle
+    if (plater())
+        plater()->sidebar().SetTabbedMode(app_config->get_bool("use_tabbed_sidebar"));
 }
 
 void GUI_App::persist_window_geometry(wxTopLevelWindow *window, bool default_maximized)

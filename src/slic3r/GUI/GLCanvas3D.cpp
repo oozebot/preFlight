@@ -3973,6 +3973,12 @@ void GLCanvas3D::on_mouse(wxMouseEvent &evt)
     }
     else if (evt.LeftDown() || evt.RightDown() || evt.MiddleDown())
     {
+#ifdef __linux__
+        // preFlight: Track genuine LeftDown events on the canvas so we can filter
+        // phantom LeftUp events that GTK delivers after popup menus close.
+        if (evt.LeftDown())
+            m_mouse.left_down_on_canvas = true;
+#endif
         if (_deactivate_undo_redo_toolbar_items() || _deactivate_arrange_menu())
             return;
 
@@ -4265,7 +4271,13 @@ void GLCanvas3D::on_mouse(wxMouseEvent &evt)
                  !is_layers_editing_enabled())
         {
             // deselect and propagate event through callback
-            if (!evt.ShiftDown() && (!any_gizmo_active || !evt.CmdDown()) && m_picking_enabled)
+            if (!evt.ShiftDown() && (!any_gizmo_active || !evt.CmdDown()) && m_picking_enabled
+#ifdef __linux__
+                // preFlight: GTK delivers phantom LeftUp events to the canvas after popup menus
+                // (e.g. Add Shape) close. Only deselect if a genuine LeftDown preceded this LeftUp.
+                && m_mouse.left_down_on_canvas
+#endif
+            )
                 deselect_all();
         }
         else if (evt.RightUp())
@@ -4987,6 +4999,9 @@ void GLCanvas3D::mouse_up_cleanup()
     m_mouse.set_start_position_2D_as_invalid();
     m_mouse.dragging = false;
     m_mouse.ignore_left_up = false;
+#ifdef __linux__
+    m_mouse.left_down_on_canvas = false;
+#endif
     m_dirty = true;
 
     if (m_canvas->HasCapture())
@@ -7426,7 +7441,7 @@ void GLCanvas3D::_render_sidebar_toggle_imgui()
     }
 
     // Cache tooltip string to avoid calling _u8L every frame
-    static const std::string tooltip_text = _u8L("Toggle sidebar visibility");
+    static const std::string tooltip_text = _u8L("Toggle sidebar");
     if (ImGui::IsItemHovered())
     {
         ImGui::SetTooltip("%s", tooltip_text.c_str());

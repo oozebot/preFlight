@@ -927,7 +927,8 @@ void MainFrame::init_tabpanel()
                                    {
                                        if (m_plater)
                                        {
-                                           if (!m_plater->IsShown())
+                                           bool was_hidden = !m_plater->IsShown();
+                                           if (was_hidden)
                                            {
                                                // Hide all tab pages
                                                for (size_t i = 0; i < m_tabpanel->GetPageCount(); ++i)
@@ -938,6 +939,9 @@ void MainFrame::init_tabpanel()
                                                m_plater->Show();
                                            }
                                            m_plater->select_view_3D("3D");
+                                           // Recalculate layout so the canvas resizes to current window dimensions
+                                           if (was_hidden)
+                                               Layout();
                                        }
                                    });
 
@@ -947,7 +951,8 @@ void MainFrame::init_tabpanel()
                                    {
                                        if (m_plater)
                                        {
-                                           if (!m_plater->IsShown())
+                                           bool was_hidden = !m_plater->IsShown();
+                                           if (was_hidden)
                                            {
                                                // Hide all tab pages
                                                for (size_t i = 0; i < m_tabpanel->GetPageCount(); ++i)
@@ -958,6 +963,9 @@ void MainFrame::init_tabpanel()
                                                m_plater->Show();
                                            }
                                            m_plater->select_view_3D("Preview");
+                                           // Recalculate layout so the canvas resizes to current window dimensions
+                                           if (was_hidden)
+                                               Layout();
                                        }
                                    });
 
@@ -1779,12 +1787,10 @@ static wxMenu *generate_help_menu()
 {
     wxMenu *helpMenu = new wxMenu();
 
-    append_menu_item(helpMenu, wxID_ANY, wxString::Format(_L("%s &Website"), SLIC3R_APP_NAME),
-                     wxString::Format(_L("Open the %s website in your browser"), SLIC3R_APP_NAME),
-                     [](wxCommandEvent &) {
-                         wxGetApp().open_browser_with_warning_dialog("https://github.com/oozebot/preFlight", nullptr,
-                                                                     false);
-                     });
+    append_menu_item(
+        helpMenu, wxID_ANY, wxString::Format(_L("%s &Website"), SLIC3R_APP_NAME),
+        wxString::Format(_L("Open the %s website in your browser"), SLIC3R_APP_NAME), [](wxCommandEvent &)
+        { wxGetApp().open_browser_with_warning_dialog("https://github.com/oozebot/preFlight", nullptr, false); });
     // // TRN Item from "Help" menu
     // append_menu_item(helpMenu, wxID_ANY, wxString::Format(_L("&Quick Start"), SLIC3R_APP_NAME),
     //     wxString::Format(_L("Open the %s website in your browser"), SLIC3R_APP_NAME),
@@ -1798,7 +1804,8 @@ static wxMenu *generate_help_menu()
     helpMenu->AppendSeparator();
     append_menu_item(helpMenu, wxID_ANY, _L("Software &Releases"),
                      _L("Open the software releases page in your browser"),
-                     [](wxCommandEvent &) {
+                     [](wxCommandEvent &)
+                     {
                          wxGetApp().open_browser_with_warning_dialog("https://github.com/oozebot/preFlight/releases",
                                                                      nullptr, false);
                      });
@@ -1817,7 +1824,8 @@ static wxMenu *generate_help_menu()
                      [](wxCommandEvent &) { Slic3r::GUI::desktop_open_datadir_folder(); });
     append_menu_item(helpMenu, wxID_ANY, _L("Report an I&ssue"),
                      wxString::Format(_L("Report an issue on %s"), SLIC3R_APP_NAME),
-                     [](wxCommandEvent &) {
+                     [](wxCommandEvent &)
+                     {
                          wxGetApp().open_browser_with_warning_dialog("https://github.com/oozebot/preFlight/issues/new",
                                                                      nullptr, false);
                      });
@@ -2800,6 +2808,37 @@ void MainFrame::select_tab(Tab *tab)
 {
     if (!tab)
         return;
+
+    // preFlight: when using the ModernTabBar, route through SelectTab() so that
+    // plater visibility and settings-page show/hide are handled correctly.
+    if (m_modern_tabbar)
+    {
+        ModernTabBar::TabType tab_type;
+        switch (tab->type())
+        {
+        case Preset::TYPE_PRINT:
+        case Preset::TYPE_SLA_PRINT:
+            tab_type = ModernTabBar::TAB_PRINT_SETTINGS;
+            break;
+        case Preset::TYPE_FILAMENT:
+        case Preset::TYPE_SLA_MATERIAL:
+            tab_type = ModernTabBar::TAB_FILAMENTS;
+            break;
+        case Preset::TYPE_PRINTER:
+            tab_type = ModernTabBar::TAB_PRINTERS;
+            break;
+        default:
+            // Unknown tab type — fall through to legacy path
+            tab_type = ModernTabBar::TAB_COUNT;
+            break;
+        }
+        if (tab_type != ModernTabBar::TAB_COUNT)
+        {
+            m_modern_tabbar->SelectTab(tab_type);
+            return;
+        }
+    }
+
     int page_idx = m_tabpanel->FindPage(tab);
     if (page_idx != wxNOT_FOUND && m_layout == ESettingsLayout::Dlg)
         page_idx++;

@@ -682,11 +682,14 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig *config, con
 void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config)
 {
     bool have_perimeters = config->opt_int("perimeters") > 0;
-    for (auto el :
-         {"extra_perimeters", "extra_perimeters_on_overhangs", "thin_walls", "overhangs", "seam_position",
-          "staggered_inner_seams", "external_perimeters_first", "external_perimeter_extrusion_width", "perimeter_speed",
-          "small_perimeter_speed", "external_perimeter_speed", "enable_dynamic_overhang_speeds"})
+    for (auto el : {"extra_perimeters", "extra_perimeters_on_overhangs", "thin_walls", "overhangs", "seam_position",
+                    "staggered_inner_seams", "seam_notch", "seam_notch_width", "seam_notch_angle",
+                    "external_perimeters_first", "external_perimeter_extrusion_width", "perimeter_speed",
+                    "small_perimeter_speed", "external_perimeter_speed", "enable_dynamic_overhang_speeds"})
         toggle_field(el, have_perimeters);
+
+    toggle_field("seam_notch_width", have_perimeters && config->opt_bool("seam_notch"));
+    toggle_field("seam_notch_angle", have_perimeters && config->opt_bool("seam_notch"));
 
     for (size_t i = 0; i < 4; i++)
     {

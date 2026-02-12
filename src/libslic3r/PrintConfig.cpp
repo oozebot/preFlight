@@ -99,9 +99,9 @@ static const t_config_enum_values s_keys_map_MachineLimitsUsage{{"emit_to_gcode"
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(MachineLimitsUsage)
 
 static const t_config_enum_values s_keys_map_PrintHostType{
-    {"rapid", htRapid},         {"duet", htDuet},           {"moonraker", htMoonraker},
-    {"octoprint", htOctoPrint}, {"locallink", htLocalLink}, {"flashair", htFlashAir},
-    {"astrobox", htAstroBox},   {"repetier", htRepetier},   {"mks", htMKS},
+    {"rapid", htRapid},         {"duet", htDuet},         {"moonraker", htMoonraker},
+    {"octoprint", htOctoPrint}, {"flashair", htFlashAir}, {"astrobox", htAstroBox},
+    {"repetier", htRepetier},   {"mks", htMKS},           {"locallink", htLocalLink},
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(PrintHostType)
 
@@ -3056,11 +3056,11 @@ void PrintConfigDef::init_fff_params()
                                                                              {"duet", "Duet"},
                                                                              {"moonraker", "Klipper"},
                                                                              {"octoprint", "OctoPrint"},
-                                                                             {"locallink", "LocalLink"},
                                                                              {"flashair", "FlashAir"},
                                                                              {"astrobox", "AstroBox"},
                                                                              {"repetier", "Repetier"},
-                                                                             {"mks", "MKS"}});
+                                                                             {"mks", "MKS"},
+                                                                             {"locallink", "LocalLink"}});
     def->mode = comAdvanced;
     def->cli = ConfigOptionDef::nocli;
     def->set_default_value(new ConfigOptionEnum<PrintHostType>(htRapid));
@@ -3575,6 +3575,48 @@ void PrintConfigDef::init_fff_params()
         "This option causes the inner seams to be shifted backwards based on their depth, forming a zigzag pattern.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("seam_notch", coBool);
+    def->label = L("Nip/Tuck seams");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Creates a small V-shaped channel at the seam point on external perimeters to hide "
+                     "start/stop blobs. The external perimeter is nipped inward at the seam and the first "
+                     "inner perimeter is tucked to absorb the disturbance, so remaining perimeters are unaffected.\n\n"
+                     "Requires at least 2 perimeters in the config. In thin wall areas where only a single "
+                     "perimeter is generated, the nip is still applied to hide the seam but the inner tuck "
+                     "is skipped.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("seam_notch_width", coFloat);
+    def->label = L("Nip/Tuck width");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Width of the V-shaped notch as a multiple of the external perimeter extrusion width. "
+                     "The depth is automatically calculated from perimeter spacing. "
+                     "Wider values are more forgiving for blobs but create a larger surface depression. "
+                     "Narrower values are subtler.");
+    def->sidetext = L("x ext. width");
+    def->min = 1;
+    def->max = 3;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(2.0));
+
+    def = this->add("seam_notch_angle", coFloat);
+    def->label = L("Nip/Tuck corner threshold");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L(
+        "Controls where Nip/Tuck is applied based on corner sharpness. "
+        "At sharp corners the seam is naturally hidden by the geometry, so the Nip/Tuck surgery "
+        "is unnecessary.\n\n"
+        "Seams on corners sharper than this angle are skipped. The default of 44\u00B0 means any corner "
+        "of 44\u00B0 or less is considered sharp enough to hide the seam on its own \u2014 just under 45\u00B0, "
+        "where a clean fold already conceals the junction.\n\n"
+        "Set to 0 to apply Nip/Tuck everywhere regardless of corner angle.");
+    def->sidetext = L("\u00B0");
+    def->min = 0;
+    def->max = 90;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionFloat(44.0));
 
     def = this->add("scarf_seam_placement", coEnum);
     def->label = L("Scarf joint placement");

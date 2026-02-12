@@ -98,6 +98,8 @@ set(SLIC3R_GUI_SOURCES
     GUI/GLToolbar.cpp
     GUI/GCodeViewer.hpp
     GUI/GCodeViewer.cpp
+    GUI/preFlight.PreviewClipController.hpp
+    GUI/preFlight.PreviewClipController.cpp
     GUI/ModernTabBar.hpp
     GUI/ModernTabBar.cpp
     GUI/PrinterWebViewPanel.hpp

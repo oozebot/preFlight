@@ -42,21 +42,31 @@ extern "C"
 #include <glib.h>
 // Suppress known cosmetic GTK/GDK-CRITICAL assertions that fire when wxWidgets
 // operates on widgets before they are fully realized or after they are destroyed.
-// Must be installed before wxEntry() runs, as wxWidgets triggers these during its
-// own initialization — well before wxApp::OnInit().
-static void preflight_gtk_log_handler(const gchar * /*log_domain*/, GLogLevelFlags /*log_level*/, const gchar *message,
-                                      gpointer /*user_data*/)
+// Must be installed via g_log_set_writer_func() before wxEntry() runs, because
+// GTK3 is compiled with G_LOG_USE_STRUCTURED — its g_critical() calls bypass
+// g_log_set_handler() entirely and go through the structured logging writer.
+static GLogWriterOutput preflight_log_writer(GLogLevelFlags log_level, const GLogField *fields, gsize n_fields,
+                                             gpointer /*user_data*/)
 {
-    if (message)
+    if (log_level & G_LOG_LEVEL_CRITICAL)
     {
-        if (strstr(message, "gtk_widget_get_style_context") || strstr(message, "gtk_style_context_add_provider") ||
-            strstr(message, "gtk_label_set_text_with_mnemonic") || strstr(message, "gtk_label_set_mnemonic_widget") ||
-            strstr(message, "gtk_window_resize") || strstr(message, "gtk_grab_remove") ||
-            strstr(message, "gtk_widget_get_display") || strstr(message, "gdk_device_manager_get_client_pointer") ||
-            strstr(message, "gdk_device_ungrab") || strstr(message, "gdk_display_get_device_manager"))
-            return;
+        for (gsize i = 0; i < n_fields; i++)
+        {
+            if (g_strcmp0(fields[i].key, "MESSAGE") == 0 && fields[i].value)
+            {
+                const gchar *msg = static_cast<const gchar *>(fields[i].value);
+                if (strstr(msg, "gtk_box_gadget_distribute") || strstr(msg, "gtk_widget_get_style_context") ||
+                    strstr(msg, "gtk_style_context_add_provider") || strstr(msg, "gtk_label_set_text_with_mnemonic") ||
+                    strstr(msg, "gtk_label_set_mnemonic_widget") || strstr(msg, "gtk_window_resize") ||
+                    strstr(msg, "gtk_grab_remove") || strstr(msg, "gtk_widget_get_display") ||
+                    strstr(msg, "gdk_device_manager_get_client_pointer") || strstr(msg, "gdk_device_ungrab") ||
+                    strstr(msg, "gdk_display_get_device_manager"))
+                    return G_LOG_WRITER_HANDLED; // Suppress silently
+                break;
+            }
+        }
     }
-    g_log_default_handler(nullptr, G_LOG_LEVEL_CRITICAL, message, nullptr);
+    return g_log_writer_default(log_level, fields, n_fields, nullptr);
 }
 #endif
 
@@ -120,10 +130,11 @@ int main(int argc, char **argv)
     // preFlight: Force dark GTK theme on Linux until light mode theming is fully reworked
     setenv("GTK_THEME", "Adwaita:dark", 0); // 0 = don't override if user explicitly sets it
 
-    // Install GTK/GDK log handlers before wxWidgets initialization to suppress
-    // cosmetic CRITICAL assertions from styling unrealized widgets
-    g_log_set_handler("Gtk", G_LOG_LEVEL_CRITICAL, preflight_gtk_log_handler, nullptr);
-    g_log_set_handler("Gdk", G_LOG_LEVEL_CRITICAL, preflight_gtk_log_handler, nullptr);
+    // Install structured log writer before wxWidgets initialization to suppress
+    // cosmetic CRITICAL assertions. Must use g_log_set_writer_func (not
+    // g_log_set_handler) because GTK3 is compiled with G_LOG_USE_STRUCTURED.
+    // Can only be called once per process, before any g_log calls.
+    g_log_set_writer_func(preflight_log_writer, nullptr, nullptr);
 #endif
 
     return Slic3r::CLI::run(argc, argv);

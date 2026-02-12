@@ -17,7 +17,7 @@ namespace libvgcode
 //|   2--0-------5--7   |
 //|    \ |       | /    |
 //|      3-------4      |
-static constexpr const std::array<uint8_t, 24> VERTEX_DATA = {
+static constexpr const std::array<uint8_t, 36> VERTEX_DATA = {
     0, 1, 2, // front spike
     0, 2, 3, // front spike
     0, 3, 4, // right/bottom body
@@ -26,6 +26,12 @@ static constexpr const std::array<uint8_t, 24> VERTEX_DATA = {
     0, 6, 1, // left/top body
     5, 4, 7, // back spike
     5, 7, 6, // back spike
+    // preFlight: cap triangles for clip plane cross-section fill
+    // Full diamond: right(8/11), up(9/12), down(10/13), left(14/15)
+    8, 9, 14,   // front cap upper half (right, up, left)
+    8, 14, 10,  // front cap lower half (right, left, down)
+    11, 12, 15, // back cap upper half (right, up, left)
+    11, 15, 13, // back cap lower half (right, left, down)
 };
 
 void SegmentTemplate::init()

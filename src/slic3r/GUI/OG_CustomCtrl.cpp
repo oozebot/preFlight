@@ -813,7 +813,16 @@ void OG_CustomCtrl::CtrlLine::render(wxDC &dc, wxCoord v_pos)
             draw_blinking_bmp(dc, wxPoint(h_pos, v_pos), field->blink());
         // update width for full_width fields
         if (option_set.front().opt.full_width && field->getWindow())
-            field->getWindow()->SetSize(ctrl->GetSize().x - h_pos, -1);
+        {
+            wxCoord w = ctrl->GetSize().x - h_pos;
+#ifdef __linux__
+            // On Wayland, OnPaint can fire before the control is fully sized,
+            // making ctrl width smaller than h_pos. GTK asserts width >= -1.
+            if (w < 0)
+                w = -1;
+#endif
+            field->getWindow()->SetSize(w, -1);
+        }
         return;
     }
 

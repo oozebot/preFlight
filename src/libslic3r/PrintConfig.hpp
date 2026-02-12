@@ -128,11 +128,11 @@ enum PrintHostType
     htDuet,
     htMoonraker,
     htOctoPrint,
-    htLocalLink,
     htFlashAir,
     htAstroBox,
     htRepetier,
-    htMKS
+    htMKS,
+    htLocalLink,
 };
 
 enum AuthorizationType
@@ -1024,6 +1024,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     // Single perimeter.
     ((ConfigOptionEnum<TopOnePerimeterType>, top_one_perimeter_type))((ConfigOptionBool,
                                                                        only_one_perimeter_first_layer))
+
+    // Seam Nip/Tuck
+    ((ConfigOptionBool, seam_notch))((ConfigOptionFloat, seam_notch_width))((ConfigOptionFloat, seam_notch_angle))
 
         ((ConfigOptionEnum<ScarfSeamPlacement>, scarf_seam_placement))((ConfigOptionBool, scarf_seam_only_on_smooth))(
             (ConfigOptionPercent, scarf_seam_start_height))((ConfigOptionBool, scarf_seam_entire_loop))(

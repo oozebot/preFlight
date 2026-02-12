@@ -125,6 +125,62 @@ std::optional<std::size_t> snap_to_angle(const Vec2d &point, const std::size_t s
     return match;
 }
 
+// preFlight: Compute centroid of enforcer vertices within max_distance of reference_position.
+// Centers the seam in the painted region rather than snapping to an arbitrary enforcer vertex.
+std::optional<Vec2d> get_enforcer_centroid_near(const Perimeters::Perimeter &perimeter, const Vec2d &reference_position,
+                                                const double max_distance)
+{
+    Vec2d sum = Vec2d::Zero();
+    int count = 0;
+    for (std::size_t i = 0; i < perimeter.positions.size(); ++i)
+    {
+        if (perimeter.point_types[i] == PointType::enforcer)
+        {
+            if ((perimeter.positions[i] - reference_position).norm() <= max_distance)
+            {
+                sum += perimeter.positions[i];
+                ++count;
+            }
+        }
+    }
+    if (count == 0)
+        return std::nullopt;
+    return sum / static_cast<double>(count);
+}
+
+// preFlight: Cluster nearby positions within cluster_radius and return cluster centroids.
+// Reduces many per-vertex starting positions to one centroid per painted region.
+std::vector<Vec2d> cluster_positions(const std::vector<Vec2d> &positions, const double cluster_radius)
+{
+    if (positions.empty())
+        return {};
+
+    std::vector<bool> assigned(positions.size(), false);
+    std::vector<Vec2d> centroids;
+
+    for (std::size_t i = 0; i < positions.size(); ++i)
+    {
+        if (assigned[i])
+            continue;
+        Vec2d sum = positions[i];
+        int count = 1;
+        assigned[i] = true;
+        for (std::size_t j = i + 1; j < positions.size(); ++j)
+        {
+            if (assigned[j])
+                continue;
+            if ((positions[j] - positions[i]).norm() <= cluster_radius)
+            {
+                sum += positions[j];
+                ++count;
+                assigned[j] = true;
+            }
+        }
+        centroids.push_back(sum / static_cast<double>(count));
+    }
+    return centroids;
+}
+
 SeamOptions get_seam_options(const Perimeters::Perimeter &perimeter, const Vec2d &prefered_position,
                              const Perimeters::Perimeter::PointTree &points_tree, const double max_detour)
 {
@@ -225,14 +281,15 @@ double VisibilityCalculator::get_angle_visibility_modifier(double angle, const d
     return -angle_smooth_weight;
 }
 
-std::vector<Vec2d> get_starting_positions(const Shells::Shell<> &shell)
+std::vector<Vec2d> get_starting_positions(const Shells::Shell<> &shell, const double cluster_radius)
 {
     const Perimeters::Perimeter &perimeter{shell.front().boundary};
 
     std::vector<Vec2d> enforcers{Perimeters::extract_points(perimeter, Perimeters::PointType::enforcer)};
     if (!enforcers.empty())
     {
-        return enforcers;
+        // preFlight: Cluster enforcers and return centroids to center seam in painted regions
+        return Impl::cluster_positions(enforcers, cluster_radius);
     }
     std::vector<Vec2d> common{Perimeters::extract_points(perimeter, Perimeters::PointType::common)};
     if (!common.empty())
@@ -292,11 +349,19 @@ SeamCandidate get_seam_candidate(const Shells::Shell<> &shell, const Vec2d &star
     std::vector<double> choice_visibilities(shell.size(), 1.0);
     std::vector<SeamChoice> choices{get_shell_seam(
         shell,
-        [&, previous_position{starting_position}](const Perimeter &perimeter, std::size_t slice_index) mutable
+        // preFlight: Use reference_position (stable) instead of previous_position (drifts).
+        // Reference only updates when geometry forces a significant move.
+        [&, reference_position{starting_position}](const Perimeter &perimeter, std::size_t slice_index) mutable
         {
-            SeamChoice candidate{
-                Seams::choose_seam_point(perimeter, Impl::Nearest{previous_position, params.max_detour})};
-            const bool is_too_far{(candidate.position - previous_position).norm() > params.max_detour};
+            // preFlight: Compute enforcer centroid near reference to center seam in painted region
+            Vec2d search_target = reference_position;
+            if (auto centroid = Impl::get_enforcer_centroid_near(perimeter, reference_position, params.max_detour))
+            {
+                search_target = *centroid;
+            }
+
+            SeamChoice candidate{Seams::choose_seam_point(perimeter, Impl::Nearest{search_target, params.max_detour})};
+            const bool is_too_far{(candidate.position - reference_position).norm() > params.max_detour};
             const LeastVisiblePoint &least_visible{least_visible_points[slice_index]};
 
             const bool is_on_edge{candidate.previous_index == candidate.next_index &&
@@ -316,8 +381,24 @@ SeamCandidate get_seam_candidate(const Shells::Shell<> &shell, const Vec2d &star
             if (is_too_far || (can_be_on_edge && is_too_visible))
             {
                 candidate = least_visible.choice;
+                // preFlight: Update reference when jumping to least-visible (geometry changed significantly)
+                reference_position = candidate.position;
             }
-            previous_position = candidate.position;
+            else
+            {
+                // preFlight: Snap-to-reference to prevent drift between layers.
+                // If the candidate is within snap_tolerance, lock to the reference position.
+                // Only update reference when geometry genuinely forces a move.
+                const double drift = (candidate.position - reference_position).norm();
+                if (drift <= params.snap_tolerance)
+                {
+                    candidate.position = reference_position;
+                }
+                else
+                {
+                    reference_position = candidate.position;
+                }
+            }
             return candidate;
         })};
     return {std::move(choices), std::move(choice_visibilities)};
@@ -379,12 +460,12 @@ std::vector<ShellLeastVisiblePoints> get_shells_least_visible_points(
 
 using ShellStartingPositions = std::vector<Vec2d>;
 
-std::vector<ShellStartingPositions> get_shells_starting_positions(const Shells::Shells<> &shells)
+std::vector<ShellStartingPositions> get_shells_starting_positions(const Shells::Shells<> &shells, const Params &params)
 {
     std::vector<ShellStartingPositions> result;
     for (const Shells::Shell<> &shell : shells)
     {
-        std::vector<Vec2d> starting_positions{get_starting_positions(shell)};
+        std::vector<Vec2d> starting_positions{get_starting_positions(shell, params.max_detour)};
         result.push_back(std::move(starting_positions));
     }
     return result;
@@ -478,7 +559,7 @@ std::vector<std::vector<SeamPerimeterChoice>> get_object_seams(Shells::Shells<> 
     const std::vector<ShellLeastVisiblePoints> least_visible_points{
         get_shells_least_visible_points(shells, precalculated_visibility)};
 
-    const std::vector<ShellStartingPositions> starting_positions{get_shells_starting_positions(shells)};
+    const std::vector<ShellStartingPositions> starting_positions{get_shells_starting_positions(shells, params)};
 
     const std::vector<ShellSeamCandidates> seam_candidates{
         get_shells_seam_candidates(shells, starting_positions, visibility_calculator, precalculated_visibility,

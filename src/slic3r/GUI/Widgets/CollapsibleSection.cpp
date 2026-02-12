@@ -471,6 +471,18 @@ void CollapsibleSection::SetCollapsible(bool collapsible)
     UpdateLayout();
 }
 
+void CollapsibleSection::SetHeaderVisible(bool visible)
+{
+    if (!m_header_panel)
+        return;
+
+    m_header_panel->Show(visible);
+    if (!visible && m_chevron)
+        m_chevron->Hide();
+    // No UpdateLayout() here — caller is responsible for layout after batch changes
+    // Caller should also call SetExpanded() if content should be visible
+}
+
 void CollapsibleSection::SetHeaderBackgroundColor(const StateColor &color)
 {
     m_header_bg_color = color;

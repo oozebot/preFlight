@@ -359,6 +359,17 @@ size_t Viewer::get_used_gpu_memory() const
     return m_impl->get_used_gpu_memory();
 }
 
+// preFlight: clipping plane for preview clipping feature
+void Viewer::set_clipping_plane(float nx, float ny, float nz, float offset)
+{
+    m_impl->set_clipping_plane(nx, ny, nz, offset);
+}
+
+void Viewer::reset_clipping_plane()
+{
+    m_impl->reset_clipping_plane();
+}
+
 #if VGCODE_ENABLE_COG_AND_TOOL_MARKERS
 Vec3 Viewer::get_cog_position() const
 {

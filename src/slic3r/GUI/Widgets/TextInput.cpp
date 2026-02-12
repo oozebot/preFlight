@@ -3,6 +3,7 @@
 ///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
 ///|/
 #include "TextInput.hpp"
+#include "ScrollBar.hpp"
 #include "UIColors.hpp"
 
 #include <wx/dcgraph.h>
@@ -89,15 +90,95 @@ void TextInput::Create(wxWindow *parent, wxString text, wxString label, wxString
     text_ctrl->OSXDisableAllSmartSubstitutions();
 #endif // __WXOSX__
 #ifdef _WIN32
-    // For multiline text controls (with scrollbars), use DarkMode_Explorer for themed scrollbars
-    // For single-line controls, disable visual styles so WM_CTLCOLOREDIT colors are respected
     if (style & wxTE_MULTILINE)
     {
-        // Apply dark explorer theme for proper scrollbar theming
-        if (Slic3r::GUI::wxGetApp().dark_mode())
-            SetWindowTheme((HWND) text_ctrl->GetHWND(), L"DarkMode_Explorer", nullptr);
-        else
-            SetWindowTheme((HWND) text_ctrl->GetHWND(), L"Explorer", nullptr);
+        // preFlight: hide native scrollbar and use custom themed ScrollBar.
+        // Remove WS_VSCROLL to prevent native scrollbar from appearing.
+        // The EDIT control still supports scrolling via EM_LINESCROLL and mouse wheel.
+        HWND hwnd = (HWND) text_ctrl->GetHWND();
+        LONG ws = GetWindowLong(hwnd, GWL_STYLE);
+        ws &= ~WS_VSCROLL;
+        SetWindowLong(hwnd, GWL_STYLE, ws);
+        SetWindowPos(hwnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
+
+        // Disable visual styles so custom bg colors work via WM_CTLCOLOREDIT
+        SetWindowTheme(hwnd, L"", L"");
+
+        m_scrollbar = new ScrollBar(this);
+
+        // Scrollbar drag → scroll the text control
+        m_scrollbar->Bind(wxEVT_SCROLL_THUMBTRACK,
+                          [this](wxScrollEvent &e)
+                          {
+                              if (!text_ctrl)
+                                  return;
+                              HWND h = (HWND) text_ctrl->GetHWND();
+                              int cur = (int) SendMessage(h, EM_GETFIRSTVISIBLELINE, 0, 0);
+                              int target = e.GetPosition();
+                              SendMessage(h, EM_LINESCROLL, 0, target - cur);
+                          });
+
+        // Sync scrollbar whenever text content or scroll position changes
+        text_ctrl->Bind(wxEVT_TEXT,
+                        [this](wxCommandEvent &e)
+                        {
+                            e.Skip();
+                            CallAfter([this]() { SyncScrollbar(); });
+                        });
+        text_ctrl->Bind(wxEVT_SIZE,
+                        [this](wxSizeEvent &e)
+                        {
+                            e.Skip();
+                            CallAfter([this]() { SyncScrollbar(); });
+                        });
+        text_ctrl->Bind(wxEVT_SCROLLWIN_THUMBTRACK,
+                        [this](wxScrollWinEvent &e)
+                        {
+                            e.Skip();
+                            CallAfter([this]() { SyncScrollbar(); });
+                        });
+        text_ctrl->Bind(wxEVT_SCROLLWIN_THUMBRELEASE,
+                        [this](wxScrollWinEvent &e)
+                        {
+                            e.Skip();
+                            CallAfter([this]() { SyncScrollbar(); });
+                        });
+        text_ctrl->Bind(wxEVT_SCROLLWIN_LINEDOWN,
+                        [this](wxScrollWinEvent &e)
+                        {
+                            e.Skip();
+                            CallAfter([this]() { SyncScrollbar(); });
+                        });
+        text_ctrl->Bind(wxEVT_SCROLLWIN_LINEUP,
+                        [this](wxScrollWinEvent &e)
+                        {
+                            e.Skip();
+                            CallAfter([this]() { SyncScrollbar(); });
+                        });
+        text_ctrl->Bind(wxEVT_SCROLLWIN_PAGEDOWN,
+                        [this](wxScrollWinEvent &e)
+                        {
+                            e.Skip();
+                            CallAfter([this]() { SyncScrollbar(); });
+                        });
+        text_ctrl->Bind(wxEVT_SCROLLWIN_PAGEUP,
+                        [this](wxScrollWinEvent &e)
+                        {
+                            e.Skip();
+                            CallAfter([this]() { SyncScrollbar(); });
+                        });
+        text_ctrl->Bind(wxEVT_MOUSEWHEEL,
+                        [this](wxMouseEvent &e)
+                        {
+                            e.Skip();
+                            CallAfter([this]() { SyncScrollbar(); });
+                        });
+        text_ctrl->Bind(wxEVT_KEY_DOWN,
+                        [this](wxKeyEvent &e)
+                        {
+                            e.Skip();
+                            CallAfter([this]() { SyncScrollbar(); });
+                        });
     }
     else
     {
@@ -241,14 +322,15 @@ void TextInput::SysColorsChanged()
     {
         text_ctrl->SetThemedColors(bg_normal, fg_normal);
 #ifdef _WIN32
-        // DO NOT call SetDarkExplorerTheme on edit controls!
-        // Edit controls have visual styles disabled at creation via SetWindowTheme(hwnd, L"", L"")
-        // which allows WM_CTLCOLOREDIT brush returns to work. Applying DarkMode_Explorer
-        // would re-enable visual styles and cause Windows to ignore our brushes.
-        // Just force a repaint to apply the new colors via WM_CTLCOLOREDIT.
+        // Single-line and multiline edit controls both have visual styles disabled
+        // so WM_CTLCOLOREDIT brush returns work. Just force a repaint.
         RedrawWindow((HWND) text_ctrl->GetHWND(), NULL, NULL, RDW_ERASE | RDW_INVALIDATE | RDW_FRAME | RDW_ALLCHILDREN);
 #endif
     }
+
+    // preFlight: refresh custom scrollbar on theme change
+    if (m_scrollbar)
+        m_scrollbar->sys_color_changed();
 
     if (this->drop_down_icon.bmp().IsOk())
         this->drop_down_icon.sys_color_changed();
@@ -292,6 +374,40 @@ void TextInput::Rescale()
 
     messureSize();
     Refresh();
+}
+
+void TextInput::SyncScrollbar()
+{
+#ifdef _WIN32
+    if (!m_scrollbar || !text_ctrl || !text_ctrl->IsMultiLine())
+        return;
+
+    HWND hwnd = (HWND) text_ctrl->GetHWND();
+
+    // Get scroll metrics from the EDIT control
+    int total_lines = (int) SendMessage(hwnd, EM_GETLINECOUNT, 0, 0);
+    int first_visible = (int) SendMessage(hwnd, EM_GETFIRSTVISIBLELINE, 0, 0);
+
+    // Estimate visible lines from control height and font height
+    wxClientDC dc(text_ctrl);
+    dc.SetFont(text_ctrl->GetFont());
+    int line_h = dc.GetCharHeight();
+    int visible_lines = line_h > 0 ? (text_ctrl->GetClientSize().y / line_h) : 1;
+    if (visible_lines < 1)
+        visible_lines = 1;
+
+    m_scrollbar->SetScrollbar(first_visible, visible_lines, total_lines, visible_lines);
+
+    // Only show scrollbar when content exceeds visible area
+    bool needs_scroll = total_lines > visible_lines;
+    if (needs_scroll != m_scrollbar->IsShown())
+    {
+        m_scrollbar->Show(needs_scroll);
+        // Re-layout to reclaim/give space for the scrollbar
+        wxSize size = GetSize();
+        DoSetSize(GetPosition().x, GetPosition().y, size.x, size.y, 0);
+    }
+#endif
 }
 
 bool TextInput::SetFont(const wxFont &font)
@@ -410,11 +526,22 @@ void TextInput::DoSetSize(int x, int y, int width, int height, int sizeFlags)
         wxClientDC dc(this);
         const int r_shift = int(dd_icon_size.x == 0 ? (3. * dc.GetContentScaleFactor())
                                                     : ((size.y - dd_icon_size.y) / 2));
-        textSize.x = size.x - textPos.x - labelSize.x - dd_icon_size.x - r_shift;
+        // preFlight: reserve space for custom scrollbar on multiline controls (only when visible)
+        int scrollbar_w = (m_scrollbar && m_scrollbar->IsShown()) ? ScrollBar::GetScaledScrollbarWidth() : 0;
+        textSize.x = size.x - textPos.x - labelSize.x - dd_icon_size.x - r_shift - scrollbar_w;
         if (textSize.x < -1)
             textSize.x = -1;
         text_ctrl->SetSize(textSize);
         text_ctrl->SetPosition({textPos.x, (size.y - textSize.y) / 2});
+
+        // Position custom scrollbar at right edge of text area
+        if (m_scrollbar && m_scrollbar->IsShown())
+        {
+            int sb_x = textPos.x + textSize.x;
+            int sb_y = (size.y - textSize.y) / 2;
+            m_scrollbar->SetSize(sb_x, sb_y, scrollbar_w, textSize.y);
+            SyncScrollbar();
+        }
     }
 }
 
