@@ -12,6 +12,9 @@ preFlight is an advanced 3D printing slicer built for precision and performance.
 
 Based in Georgia, USA, oozeBot is a small but ambitious team currently preparing for the take-off of our Elevate line of 3D printers. preFlight is the cornerstone of the ecosystem we are building - a genuinely new option in the 3D printing space designed to benefit all makers, regardless of the hardware they use.
 
+## Discover preFlight
+Want to see what makes preFlight special? Head over to our [Feature Showcase](https://github.com/oozebot/preFlight/discussions/categories/preflight-features) to view screenshots, learn more about unique features, and join the discussion.
+
 ## Donate
 
 While preFlight is open-source and free for everyone, your support helps us maintain the infrastructure, fund R&D, and keep our team in orbit. If you find value in our tools, consider contributing to the mission.
