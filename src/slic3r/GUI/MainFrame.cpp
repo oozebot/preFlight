@@ -49,6 +49,7 @@
 #include "wxExtensions.hpp"
 #include "GUI_ObjectList.hpp"
 #include "Mouse3DController.hpp"
+#include "OrcaImportDialog.hpp"
 #include "RemovableDriveManager.hpp"
 #include "InstanceCheck.hpp"
 #include "I18N.hpp"
@@ -63,6 +64,7 @@
 
 #ifdef __linux__
 #include <boost/filesystem.hpp>
+#include <dlfcn.h>
 #endif
 
 #include "GUI_App.hpp"
@@ -1230,11 +1232,14 @@ void MainFrame::add_printer_webview_tab(const wxString &url)
     wxString printer_name = from_u8(phys_printers.get_selected_printer_name());
     auto *dpc = phys_printers.get_selected_printer_config();
 
-    // On Linux without GPU/DRI3 support (VMs, RDP, etc.), WebKit2GTK crashes.
+    // On Linux without working EGL (VMs, RDP, software renderers, etc.),
+    // WebKit2GTK's GPU process calls abort() during EGL initialization.
+    // Probe EGL before creating the WebView to avoid a fatal crash.
     // Fall back to opening the URL in the system's default browser.
     bool webview_available = true;
 #ifdef __linux__
     {
+        // Quick check: no render node means no GPU at all
         namespace fs = boost::filesystem;
         bool has_render_node = false;
         if (fs::exists("/dev/dri"))
@@ -1253,6 +1258,47 @@ void MainFrame::add_printer_webview_tab(const wxString &url)
             webview_available = false;
             BOOST_LOG_TRIVIAL(warning) << "PrinterWebView: No GPU render node detected (/dev/dri/renderD* missing). "
                                        << "Embedded printer webview disabled - use external browser instead.";
+        }
+
+        // Render node exists but EGL might still be broken (e.g. VM with SVGA3D).
+        // Probe EGL to verify it actually works before letting WebKit use it.
+        if (webview_available)
+        {
+            bool egl_works = false;
+            void *egl_lib = dlopen("libEGL.so.1", RTLD_LAZY);
+            if (egl_lib)
+            {
+                // EGL types: EGLDisplay = void*, EGLBoolean = unsigned int
+                typedef void *(*eglGetDisplay_fn)(void *);
+                typedef unsigned int (*eglInitialize_fn)(void *, int *, int *);
+                typedef unsigned int (*eglTerminate_fn)(void *);
+
+                auto get_display = (eglGetDisplay_fn) dlsym(egl_lib, "eglGetDisplay");
+                auto initialize = (eglInitialize_fn) dlsym(egl_lib, "eglInitialize");
+                auto terminate = (eglTerminate_fn) dlsym(egl_lib, "eglTerminate");
+
+                if (get_display && initialize && terminate)
+                {
+                    void *display = get_display(nullptr); // EGL_DEFAULT_DISPLAY
+                    if (display)                          // EGL_NO_DISPLAY = nullptr
+                    {
+                        int major = 0, minor = 0;
+                        if (initialize(display, &major, &minor))
+                        {
+                            egl_works = true;
+                            terminate(display);
+                        }
+                    }
+                }
+                dlclose(egl_lib);
+            }
+
+            if (!egl_works)
+            {
+                webview_available = false;
+                BOOST_LOG_TRIVIAL(warning) << "PrinterWebView: EGL display initialization failed. "
+                                           << "Embedded printer webview disabled - use external browser instead.";
+            }
         }
     }
 #endif
@@ -1787,10 +1833,12 @@ static wxMenu *generate_help_menu()
 {
     wxMenu *helpMenu = new wxMenu();
 
-    append_menu_item(
-        helpMenu, wxID_ANY, wxString::Format(_L("%s &Website"), SLIC3R_APP_NAME),
-        wxString::Format(_L("Open the %s website in your browser"), SLIC3R_APP_NAME), [](wxCommandEvent &)
-        { wxGetApp().open_browser_with_warning_dialog("https://github.com/oozebot/preFlight", nullptr, false); });
+    append_menu_item(helpMenu, wxID_ANY, wxString::Format(_L("%s &Website"), SLIC3R_APP_NAME),
+                     wxString::Format(_L("Open the %s website in your browser"), SLIC3R_APP_NAME),
+                     [](wxCommandEvent &) {
+                         wxGetApp().open_browser_with_warning_dialog("https://github.com/oozebot/preFlight", nullptr,
+                                                                     false);
+                     });
     // // TRN Item from "Help" menu
     // append_menu_item(helpMenu, wxID_ANY, wxString::Format(_L("&Quick Start"), SLIC3R_APP_NAME),
     //     wxString::Format(_L("Open the %s website in your browser"), SLIC3R_APP_NAME),
@@ -1804,8 +1852,7 @@ static wxMenu *generate_help_menu()
     helpMenu->AppendSeparator();
     append_menu_item(helpMenu, wxID_ANY, _L("Software &Releases"),
                      _L("Open the software releases page in your browser"),
-                     [](wxCommandEvent &)
-                     {
+                     [](wxCommandEvent &) {
                          wxGetApp().open_browser_with_warning_dialog("https://github.com/oozebot/preFlight/releases",
                                                                      nullptr, false);
                      });
@@ -1824,8 +1871,7 @@ static wxMenu *generate_help_menu()
                      [](wxCommandEvent &) { Slic3r::GUI::desktop_open_datadir_folder(); });
     append_menu_item(helpMenu, wxID_ANY, _L("Report an I&ssue"),
                      wxString::Format(_L("Report an issue on %s"), SLIC3R_APP_NAME),
-                     [](wxCommandEvent &)
-                     {
+                     [](wxCommandEvent &) {
                          wxGetApp().open_browser_with_warning_dialog("https://github.com/oozebot/preFlight/issues/new",
                                                                      nullptr, false);
                      });
@@ -2032,6 +2078,11 @@ void MainFrame::init_menubar_as_editor()
             import_menu, wxID_ANY, _L("Import Config &Bundle") + dots, _L("Load presets from a bundle"),
             [this](wxCommandEvent &) { load_configbundle(); }, "import_config_bundle", nullptr, []() { return true; },
             this);
+        append_menu_item(
+            import_menu, wxID_ANY, _L("Import &OrcaSlicer Bundle") + dots,
+            _L("Import printer/filament/process profiles from an OrcaSlicer bundle"),
+            [this](wxCommandEvent &) { import_orca_bundle(this); }, "import_config_bundle", nullptr,
+            []() { return true; }, this);
         append_submenu(fileMenu, import_menu, wxID_ANY, _L("&Import"), "");
 
         wxMenu *export_menu = new wxMenu();
@@ -3047,7 +3098,7 @@ SettingsDialog::SettingsDialog(MainFrame *mainframe)
     if (wxGetApp().is_gcode_viewer())
         return;
 
-    // Load the icon either from the exe, or from the ico file.
+        // Load the icon either from the exe, or from the ico file.
 #if _WIN32
     {
         TCHAR szExeFileName[MAX_PATH];
@@ -3163,9 +3214,9 @@ void SettingsDialog::on_dpi_changed(const wxRect &suggested_rect)
     if (wxGetApp().is_gcode_viewer())
         return;
 
-    // #ysFIXME - delete_after_testing
-    //    const int& em = em_unit();
-    //    const wxSize& size = wxSize(85 * em, 50 * em);
+        // #ysFIXME - delete_after_testing
+        //    const int& em = em_unit();
+        //    const wxSize& size = wxSize(85 * em, 50 * em);
 
 #ifdef _WIN32
     m_tabpanel->Rescale();

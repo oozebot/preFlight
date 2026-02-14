@@ -50,6 +50,7 @@
 #pragma comment(lib, "comctl32.lib")
 #endif
 #include <functional>
+#include <set>
 #include <wx/statbmp.h>
 #include <wx/colordlg.h>
 #include <wx/clrpicker.h>
@@ -336,6 +337,32 @@ static bool is_any_category_visible(std::initializer_list<const char *> categori
     // If no options in these categories have visibility tracking,
     // show the tab by default (user hasn't opened Tab settings yet)
     return !found_any_tracked_option;
+}
+
+// Check if a single sidebar setting key is visible, handling indexed key variants
+// The Tab system may store visibility as "key#0" (for ConfigOptionFloats like machine limits)
+// while the sidebar uses the base key. This function checks both.
+// Also handles the special case where the Tab uses "extruders_count" but sidebar uses "nozzle_diameter".
+static bool is_sidebar_key_visible(const std::string &key)
+{
+    // Special mapping: sidebar uses "nozzle_diameter" but Tab uses "extruders_count"
+    std::string effective_key = (key == "nozzle_diameter") ? "extruders_count" : key;
+
+    // Check base key first
+    std::string vis = get_app_config()->get("sidebar_visibility", effective_key);
+    if (vis == "0")
+        return false;
+    if (vis == "1")
+        return true;
+
+    // Base key not explicitly set - check indexed variant #0
+    // (Tab stores ConfigOptionFloats visibility as "key#0" via append_option_line)
+    std::string indexed_vis = get_app_config()->get("sidebar_visibility", effective_key + "#0");
+    if (indexed_vis == "0")
+        return false;
+
+    // Default: visible (key never set = no checkbox rendered yet)
+    return true;
 }
 
 // ============================================================================
@@ -916,6 +943,20 @@ void TabbedSettingsPanel::UpdateSidebarVisibility()
     // Step 1: Let subclass show/hide individual rows based on sidebar_visibility config
     UpdateRowVisibility();
 
+    // Step 1b: Hide all auxiliary rows before the sizer walk, so they don't keep groups visible
+    for (auto &[aux_sizer, parent_sizer] : m_auxiliary_rows)
+    {
+        if (parent_sizer && aux_sizer)
+            parent_sizer->Show(aux_sizer, false);
+    }
+
+    // Build a set of auxiliary sizers so the walk can skip them
+    // (auxiliary rows are managed separately in step 3b, not by the group walk)
+    std::set<wxSizer *> aux_sizer_set;
+    for (auto &[aux_sizer, parent_sizer] : m_auxiliary_rows)
+        if (aux_sizer)
+            aux_sizer_set.insert(aux_sizer);
+
     // Step 2: Walk sizer hierarchy to show/hide groups and sections
     for (size_t tab_idx = 0; tab_idx < m_tabs.size(); ++tab_idx)
     {
@@ -938,8 +979,13 @@ void TabbedSettingsPanel::UpdateSidebarVisibility()
 
             if (group_item->IsSizer())
             {
-                // Sub-sizer = a group (wxStaticBoxSizer from CreateFlatStaticBoxSizer)
                 wxSizer *group_sizer = group_item->GetSizer();
+
+                // Skip auxiliary rows - they're managed in step 3b
+                if (aux_sizer_set.count(group_sizer))
+                    continue;
+
+                // Sub-sizer = a group (wxStaticBoxSizer from CreateFlatStaticBoxSizer)
                 bool any_row_visible = false;
 
                 for (size_t ri = 0; ri < group_sizer->GetItemCount(); ++ri)
@@ -976,6 +1022,11 @@ void TabbedSettingsPanel::UpdateSidebarVisibility()
                             if (sub_item->IsSizer())
                             {
                                 wxSizer *sub_sizer = sub_item->GetSizer();
+
+                                // Skip auxiliary rows - they're managed in step 3b
+                                if (aux_sizer_set.count(sub_sizer))
+                                    continue;
+
                                 bool any_sub_row = false;
                                 for (size_t ri = 0; ri < sub_sizer->GetItemCount(); ++ri)
                                 {
@@ -1011,6 +1062,34 @@ void TabbedSettingsPanel::UpdateSidebarVisibility()
         // Step 3: Show/hide the section based on whether it has any visible groups
         if (tab.section)
             tab.section->Show(any_group_visible);
+    }
+
+    // Step 3b: Show auxiliary rows where their parent group/sizer still has visible setting content
+    for (auto &[aux_sizer, parent_sizer] : m_auxiliary_rows)
+    {
+        if (!parent_sizer || !aux_sizer)
+            continue;
+
+        // Check if any non-auxiliary sibling item is still visible after the sizer walk
+        bool any_sibling_visible = false;
+        for (size_t i = 0; i < parent_sizer->GetItemCount(); ++i)
+        {
+            wxSizerItem *item = parent_sizer->GetItem(i);
+            if (!item)
+                continue;
+
+            // Skip auxiliary sizers (including this one) when checking for visible siblings
+            if (item->IsSizer() && aux_sizer_set.count(item->GetSizer()))
+                continue;
+
+            if (item->IsShown())
+            {
+                any_sibling_visible = true;
+                break;
+            }
+        }
+
+        parent_sizer->Show(aux_sizer, any_sibling_visible);
     }
 
     // Step 4: Update layout and scrollbar
@@ -1050,9 +1129,10 @@ void TabbedSettingsPanel::RebuildContent()
         }
     }
 
-    // Clear setting controls map BEFORE destroying windows
+    // Clear setting controls map and auxiliary rows BEFORE destroying windows
     // This prevents stale pointers from being accessed in ApplyToggleLogic()
     ClearSettingControls();
+    m_auxiliary_rows.clear();
 
     // Destroy the scroll area — this destroys all child sections and content.
     // Hide it first to remove from DWM composition tree, preventing hundreds
@@ -1424,7 +1504,7 @@ void PrintSettingsPanel::UpdateRowVisibility()
     {
         if (ui.row_sizer && ui.parent_sizer)
         {
-            bool vis = get_app_config()->get("sidebar_visibility", key) != "0";
+            bool vis = is_sidebar_key_visible(key);
             ui.parent_sizer->Show(ui.row_sizer, vis);
         }
     }
@@ -1975,6 +2055,7 @@ wxPanel *PrintSettingsPanel::BuildAdvancedContent()
             btn_row_sizer->Add(btn, 0, wxALIGN_CENTER_VERTICAL);
             btn_row_sizer->AddStretchSpacer(1);
             width_group->Add(btn_row_sizer, 0, wxEXPAND | wxLEFT | wxBOTTOM, em / 4);
+            m_auxiliary_rows.emplace_back(btn_row_sizer, width_group);
         }
 
         CreateSettingRow(content, width_group, "first_layer_extrusion_width", _L("First layer"));
@@ -3287,6 +3368,7 @@ wxPanel *PrinterSettingsPanel::BuildGeneralContent()
         row_sizer->Add(right_sizer, 1, wxEXPAND);
 
         size_group->Add(row_sizer, 0, wxEXPAND | wxTOP | wxBOTTOM, em / 4);
+        m_auxiliary_rows.emplace_back(row_sizer, size_group);
     }
 
     CreateSettingRow(content, size_group, "max_print_height", _L("Max print height"));
@@ -3357,6 +3439,8 @@ wxPanel *PrinterSettingsPanel::BuildGeneralContent()
         ui_elem.lock_icon = lock_icon;
         ui_elem.undo_icon = undo_icon;
         ui_elem.original_value = original_value;
+        ui_elem.row_sizer = row_sizer;
+        ui_elem.parent_sizer = cap_group;
         m_setting_controls["nozzle_diameter"] = ui_elem;
 
         // Update undo UI to reflect current state
@@ -3611,6 +3695,7 @@ wxPanel *PrinterSettingsPanel::BuildMachineLimitsContent()
         note_sizer->Add(m_stealth_mode_note, 0, wxALIGN_CENTER_VERTICAL);
         note_sizer->AddStretchSpacer(1);
         marlin_sizer->Add(note_sizer, 0, wxEXPAND | wxALL, em / 4);
+        m_auxiliary_rows.emplace_back(note_sizer, marlin_sizer);
     }
 
     // Maximum feedrates group
@@ -3684,6 +3769,7 @@ wxPanel *PrinterSettingsPanel::BuildMachineLimitsContent()
         retrieve_btn->Bind(wxEVT_BUTTON, [this](wxCommandEvent &) { OnRetrieveFromMachine(); });
         btn_sizer->Add(retrieve_btn, 0, wxALIGN_CENTER_VERTICAL);
         rrf_sizer->Add(btn_sizer, 0, wxEXPAND | wxALL, em / 4);
+        m_auxiliary_rows.emplace_back(btn_sizer, rrf_sizer);
 
         // RRF M-code fields
         auto *rrf_group = CreateFlatStaticBoxSizer(m_rrf_limits_panel, _L("RepRapFirmware M-codes"));
@@ -4135,7 +4221,10 @@ void PrinterSettingsPanel::CreateSettingRow(wxWindow *parent, wxSizer *sizer, co
         ui_elem.control = value_ctrl;
         ui_elem.lock_icon = lock_icon;
         ui_elem.undo_icon = undo_icon;
+        ui_elem.label_text = ctx.label_text;
         ui_elem.original_value = original_value;
+        ui_elem.row_sizer = row_sizer;
+        ui_elem.parent_sizer = sizer;
         m_setting_controls[opt_key] = ui_elem;
 
         // Set initial icon state
@@ -4208,10 +4297,6 @@ void PrinterSettingsPanel::CreateSettingRow(wxWindow *parent, wxSizer *sizer, co
 void PrinterSettingsPanel::CreateMultilineSettingRow(wxWindow *parent, wxSizer *sizer, const std::string &opt_key,
                                                      const wxString &label, int num_lines)
 {
-    // Check sidebar visibility - skip if user has hidden this setting
-    if (get_app_config()->get("sidebar_visibility", opt_key) == "0")
-        return;
-
     int em = wxGetApp().em_unit();
 
     const ConfigOptionDef *opt_def = print_config_def.get(opt_key);
@@ -4282,6 +4367,8 @@ void PrinterSettingsPanel::CreateMultilineSettingRow(wxWindow *parent, wxSizer *
     ui_elem.undo_icon = undo_icon;
     ui_elem.label_text = label_text;
     ui_elem.original_value = original_value;
+    ui_elem.row_sizer = container_sizer;
+    ui_elem.parent_sizer = sizer;
     m_setting_controls[opt_key] = ui_elem;
 
     UpdateUndoUI(opt_key);
@@ -4309,11 +4396,6 @@ void PrinterSettingsPanel::CreateMultilineSettingRow(wxWindow *parent, wxSizer *
 void PrinterSettingsPanel::CreateExtruderSettingRow(wxWindow *parent, wxSizer *sizer, const std::string &opt_key,
                                                     const wxString &label, size_t extruder_idx)
 {
-    // Check sidebar visibility using extruder-specific key - skip if user has hidden this setting
-    std::string visibility_key = opt_key + "#" + std::to_string(extruder_idx);
-    if (get_app_config()->get("sidebar_visibility", visibility_key) == "0")
-        return;
-
     int em = wxGetApp().em_unit();
 
     const ConfigOptionDef *opt_def = print_config_def.get(opt_key);
@@ -4792,6 +4874,8 @@ void PrinterSettingsPanel::CreateExtruderSettingRow(wxWindow *parent, wxSizer *s
         ui_elem.undo_icon = undo_icon;
         ui_elem.label_text = label_text;
         ui_elem.original_value = original_value;
+        ui_elem.row_sizer = row_sizer;
+        ui_elem.parent_sizer = sizer;
         m_setting_controls[composite_key] = ui_elem;
 
         // Initial icon state - show dot for now
@@ -5139,6 +5223,7 @@ wxPanel *PrinterSettingsPanel::BuildExtruderContent(size_t extruder_idx)
         btn_sizer->Add(btn, 0, wxALIGN_CENTER_VERTICAL);
         btn_sizer->AddStretchSpacer(1);
         sizer->Add(btn_sizer, 0, wxEXPAND | wxALL, em / 4);
+        m_auxiliary_rows.emplace_back(btn_sizer, sizer);
     }
 
     // Cooling fan group
@@ -6230,7 +6315,7 @@ void PrinterSettingsPanel::UpdateRowVisibility()
     {
         if (ui.row_sizer && ui.parent_sizer)
         {
-            bool vis = get_app_config()->get("sidebar_visibility", key) != "0";
+            bool vis = is_sidebar_key_visible(key);
             ui.parent_sizer->Show(ui.row_sizer, vis);
         }
     }
@@ -6647,6 +6732,7 @@ wxPanel *FilamentSettingsPanel::BuildAdvancedContent()
             row_sizer->Add(right_sizer, 1, wxEXPAND);
 
             tc_single_group->Add(row_sizer, 0, wxEXPAND | wxTOP | wxBOTTOM, em / 4);
+            m_auxiliary_rows.emplace_back(row_sizer, tc_single_group);
         }
 
         sizer->Add(tc_single_group, 0, wxEXPAND | wxALL, em / 4);
@@ -8560,7 +8646,7 @@ void FilamentSettingsPanel::UpdateRowVisibility()
     {
         if (ui.row_sizer && ui.parent_sizer)
         {
-            bool vis = get_app_config()->get("sidebar_visibility", key) != "0";
+            bool vis = is_sidebar_key_visible(key);
             ui.parent_sizer->Show(ui.row_sizer, vis);
         }
     }

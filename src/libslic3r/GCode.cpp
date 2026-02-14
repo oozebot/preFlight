@@ -4141,46 +4141,11 @@ static void apply_notch_to_inner(GCode::SmoothPath &smooth_path, double half_wid
     GCode::reverse(smooth_path);
 }
 
-// Main entry point: apply seam notch to the perimeters of an island.
-// Modifies the external perimeter and first inner perimeter in-place.
-static void apply_seam_notch(std::vector<GCode::ExtrusionOrder::Perimeter> &perimeters, const FullPrintConfig &config)
+// Apply seam notch to a single (external, inner) perimeter pair.
+// Modifies the external perimeter and optionally the first inner perimeter in-place.
+static void apply_seam_notch_pair(GCode::ExtrusionOrder::Perimeter &ext_perim,
+                                  GCode::ExtrusionOrder::Perimeter *inner_perim, const FullPrintConfig &config)
 {
-    using GCode::ExtrusionOrder::Perimeter;
-
-    // Find the external perimeter
-    Perimeter *ext_perim = nullptr;
-    Perimeter *inner_perim = nullptr;
-
-    for (auto &p : perimeters)
-    {
-        if (p.extrusion_entity == nullptr)
-            continue;
-        if (p.smooth_path.empty())
-            continue;
-
-        const auto *loop = dynamic_cast<const ExtrusionLoop *>(p.extrusion_entity);
-        if (loop == nullptr)
-            continue;
-
-        if (loop->role().is_external_perimeter() && ext_perim == nullptr)
-        {
-            ext_perim = &p;
-        }
-        else if (!loop->role().is_external_perimeter() && loop->role().is_perimeter())
-        {
-            // Check perimeter_index == 1 (first inner)
-            if (!loop->paths.empty())
-            {
-                auto pi = loop->paths.front().attributes().perimeter_index;
-                if (pi.has_value() && *pi == 1 && inner_perim == nullptr)
-                    inner_perim = &p;
-            }
-        }
-    }
-
-    if (ext_perim == nullptr)
-        return;
-
     // Check corner sharpness at the seam — sharp corners naturally hide seams.
     // Extract the path directions arriving at and leaving the seam point, same vectors
     // that compute_seam_inward_direction() uses. The dot product of these normalized
@@ -4190,7 +4155,7 @@ static void apply_seam_notch(std::vector<GCode::ExtrusionOrder::Perimeter> &peri
     if (corner_threshold_deg > 0)
     {
         Vec2d dir_start = Vec2d::Zero();
-        for (const auto &elem : ext_perim->smooth_path)
+        for (const auto &elem : ext_perim.smooth_path)
             if (elem.path.size() >= 2)
             {
                 dir_start = (elem.path[1].point - elem.path[0].point).cast<double>();
@@ -4198,7 +4163,7 @@ static void apply_seam_notch(std::vector<GCode::ExtrusionOrder::Perimeter> &peri
             }
 
         Vec2d dir_end = Vec2d::Zero();
-        for (auto it = ext_perim->smooth_path.rbegin(); it != ext_perim->smooth_path.rend(); ++it)
+        for (auto it = ext_perim.smooth_path.rbegin(); it != ext_perim.smooth_path.rend(); ++it)
             if (it->path.size() >= 2)
             {
                 const auto &p = it->path;
@@ -4218,7 +4183,7 @@ static void apply_seam_notch(std::vector<GCode::ExtrusionOrder::Perimeter> &peri
     }
 
     // Get external perimeter extrusion width (needed for notch width and depth calculations)
-    const auto *ext_loop = dynamic_cast<const ExtrusionLoop *>(ext_perim->extrusion_entity);
+    const auto *ext_loop = dynamic_cast<const ExtrusionLoop *>(ext_perim.extrusion_entity);
     double ext_width = 0;
     if (ext_loop != nullptr && !ext_loop->paths.empty())
         ext_width = ext_loop->paths.front().width();
@@ -4232,7 +4197,7 @@ static void apply_seam_notch(std::vector<GCode::ExtrusionOrder::Perimeter> &peri
     // Check minimum loop length — don't notch tiny features
     const double min_loop_length = scale_(notch_width_mm * 3.0);
     double ext_loop_len = 0;
-    for (const auto &elem : ext_perim->smooth_path)
+    for (const auto &elem : ext_perim.smooth_path)
         for (size_t i = 1; i < elem.path.size(); ++i)
             ext_loop_len += (elem.path[i].point - elem.path[i - 1].point).cast<double>().norm();
     if (ext_loop_len < min_loop_length)
@@ -4244,12 +4209,12 @@ static void apply_seam_notch(std::vector<GCode::ExtrusionOrder::Perimeter> &peri
     const double depth_scaled = scale_(ext_width * 0.9);
 
     // Compute inward direction from the external perimeter's seam geometry
-    Vec2d inward = compute_seam_inward_direction(ext_perim->smooth_path, ext_perim->reversed);
+    Vec2d inward = compute_seam_inward_direction(ext_perim.smooth_path, ext_perim.reversed);
     if (inward.squaredNorm() < 0.5) // degenerate — can't determine direction
         return;
 
     // Apply V-notch to external perimeter
-    apply_notch_to_external(ext_perim->smooth_path, half_width_scaled, depth_scaled, inward);
+    apply_notch_to_external(ext_perim.smooth_path, half_width_scaled, depth_scaled, inward);
 
     // Trim the first inner perimeter where the V-leg crosses it.
     // Find the intersection of the V-leg centerline with the inner perimeter centerline
@@ -4293,6 +4258,70 @@ static void apply_seam_notch(std::vector<GCode::ExtrusionOrder::Perimeter> &peri
         const double inner_half_trim_scaled = scale_(inner_half_trim_mm);
 
         apply_notch_to_inner(inner_perim->smooth_path, inner_half_trim_scaled);
+    }
+}
+
+// Main entry point: apply seam notch to all external perimeters in an island.
+// Finds all external perimeters and matches each with its closest inner perimeter (index 1)
+// by seam start point proximity, then applies the notch to each pair.
+static void apply_seam_notch(std::vector<GCode::ExtrusionOrder::Perimeter> &perimeters, const FullPrintConfig &config)
+{
+    using GCode::ExtrusionOrder::Perimeter;
+
+    // Helper to get seam start point from a perimeter
+    auto get_seam_point = [](const Perimeter &p) -> Point
+    {
+        if (!p.smooth_path.empty() && !p.smooth_path.front().path.empty())
+            return p.smooth_path.front().path.front().point;
+        return Point(0, 0);
+    };
+
+    // Collect all external perimeters and all inner perimeters (index 1)
+    std::vector<Perimeter *> ext_perims;
+    std::vector<Perimeter *> inner_perims;
+
+    for (auto &p : perimeters)
+    {
+        if (p.extrusion_entity == nullptr || p.smooth_path.empty())
+            continue;
+
+        const auto *loop = dynamic_cast<const ExtrusionLoop *>(p.extrusion_entity);
+        if (loop == nullptr)
+            continue;
+
+        if (loop->role().is_external_perimeter())
+        {
+            ext_perims.push_back(&p);
+        }
+        else if (loop->role().is_perimeter() && !loop->paths.empty())
+        {
+            auto pi = loop->paths.front().attributes().perimeter_index;
+            if (pi.has_value() && *pi == 1)
+                inner_perims.push_back(&p);
+        }
+    }
+
+    // Apply notch to each external perimeter, matched with closest inner perimeter
+    for (Perimeter *ext : ext_perims)
+    {
+        Perimeter *best_inner = nullptr;
+
+        if (!inner_perims.empty())
+        {
+            Point ext_seam = get_seam_point(*ext);
+            double best_dist = std::numeric_limits<double>::max();
+            for (Perimeter *inner : inner_perims)
+            {
+                double dist = (get_seam_point(*inner) - ext_seam).cast<double>().norm();
+                if (dist < best_dist)
+                {
+                    best_dist = dist;
+                    best_inner = inner;
+                }
+            }
+        }
+
+        apply_seam_notch_pair(*ext, best_inner, config);
     }
 }
 

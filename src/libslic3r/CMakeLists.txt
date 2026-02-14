@@ -304,6 +304,10 @@ set(SLIC3R_SOURCES
     Preset.hpp
     PresetBundle.cpp
     PresetBundle.hpp
+    OrcaConfigImporter.cpp
+    OrcaConfigImporter.hpp
+    OrcaKeyMapping.cpp
+    OrcaKeyMapping.hpp
     PrincipalComponents2D.hpp
     PrincipalComponents2D.cpp
     AppConfig.cpp

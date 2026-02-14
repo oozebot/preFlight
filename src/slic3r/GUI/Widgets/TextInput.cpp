@@ -97,7 +97,7 @@ void TextInput::Create(wxWindow *parent, wxString text, wxString label, wxString
         // The EDIT control still supports scrolling via EM_LINESCROLL and mouse wheel.
         HWND hwnd = (HWND) text_ctrl->GetHWND();
         LONG ws = GetWindowLong(hwnd, GWL_STYLE);
-        ws &= ~WS_VSCROLL;
+        ws &= ~(WS_VSCROLL | WS_HSCROLL);
         SetWindowLong(hwnd, GWL_STYLE, ws);
         SetWindowPos(hwnd, NULL, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED);
 

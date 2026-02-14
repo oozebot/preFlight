@@ -142,6 +142,10 @@ protected:
     // Show/hide rows based on sidebar_visibility config (subclasses override to iterate m_setting_controls)
     virtual void UpdateRowVisibility() {}
 
+    // Non-setting auxiliary rows (buttons, notes) that should hide when all sibling settings are hidden
+    // Each pair: (row_sizer to show/hide, parent_sizer that also contains setting rows)
+    std::vector<std::pair<wxSizer *, wxSizer *>> m_auxiliary_rows;
+
     // Access for subclasses
     Plater *GetPlater() const { return m_plater; }
     wxPanel *GetContentArea() const;          // Returns active tab's content panel for child parenting

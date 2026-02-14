@@ -1673,6 +1673,15 @@ void GLCanvas3D::zoom_to_gcode()
 void GLCanvas3D::select_view(const std::string &direction)
 {
     wxGetApp().plater()->get_camera().select_view(direction);
+    // Recenter on the bed. Side views need Z height for a non-degenerate bounding box;
+    // iso/top/bottom use the flat bed box (matches startup view).
+    const bool is_side_view = (direction == "front" || direction == "rear" || direction == "left" ||
+                               direction == "right");
+    BoundingBoxf3 box = m_bed.build_volume().bounding_volume();
+    box.translate(s_multiple_beds.get_bed_translation(s_multiple_beds.get_active_bed()));
+    box.min.z() = 0.0;
+    box.max.z() = is_side_view ? std::max(box.size().x(), box.size().y()) * 0.5 : 0.0;
+    _zoom_to_box(box);
     if (m_canvas != nullptr)
         m_canvas->Refresh();
 }
@@ -4271,7 +4280,8 @@ void GLCanvas3D::on_mouse(wxMouseEvent &evt)
                  !is_layers_editing_enabled())
         {
             // deselect and propagate event through callback
-            if (!evt.ShiftDown() && (!any_gizmo_active || !evt.CmdDown()) && m_picking_enabled
+            if (!evt.ShiftDown() && (!any_gizmo_active || !evt.CmdDown()) &&
+                m_picking_enabled
 #ifdef __linux__
                 // preFlight: GTK delivers phantom LeftUp events to the canvas after popup menus
                 // (e.g. Add Shape) close. Only deselect if a genuine LeftDown preceded this LeftUp.

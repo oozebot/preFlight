@@ -1,5 +1,22 @@
 # preFlight Changelog
 
+## v0.9.4
+
+### New Features
+- **OrcaSlicer Bundle Import**: Import printer, filament, and process profiles from `.orca_printer`, `.orca_filament`, and `.zip` bundles via File > Import > Import OrcaSlicer Bundle — includes key mapping with value transforms, bed temperature plate selection, G-code macro translation, and a results dialog showing imported profiles, lossy mappings, dropped settings, and G-code warnings
+
+### Bug Fixes
+- Fix Nip/Tuck only processing the first external perimeter per island — now handles multiple external perimeters correctly
+- Improve seam vertical alignment by increasing snap tolerance to eliminate zigzag drift from polygon vertex discretization
+- Skip staggered seam on outermost inner perimeter when Nip/Tuck is enabled to keep the trimmed gap aligned with the V-notch
+- Fix Printer Settings sections (Capabilities, Machine Limits, RRF M-codes) not hiding when unchecked in sidebar visibility toggles
+- Fix native scrollbar bleed-through in multiline TextInput fields
+- **Camera View Shortcuts**: Number key view shortcuts (1–6) now recenter on the build plate
+
+### Linux
+- Fix AppImage WebKit crash on Arch and non-Debian distros caused by patching order leaving hardcoded `/usr` paths in library copies
+- Add EGL probe to prevent WebKit crash on VMs without working GPU — falls back to system browser when EGL initialization fails
+
 ## v0.9.3
 
 ### New Features
