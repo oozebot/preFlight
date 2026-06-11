@@ -10203,7 +10203,7 @@ void Sidebar::UpdatePrinterFilamentCombos()
             int spin_width = int(5.5 * em);
             int spin_height = int(2.4 * em); // Proper height for spin control
             auto *spin = new SpinInputDouble(m_printer_content, wxString::Format("%.1f", nozzle_value), "",
-                                             wxDefaultPosition, wxSize(spin_width, spin_height), 0, 0.1, 2.0,
+                                             wxDefaultPosition, wxSize(spin_width, spin_height), 0, 0.1, 10.0,
                                              nozzle_value, 0.10);
             spin->SetDigits(1);
             m_printer_nozzle_spins.push_back(spin);

@@ -1258,7 +1258,7 @@ void SpinCtrlFloatField::BUILD()
     }
 
     const double min_val = m_opt.min > -FLT_MAX ? m_opt.min : 0.1;
-    const double max_val = m_opt.max < FLT_MAX ? m_opt.max : 2.0;
+    const double max_val = m_opt.max < FLT_MAX ? m_opt.max : 10.0;
     const double inc_val = 0.10; // 0.1mm increment to match Print Settings
 
     auto temp = new ::SpinInputDouble(m_parent, wxString::Format("%.1f", default_value), "", wxDefaultPosition, size,
