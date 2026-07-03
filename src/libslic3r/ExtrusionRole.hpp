@@ -36,6 +36,9 @@ enum class ExtrusionRoleModifier : uint16_t
     Bridge,
     OverBridge,
     Interlocking,
+    // Serpentine fill: a single continuous extrusion forming the wall (and, in
+    // full mode, the infill). Diverts the G-code type and render color only.
+    Serpentine,
     // 3) Special types
     // Indicator that the extrusion role was mixed from multiple differing extrusion roles,
     // for example from Support and SupportInterface.
@@ -67,6 +70,16 @@ struct ExtrusionRole : public ExtrusionRoleModifiers
     // Perimeter, bridging. To be or'ed with ExtrusionRoleModifier::External for external bridging perimeter.
     static constexpr const ExtrusionRoleModifiers OverhangPerimeter{ExtrusionRoleModifier::Perimeter |
                                                                     ExtrusionRoleModifier::Bridge};
+    // Serpentine fill perimeter. Carries External and Perimeter so every speed,
+    // fan and flow path treats it exactly as an external perimeter; the
+    // Serpentine modifier only diverts the G-code type and render color.
+    static constexpr const ExtrusionRoleModifiers Serpentine{
+        ExtrusionRoleModifier::Perimeter | ExtrusionRoleModifier::External | ExtrusionRoleModifier::Serpentine};
+    // Serpentine fill perimeter that overhangs the layer below (set by the
+    // overhang pass). Carries Bridge but NOT External, so it is treated as an
+    // overhang perimeter (bridge speed/fan/accel) everywhere, not as external.
+    static constexpr const ExtrusionRoleModifiers SerpentineOverhang{
+        ExtrusionRoleModifier::Perimeter | ExtrusionRoleModifier::Serpentine | ExtrusionRoleModifier::Bridge};
     // Sparse internal infill.
     static constexpr const ExtrusionRoleModifiers InternalInfill{ExtrusionRoleModifier::Infill};
     // Solid internal infill.
@@ -117,6 +130,7 @@ struct ExtrusionRole : public ExtrusionRoleModifiers
     }
     bool is_external() const { return this->ExtrusionRoleModifiers::has(ExtrusionRoleModifier::External); }
     bool is_bridge() const { return this->ExtrusionRoleModifiers::has(ExtrusionRoleModifier::Bridge); }
+    bool is_serpentine() const { return this->ExtrusionRoleModifiers::has(ExtrusionRoleModifier::Serpentine); }
 
     bool is_support() const { return this->ExtrusionRoleModifiers::has(ExtrusionRoleModifier::Support); }
     bool is_support_base() const { return this->is_support() && !this->is_external(); }
@@ -141,6 +155,10 @@ enum ExtrusionLoopRole
 enum class GCodeExtrusionRole : uint8_t
 {
     None,
+    // preFlight: Serpentine fill types lead the list so they sort to the TOP of
+    // the G-code preview legend (the legend orders roles by enum ordinal).
+    Serpentine,
+    SerpentineOverhang,
     Perimeter,
     ExternalPerimeter,
     OverhangPerimeter,

@@ -35,9 +35,11 @@
 #include "Widgets/UIColors.hpp"
 
 #include <sstream>
+#include <cstdlib>
 #include <boost/dll/runtime_symbol_info.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/fstream.hpp>
+#include <boost/nowide/convert.hpp>
 #ifdef _WIN32
 #include <shellapi.h>
 #else
@@ -1083,6 +1085,9 @@ void PreferencesDialog::build()
 
             auto *order_label = new wxStaticText(scrolled, wxID_ANY, _L("Script category execution order:"));
             order_label->SetFont(wxGetApp().normal_font());
+#ifndef _WIN32
+            order_label->SetForegroundColour(wxGetApp().get_label_clr_default());
+#endif
 
 #ifdef _WIN32
             auto *order_listbox = new wxListBox(scrolled, wxID_ANY, wxDefaultPosition, wxSize(-1, 80), 0, nullptr,
@@ -1219,20 +1224,23 @@ void PreferencesDialog::build()
             // Python Console section
             auto *console_label = new wxStaticText(scrolled, wxID_ANY, _L("Python packages"));
             console_label->SetFont(wxGetApp().bold_font());
+#ifndef _WIN32
+            console_label->SetForegroundColour(wxGetApp().get_label_clr_default());
+#endif
 
             auto *console_desc =
                 new wxStaticText(scrolled, wxID_ANY,
                                  _L("preFlight includes a built-in Python interpreter for preprocessing scripts. "
                                     "The standard library is available by default. If your scripts require "
-                                    "additional packages (e.g. numpy), you can install them using pip.\n\n"
-                                    "To set up pip and install packages:\n"
+                                    "additional packages (e.g. numpy), install them from the Python Console "
+                                    "and they become available to all preprocessing scripts:\n\n"
                                     "  1. Click \"Open Python Console\" below\n"
-                                    "  2. Run:  python python\\get-pip.py\n"
-                                    "  3. Install packages:  pip install numpy\n"
-                                    "  4. List packages:  pip list\n\n"
-                                    "Installed packages are stored inside preFlight's python directory "
-                                    "and are available to all preprocessing scripts."));
+                                    "  2. Install a package:  pip install --only-binary=:all: numpy\n\n"
+                                    "Only packages with a prebuilt wheel can be installed (no compiler is bundled)."));
             console_desc->Wrap(42 * em);
+#ifndef _WIN32
+            console_desc->SetForegroundColour(wxGetApp().get_label_clr_default());
+#endif
 
             auto *btn_console = new wxButton(scrolled, wxID_ANY, _L("Open Python Console"));
 #ifdef _WIN32
@@ -1243,6 +1251,14 @@ void PreferencesDialog::build()
                 [](wxCommandEvent &)
                 {
                     auto exe_dir = boost::dll::program_location().parent_path();
+
+                    // Packages install to the per-user data dir (survives upgrades; the slicer's
+                    // embedded interpreter reads the same dir via user_python_packages_dir()).
+                    std::string user_pkg_dir = user_python_packages_dir();
+                    {
+                        boost::system::error_code ec;
+                        boost::filesystem::create_directories(user_pkg_dir, ec);
+                    }
 #ifdef _WIN32
                     auto python_dir = exe_dir / "python";
 
@@ -1257,32 +1273,18 @@ void PreferencesDialog::build()
                             .ShowModal();
                         return;
                     }
-                    // Check that the python directory is writable (pip installs to python/Lib/site-packages/)
-                    {
-                        auto test_file = python_dir / ".write_test";
-                        try
-                        {
-                            {
-                                boost::filesystem::ofstream ofs(test_file);
-                            }
-                            boost::filesystem::remove(test_file);
-                        }
-                        catch (...)
-                        {
-                            MessageDialog(nullptr,
-                                          _L("The python directory is not writable.\n\n"
-                                             "Package installation requires write access to the preFlight "
-                                             "directory. If preFlight is in a read-only location, move it "
-                                             "to a writable folder."),
-                                          _L("Python Console"), wxICON_WARNING | wxOK)
-                                .ShowModal();
-                        }
-                    }
                     // Open a cmd window with the python directory in PATH and Scripts in PATH
                     // so both python and pip (once installed) work directly.
                     std::string cmd_args = "/k \"set PATH=" + python_dir.string() + ";" +
                                            (python_dir / "Scripts").string() +
                                            ";%PATH% && "
+                                           "set \"PIP_TARGET=" +
+                                           user_pkg_dir +
+                                           "\" && "
+                                           "set \"PIP_DISABLE_PIP_VERSION_CHECK=1\" && "
+                                           "set \"PYTHONDONTWRITEBYTECODE=1\" && "
+                                           "doskey pip=python -m pip $* && "
+                                           "doskey pip3=python -m pip $* && "
                                            "cd /d " +
                                            exe_dir.string() +
                                            " && "
@@ -1291,13 +1293,18 @@ void PreferencesDialog::build()
                                            "echo preFlight Python Console && "
                                            "echo ========================= && "
                                            "echo. && "
-                                           "echo Type 'python' to start the interactive interpreter. && "
+                                           "echo Packages install to: " +
+                                           user_pkg_dir +
+                                           " && "
                                            "echo. && "
-                                           "echo To install pip: python python\\get-pip.py && "
-                                           "echo To install a package: pip install numpy && "
-                                           "echo To list installed packages: pip list && "
+                                           "echo To install a package: pip install --only-binary=:all: numpy && "
+                                           "echo To list packages: pip list --path \"%PIP_TARGET%\" && "
                                            "echo. \"";
-                    ShellExecuteA(nullptr, "open", "cmd.exe", cmd_args.c_str(), nullptr, SW_SHOW);
+                    // Widen to UTF-16 so a non-ASCII data-dir path (e.g. a non-ASCII Windows
+                    // username) reaches cmd.exe intact instead of being mangled through the ANSI
+                    // code page and sending pip installs to a directory the slicer never reads.
+                    std::wstring wcmd = boost::nowide::widen(cmd_args);
+                    ShellExecuteW(nullptr, L"open", L"cmd.exe", wcmd.c_str(), nullptr, SW_SHOW);
 #else
                     auto python_dir = exe_dir / ".." / "python";
                     auto python_bin = python_dir / "bin";
@@ -1342,27 +1349,52 @@ void PreferencesDialog::build()
                         result += "'";
                         return result;
                     };
-                    std::string script_content = "#!/bin/bash\n"
-                                                 "export PATH=" +
-                                                 shell_escape(python_bin.string()) +
-                                                 ":\"$PATH\"\n"
-                                                 "cd " +
-                                                 shell_escape(exe_dir.string()) +
-                                                 "\n"
-                                                 "echo\n"
-                                                 "echo 'preFlight Python Console'\n"
-                                                 "echo '========================='\n"
-                                                 "echo\n"
-                                                 "echo 'Type python3 to start the interactive interpreter.'\n"
-                                                 "echo\n"
-                                                 "echo 'To install pip: python3 -m ensurepip'\n"
-                                                 "echo 'To install a package: pip3 install numpy'\n"
-                                                 "echo 'To list installed packages: pip3 list'\n"
-                                                 "echo\n"
-                                                 "rm -f " +
-                                                 shell_escape(script_path.string()) +
-                                                 "\n"
-                                                 "exec bash\n";
+                    // The source-built python cannot find its own libpython from bin/. On the AppImage
+                    // libpython + deps are deduped into ../lib with a bundled loader; on the .deb they
+                    // sit in python/lib under the system loader. Wrap python3 to handle both, and route
+                    // pip installs to the per-user data dir (PIP_TARGET) so the slicer's interpreter sees them.
+                    auto pybin = python_bin / "python3";
+                    auto loader = exe_dir / ".." / "lib" / "ld-linux-x86-64.so.2";
+                    auto libdir = exe_dir / ".." / "lib";
+                    auto pylib = python_dir / "lib";
+
+                    std::string script_content = "#!/bin/bash\n";
+                    script_content += "PF_PYBIN=" + shell_escape(pybin.string()) + "\n";
+                    script_content += "PF_LOADER=" + shell_escape(loader.string()) + "\n";
+                    script_content += "PF_LIBDIR=" + shell_escape(libdir.string()) + "\n";
+                    script_content += "PF_PYLIB=" + shell_escape(pylib.string()) + "\n";
+                    // Export so the wrapper functions still resolve these after 'exec bash'.
+                    script_content += "export PF_PYBIN PF_LOADER PF_LIBDIR PF_PYLIB\n";
+                    script_content += "export PIP_TARGET=" + shell_escape(user_pkg_dir) + "\n";
+                    script_content += "export PYTHONDONTWRITEBYTECODE=1\n";
+                    // Suppress pip's self-upgrade notice: it points users at the bundled python3,
+                    // and following it installs a stray pip into PIP_TARGET while never replacing
+                    // the running bundled pip, so the notice would repeat forever.
+                    script_content += "export PIP_DISABLE_PIP_VERSION_CHECK=1\n";
+                    script_content += "if [ -x \"$PF_LOADER\" ]; then\n";
+                    script_content += "  python3() { \"$PF_LOADER\" --library-path \"$PF_LIBDIR:$PF_PYLIB\" "
+                                      "\"$PF_PYBIN\" \"$@\"; }\n";
+                    script_content += "else\n";
+                    // No bundled loader (.deb / macOS): system loader + libpython on the path. Set both
+                    // LD_LIBRARY_PATH (Linux) and DYLD_LIBRARY_PATH (macOS ignores the former).
+                    script_content += "  python3() { LD_LIBRARY_PATH=\"$PF_PYLIB${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}\" "
+                                      "DYLD_LIBRARY_PATH=\"$PF_PYLIB${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}\" "
+                                      "\"$PF_PYBIN\" \"$@\"; }\n";
+                    script_content += "fi\n";
+                    script_content += "pip() { python3 -m pip \"$@\"; }\n";
+                    script_content += "pip3() { python3 -m pip \"$@\"; }\n";
+                    script_content += "export -f python3 pip pip3\n";
+                    script_content += "cd " + shell_escape(exe_dir.string()) + "\n";
+                    script_content += "echo\n";
+                    script_content += "echo 'preFlight Python Console'\n";
+                    script_content += "echo '========================='\n";
+                    script_content += "echo\n";
+                    script_content += "echo \"Packages install to: $PIP_TARGET\"\n";
+                    script_content += "echo 'Install a package:  pip install --only-binary=:all: numpy'\n";
+                    script_content += "echo 'List packages:      pip list --path \"$PIP_TARGET\"'\n";
+                    script_content += "echo\n";
+                    script_content += "rm -f " + shell_escape(script_path.string()) + "\n";
+                    script_content += "exec bash\n";
                     write(fd, script_content.c_str(), script_content.size());
                     close(fd);
 
@@ -1378,6 +1410,9 @@ void PreferencesDialog::build()
 #ifdef __APPLE__
                             execlp("open", "open", "-a", "Terminal", script_path.c_str(), nullptr);
 #else
+                            // Launch the host terminal with a clean library path so bundled libs don't
+                            // break it; the console script re-points python at the bundled runtime.
+                            unsetenv("LD_LIBRARY_PATH");
                             execlp("gnome-terminal", "gnome-terminal", "--", "bash", script_path.c_str(), nullptr);
                             execlp("x-terminal-emulator", "x-terminal-emulator", "-e", "bash", script_path.c_str(),
                                    nullptr);

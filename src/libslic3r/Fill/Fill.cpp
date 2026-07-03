@@ -189,7 +189,7 @@ static inline bool fill_type_monotonic(InfillPattern pattern)
     return pattern == ipMonotonic || pattern == ipMonotonicLines;
 }
 
-// FILL_DEBUG flag and dbg_fill_print() are in FillBase.hpp
+// Debug output (Slic3r::dbg_log) is in DebugOutput.hpp, via FillBase.hpp
 
 static const char *dbg_pattern(InfillPattern p)
 {
@@ -279,12 +279,12 @@ static const char *dbg_stype(SurfaceType t)
 
 static void dbg_fill_input(const Layer &layer)
 {
-    if (!FILL_DEBUG)
+    if (!Slic3r::debug_enabled(Slic3r::DBG_FILL))
         return;
     double z = layer.print_z;
     int lid = (int) layer.id();
-    dbg_fill_print("z=%.3f [FILL] ========== INPUT SURFACES (layer %d, height=%.3f) ==========\n", z, lid,
-                   layer.height);
+    dbg_log(Slic3r::DBG_FILL, z, "FILL", "========== INPUT SURFACES (layer %d, height=%.3f) ==========", lid,
+            layer.height);
     for (size_t region_id = 0; region_id < layer.regions().size(); ++region_id)
     {
         const LayerRegion &layerm = *layer.regions()[region_id];
@@ -295,27 +295,27 @@ static void dbg_fill_input(const Layer &layer)
             double a = std::abs(surface.expolygon.area()) * 1e-12;
             region_total += a;
             BoundingBox bb = get_extents(surface.expolygon);
-            dbg_fill_print("z=%.3f [FILL] INPUT r=%zu i=%d type=%-18s area=%8.4fmm2 holes=%zu pts=%zu "
-                           "bbox=(%.2f,%.2f)-(%.2f,%.2f) bridge_ang=%.1f\n",
-                           z, region_id, idx, dbg_stype(surface.surface_type), a, surface.expolygon.holes.size(),
-                           surface.expolygon.contour.points.size(), unscaled<double>(bb.min.x()),
-                           unscaled<double>(bb.min.y()), unscaled<double>(bb.max.x()), unscaled<double>(bb.max.y()),
-                           surface.bridge_angle);
+            dbg_log(Slic3r::DBG_FILL, z, "FILL",
+                    "INPUT r=%zu i=%d type=%-18s area=%8.4fmm2 holes=%zu pts=%zu "
+                    "bbox=(%.2f,%.2f)-(%.2f,%.2f) bridge_ang=%.1f",
+                    region_id, idx, dbg_stype(surface.surface_type), a, surface.expolygon.holes.size(),
+                    surface.expolygon.contour.points.size(), unscaled<double>(bb.min.x()), unscaled<double>(bb.min.y()),
+                    unscaled<double>(bb.max.x()), unscaled<double>(bb.max.y()), surface.bridge_angle);
             idx++;
         }
-        dbg_fill_print("z=%.3f [FILL] INPUT r=%zu TOTAL: %d surfaces, %.4fmm2\n", z, region_id, idx, region_total);
+        dbg_log(Slic3r::DBG_FILL, z, "FILL", "INPUT r=%zu TOTAL: %d surfaces, %.4fmm2", region_id, idx, region_total);
     }
 }
 
 static void dbg_fill_phase(const char *phase, const Layer &layer, const std::vector<SurfaceFill> &fills)
 {
-    if (!FILL_DEBUG)
+    if (!Slic3r::debug_enabled(Slic3r::DBG_FILL))
         return;
     double z = layer.print_z;
     int lid = (int) layer.id();
     int total_ep = 0;
     double total_area = 0;
-    dbg_fill_print("z=%.3f [FILL] ========== %s (layer %d) ==========\n", z, phase, lid);
+    dbg_log(Slic3r::DBG_FILL, z, "FILL", "========== %s (layer %d) ==========", phase, lid);
     for (size_t i = 0; i < fills.size(); i++)
     {
         const SurfaceFill &sf = fills[i];
@@ -328,24 +328,25 @@ static void dbg_fill_phase(const char *phase, const Layer &layer, const std::vec
         total_area += sf_area_mm2;
         total_ep += (int) sf.expolygons.size();
         BoundingBox bb = get_extents(sf.expolygons);
-        dbg_fill_print("z=%.3f [FILL] %s [%zu] type=%-18s r=%zu dens=%.1f%% ep=%zu area=%8.4fmm2 "
-                       "bbox=(%.2f,%.2f)-(%.2f,%.2f)\n",
-                       z, phase, i, dbg_stype(sf.surface.surface_type), sf.region_id, sf.params.density,
-                       sf.expolygons.size(), sf_area_mm2, unscaled<double>(bb.min.x()), unscaled<double>(bb.min.y()),
-                       unscaled<double>(bb.max.x()), unscaled<double>(bb.max.y()));
+        dbg_log(Slic3r::DBG_FILL, z, "FILL",
+                "%s [%zu] type=%-18s r=%zu dens=%.1f%% ep=%zu area=%8.4fmm2 "
+                "bbox=(%.2f,%.2f)-(%.2f,%.2f)",
+                phase, i, dbg_stype(sf.surface.surface_type), sf.region_id, sf.params.density, sf.expolygons.size(),
+                sf_area_mm2, unscaled<double>(bb.min.x()), unscaled<double>(bb.min.y()), unscaled<double>(bb.max.x()),
+                unscaled<double>(bb.max.y()));
         for (size_t j = 0; j < sf.expolygons.size(); j++)
         {
             const ExPolygon &ep = sf.expolygons[j];
             double ep_area = std::abs(ep.area()) * 1e-12;
             BoundingBox epbb = get_extents(ep);
-            dbg_fill_print("z=%.3f [FILL]   %s [%zu][%zu] area=%8.4fmm2 holes=%zu pts=%zu "
-                           "bbox=(%.2f,%.2f)-(%.2f,%.2f)\n",
-                           z, phase, i, j, ep_area, ep.holes.size(), ep.contour.points.size(),
-                           unscaled<double>(epbb.min.x()), unscaled<double>(epbb.min.y()),
-                           unscaled<double>(epbb.max.x()), unscaled<double>(epbb.max.y()));
+            dbg_log(Slic3r::DBG_FILL, z, "FILL",
+                    "  %s [%zu][%zu] area=%8.4fmm2 holes=%zu pts=%zu "
+                    "bbox=(%.2f,%.2f)-(%.2f,%.2f)",
+                    phase, i, j, ep_area, ep.holes.size(), ep.contour.points.size(), unscaled<double>(epbb.min.x()),
+                    unscaled<double>(epbb.min.y()), unscaled<double>(epbb.max.x()), unscaled<double>(epbb.max.y()));
         }
     }
-    dbg_fill_print("z=%.3f [FILL] %s TOTAL: %d expolygons, %.4fmm2\n", z, phase, total_ep, total_area);
+    dbg_log(Slic3r::DBG_FILL, z, "FILL", "%s TOTAL: %d expolygons, %.4fmm2", phase, total_ep, total_area);
 }
 // ===================== END FILL DEBUG HELPERS =====================
 
@@ -467,24 +468,6 @@ std::vector<SurfaceFill> group_fills(const Layer &layer)
                     {
                         return offset_ex(surface.expolygon, -inset).empty();
                     };
-                    // Ring-specific: expand each hole outward by the threshold.
-                    // If the expanded hole breaches the outer contour, the ring
-                    // wall around that hole is thinner than the threshold.
-                    // Catches thin rings connected to wider solid regions that
-                    // the whole-expolygon inset check misses.
-                    auto has_thin_ring_at = [&](float wall_threshold) -> bool
-                    {
-                        if (surface.expolygon.holes.empty())
-                            return false;
-                        Polygons outer = {surface.expolygon.contour};
-                        for (const Polygon &hole : surface.expolygon.holes)
-                        {
-                            Polygons expanded = offset(hole, -wall_threshold);
-                            if (!diff(expanded, outer).empty())
-                                return true;
-                        }
-                        return false;
-                    };
                     const bool is_narrow_1_5x = !is_bridge && surface.is_solid() &&
                                                 is_narrow_at(solid_flow.scaled_width() * 1.5f / 2.f);
 
@@ -496,34 +479,15 @@ std::vector<SurfaceFill> group_fills(const Layer &layer)
                         const double area_threshold = sqr(solid_flow.scaled_width() * 1.5f) * 4.0;
                         if (std::abs(surface.expolygon.area()) < area_threshold)
                         {
-                            dbg_fill_print("z=%.3f [FILL] SKIP_NARROW type=%-18s area=%8.4fmm2\n", layer.print_z,
-                                           dbg_stype(surface.surface_type), std::abs(surface.expolygon.area()) * 1e-12);
+                            dbg_log(Slic3r::DBG_FILL, layer.print_z, "FILL", "SKIP_NARROW type=%-18s area=%8.4fmm2",
+                                    dbg_stype(surface.surface_type), std::abs(surface.expolygon.area()) * 1e-12);
                             continue;
                         }
                     }
 
-                    // Narrow solid surfaces use concentric (Athena variable-width beads)
-                    // instead of the configured rectilinear pattern.
-                    if ((surface.surface_type == stInternalSolid || surface.surface_type == stTop ||
-                         surface.surface_type == stBottom) &&
-                        params.pattern != ipEnsuring && params.pattern != ipConcentric &&
-                        region_config.narrow_to_athena.value)
-                    {
-                        const float threshold = float(region_config.narrow_to_athena_threshold.value);
-                        const bool is_narrow_athena = !is_bridge &&
-                                                      is_narrow_at(solid_flow.scaled_width() * threshold / 2.f);
-                        if (is_narrow_athena)
-                            params.pattern = ipConcentric;
-                        // Ring shapes: check if any hole has a thin wall to the
-                        // outer contour. Uses per-hole expansion instead of whole-
-                        // expolygon inset, so thin rings connected to wider areas
-                        // are detected correctly.
-                        if (!is_narrow_athena && !is_bridge && !surface.expolygon.holes.empty())
-                        {
-                            if (has_thin_ring_at(solid_flow.scaled_width() * threshold / 2.f))
-                                params.pattern = ipConcentric;
-                        }
-                    }
+                    // Narrow-to-Athena does NOT decide the pattern here. The configured solid
+                    // pattern is kept; thin sub-regions are split off into a concentric bead by
+                    // the width-split pass after group_fills geometry settles (see below).
                 }
                 else if (params.density <= 0)
                     continue;
@@ -1403,6 +1367,203 @@ std::vector<SurfaceFill> group_fills(const Layer &layer)
     }
     */
 
+    // preFlight: Narrow-to-Athena width split. Runs on settled geometry so only genuinely
+    // thin sub-regions (thin frames around pockets, necks, spikes) are converted to a smooth
+    // concentric bead - the wide bulk keeps its configured solid pattern. A morphological
+    // opening at the threshold width isolates the bulk; the thin remainder becomes its own
+    // concentric SurfaceFill. This replaces the old all-or-nothing per-surface pattern flip.
+    {
+        std::vector<SurfaceFill> narrow_fills;
+        for (size_t fi = 0; fi < surface_fills.size(); ++fi)
+        {
+            SurfaceFill &sf = surface_fills[fi];
+            if (sf.expolygons.empty() || sf.region_id == size_t(-1))
+                continue;
+            const SurfaceType st = sf.surface.surface_type;
+            if (st != stInternalSolid && st != stTop && st != stBottom)
+                continue;
+            if (sf.surface.is_bridge() || sf.params.pattern == ipConcentric || sf.params.pattern == ipEnsuring)
+                continue;
+            const PrintRegionConfig &rc = layer.regions()[sf.region_id]->region().config();
+            if (!rc.narrow_to_athena.value)
+                continue;
+            // Top/bottom are visible surfaces; only split them when the user opts in. Internal
+            // solid always splits when Narrow-to-Athena is on.
+            if ((st == stTop || st == stBottom) && !rc.narrow_to_athena_top_bottom.value)
+                continue;
+
+            // Opening radius: features narrower than threshold extrusion widths collapse.
+            const float open_r = float(sf.params.flow.scaled_width()) * float(rc.narrow_to_athena_threshold.value) /
+                                 2.f;
+            if (open_r <= 0.f)
+                continue;
+            // Tiny narrow scraps are folded back into the wide pass (perimeter-covered, too
+            // small for a clean bead) so no area is ever left unfilled.
+            const double min_frag = sqr(double(sf.params.flow.scaled_width()) * 2.0);
+
+            ExPolygons wide_all, narrow_all;
+            auto ex_area = [](const ExPolygons &v)
+            {
+                double a = 0;
+                for (const ExPolygon &e : v)
+                    a += std::abs(e.area());
+                return a;
+            };
+            // Self-heal tolerance: a real boolean failure drops a whole sub-region (>= a couple
+            // fragments). Safety-offset slivers are ~1e-3mm2, far below this, so the coverage
+            // revert never false-triggers on normal geometry.
+            const double coverage_tol = 2.0 * min_frag;
+
+            for (const ExPolygon &ep : sf.expolygons)
+            {
+                ExPolygons ep_in{ep};
+                // Morphological opening with explicit hole handling. The offset/opening helpers
+                // use perimeter-band hole semantics (negative delta SHRINKS holes), so they cannot
+                // erode through a thin frame around a pocket. Erode here = shrink the contour and
+                // grow each hole (as a positive region) then subtract; dilate the result back.
+                ExPolygons eroded = offset_ex(Polygons{ep.contour}, -open_r);
+                if (!ep.holes.empty())
+                {
+                    Polygons holes_grown;
+                    for (const Polygon &h : ep.holes)
+                    {
+                        Polygon hc = h;
+                        hc.make_counter_clockwise();
+                        append(holes_grown, offset(hc, open_r));
+                    }
+                    eroded = diff_ex(eroded, holes_grown);
+                }
+                // Safety offset on these booleans: wide_core/narrow share a boundary coincident
+                // with ep, so a plain diff/intersection can leave zero-width slivers. Matches the
+                // ApplySafetyOffset::Yes convention used by the inter-fill trim pass above.
+                ExPolygons wide_core = intersection_ex(ep_in, offset_ex(eroded, open_r), ApplySafetyOffset::Yes);
+                ExPolygons narrow_raw = diff_ex(ep_in, wide_core, ApplySafetyOffset::Yes);
+
+                // Classify this ExPolygon's outcome. For a real split, self-heal against coverage
+                // loss: wide + narrow must reconstitute ep. If a boolean ever drops a region (which
+                // would ship a gap in solid infill), revert this ep to un-split - the safe
+                // pre-feature behavior - and flag it. The check runs in release too; only the
+                // logging below is gated by --debug fill.
+                const char *result;
+                bool reverted = false;
+                double lost = 0.0;
+                ExPolygons ep_wide, ep_narrow;
+                if (wide_core.empty())
+                {
+                    result = "whole_narrow"; // entire surface is narrower than threshold
+                    ep_narrow = ep_in;
+                }
+                else
+                {
+                    ExPolygons narrow_kept;
+                    for (ExPolygon &nf : narrow_raw)
+                        if (std::abs(nf.area()) >= min_frag)
+                            narrow_kept.emplace_back(std::move(nf));
+                    if (narrow_kept.empty())
+                    {
+                        result = "kept_wide"; // nothing thin enough survived the area floor
+                        ep_wide = ep_in;
+                    }
+                    else
+                    {
+                        // wide and narrow tile ep. The seam is bonded by the concentric filler
+                        // itself: FillConcentric expands its region by half a spacing before
+                        // generating beads, so the outermost Athena bead overspills into wide the
+                        // same way concentric bonds against perimeters. No artificial grow.
+                        ExPolygons w = diff_ex(ep_in, narrow_kept, ApplySafetyOffset::Yes);
+                        lost = ex_area(ep_in) - (ex_area(w) + ex_area(narrow_kept));
+                        if (lost > coverage_tol)
+                        {
+                            result = "reverted"; // coverage loss - do not ship a gap
+                            reverted = true;
+                            ep_wide = ep_in;
+                        }
+                        else
+                        {
+                            result = "split";
+                            ep_wide = std::move(w);
+                            ep_narrow = std::move(narrow_kept);
+                        }
+                    }
+                }
+
+                if (Slic3r::debug_enabled(Slic3r::DBG_FILL))
+                {
+                    auto sum = [](const ExPolygons &v)
+                    {
+                        double a = 0;
+                        for (const ExPolygon &e : v)
+                            a += std::abs(e.area());
+                        return a * SCALING_FACTOR * SCALING_FACTOR;
+                    };
+                    // NARROW_DIAG: per-ExPolygon metrics + outcome (split / whole_narrow / kept_wide
+                    // / reverted). The first look when a Narrow-to-Athena issue is reported.
+                    dbg_log(Slic3r::DBG_FILL, layer.print_z, "FILL",
+                            "NARROW_DIAG type=%-18s result=%-12s w=%.4fmm thr=%.2f open_r=%.4fmm "
+                            "minfrag=%.4fmm2 holes=%zu ep=%.3f eroded=%.3f wide=%.3f narrow=%.3f mm2",
+                            dbg_stype(st), result, sf.params.flow.width(), double(rc.narrow_to_athena_threshold.value),
+                            double(open_r) * SCALING_FACTOR, min_frag * SCALING_FACTOR * SCALING_FACTOR,
+                            ep.holes.size(), sum(ep_in), sum(eroded), sum(wide_core), sum(narrow_raw));
+                    // NARROW_REJECT: the red flag. Only emitted on a self-heal revert - grep this
+                    // first when a Narrow-to-Athena issue is reported; if absent, no coverage was lost.
+                    if (reverted)
+                    {
+                        BoundingBox rb = get_extents(ep_in);
+                        dbg_log(Slic3r::DBG_FILL, layer.print_z, "FILL",
+                                "NARROW_REJECT reason=coverage_loss type=%-18s ep=%.4fmm2 "
+                                "lost=%.4fmm2 bbox=(%.2f,%.2f)-(%.2f,%.2f)",
+                                dbg_stype(st), sum(ep_in), lost * SCALING_FACTOR * SCALING_FACTOR,
+                                unscaled<double>(rb.min.x()), unscaled<double>(rb.min.y()),
+                                unscaled<double>(rb.max.x()), unscaled<double>(rb.max.y()));
+                    }
+                    // NARROW_PTS: verbose forensic - exact contour/hole points in mm so the true
+                    // shape can be rendered offline when a bbox is misleading (the usual trap here).
+                    auto dump_ring = [&](const char *tag, const Polygon &poly)
+                    {
+                        std::string s;
+                        char buf[64];
+                        for (const Point &pt : poly.points)
+                        {
+                            snprintf(buf, sizeof(buf), "%.3f,%.3f ", unscaled<double>(pt.x()),
+                                     unscaled<double>(pt.y()));
+                            s += buf;
+                        }
+                        dbg_log(Slic3r::DBG_FILL, layer.print_z, "FILL", "NARROW_PTS %s n=%zu %s", tag,
+                                poly.points.size(), s.c_str());
+                    };
+                    dump_ring("C", ep.contour);
+                    for (const Polygon &h : ep.holes)
+                        dump_ring("H", h);
+                }
+
+                append(wide_all, std::move(ep_wide));
+                append(narrow_all, std::move(ep_narrow));
+            }
+
+            if (narrow_all.empty())
+                continue; // no split for this fill
+
+            const size_t narrow_ep = narrow_all.size();
+            sf.expolygons = std::move(wide_all);
+
+            SurfaceFillParams np = sf.params;
+            np.pattern = ipConcentric;
+            SurfaceFill nf(np);
+            nf.region_id = sf.region_id;
+            nf.surface = sf.surface;
+            nf.expolygons = std::move(narrow_all);
+            narrow_fills.emplace_back(std::move(nf));
+
+            dbg_log(Slic3r::DBG_FILL, layer.print_z, "FILL", "NARROW_SPLIT type=%-18s wide_ep=%zu narrow_ep=%zu",
+                    dbg_stype(st), sf.expolygons.size(), narrow_ep);
+        }
+        for (SurfaceFill &nf : narrow_fills)
+        {
+            nf.params.idx = surface_fills.size();
+            surface_fills.emplace_back(std::move(nf));
+        }
+    }
+
     dbg_fill_phase("FINAL", layer, surface_fills);
 
     return surface_fills;
@@ -1527,15 +1688,25 @@ void Layer::make_fills(FillAdaptive::Octree *adaptive_fill_octree, FillAdaptive:
     {
         for (LayerIsland &island : lslice.islands)
         {
-            const uint32_t region_id = island.perimeters.region();
-            LayerRegion *layerm = this->get_region(region_id);
+            // The island's perimeters may have been merged into a single (highest-density) region
+            // by make_perimeters() while each part's fill still belongs to its own region. The
+            // perimeter-owning region is used only to anchor the infill start point.
+            const uint32_t perim_region_id = island.perimeters.region();
+            LayerRegion *perim_layerm = this->get_region(perim_region_id);
 
             // Process each surface type for THIS island
             for (SurfaceFill &surface_fill : surface_fills)
             {
-                // Only process surfaces that match this island's region
-                if (surface_fill.region_id != region_id)
+                // Match the fill to this island by its fill-owning region, or by geometry alone
+                // when the island's fill is composite (split across regions). Keying on the
+                // perimeter region instead would drop the lower-density part's infill wherever it
+                // shares layers with a merged, higher-density part.
+                if (!island.fill_expolygons_composite() && surface_fill.region_id != island.fill_region_id)
                     continue;
+
+                // The fill is generated, stored, and attributed to its own region.
+                const uint32_t region_id = surface_fill.region_id;
+                LayerRegion *layerm = this->get_region(region_id);
 
                 // Intersect surface fill with island boundary
                 auto ti0 = std::chrono::steady_clock::now();
@@ -1557,36 +1728,38 @@ void Layer::make_fills(FillAdaptive::Octree *adaptive_fill_octree, FillAdaptive:
                     fill_region_area_mm2 += static_cast<float>(std::abs(ep.area()) * SCALING_FACTOR * SCALING_FACTOR);
                 const int fill_pattern_id = static_cast<int>(surface_fill.params.pattern);
 
-                if (FILL_DEBUG)
+                if (Slic3r::debug_enabled(Slic3r::DBG_FILL))
                 {
                     double isl_area = 0;
                     for (const ExPolygon &ep : island_expolygons)
                         isl_area += std::abs(ep.area());
                     BoundingBox ibb = get_extents(island_expolygons);
-                    dbg_fill_print("z=%.3f [FILL] ISLAND_FILL type=%-18s pattern=%-16s ep=%zu area=%8.4fmm2 "
-                                   "bbox=(%.2f,%.2f)-(%.2f,%.2f)\n",
-                                   this->print_z, dbg_stype(surface_fill.surface.surface_type),
-                                   dbg_pattern(surface_fill.params.pattern), island_expolygons.size(), isl_area * 1e-12,
-                                   unscaled<double>(ibb.min.x()), unscaled<double>(ibb.min.y()),
-                                   unscaled<double>(ibb.max.x()), unscaled<double>(ibb.max.y()));
+                    dbg_log(Slic3r::DBG_FILL, this->print_z, "FILL",
+                            "ISLAND_FILL type=%-18s pattern=%-16s ep=%zu area=%8.4fmm2 "
+                            "bbox=(%.2f,%.2f)-(%.2f,%.2f)",
+                            dbg_stype(surface_fill.surface.surface_type), dbg_pattern(surface_fill.params.pattern),
+                            island_expolygons.size(), isl_area * 1e-12, unscaled<double>(ibb.min.x()),
+                            unscaled<double>(ibb.min.y()), unscaled<double>(ibb.max.x()),
+                            unscaled<double>(ibb.max.y()));
                     for (size_t i = 0; i < island_expolygons.size(); i++)
                     {
                         const ExPolygon &ep = island_expolygons[i];
                         BoundingBox ebb = ep.contour.bounding_box();
-                        dbg_fill_print("z=%.3f [FILL]   ISLAND_FILL [%zu] area=%8.4fmm2 holes=%zu pts=%zu "
-                                       "bbox=(%.2f,%.2f)-(%.2f,%.2f)\n",
-                                       this->print_z, i, std::abs(ep.area()) * 1e-12, ep.holes.size(),
-                                       ep.contour.points.size(), unscaled<double>(ebb.min.x()),
-                                       unscaled<double>(ebb.min.y()), unscaled<double>(ebb.max.x()),
-                                       unscaled<double>(ebb.max.y()));
+                        dbg_log(Slic3r::DBG_FILL, this->print_z, "FILL",
+                                "  ISLAND_FILL [%zu] area=%8.4fmm2 holes=%zu pts=%zu "
+                                "bbox=(%.2f,%.2f)-(%.2f,%.2f)",
+                                i, std::abs(ep.area()) * 1e-12, ep.holes.size(), ep.contour.points.size(),
+                                unscaled<double>(ebb.min.x()), unscaled<double>(ebb.min.y()),
+                                unscaled<double>(ebb.max.x()), unscaled<double>(ebb.max.y()));
                         for (size_t h = 0; h < ep.holes.size(); h++)
                         {
                             BoundingBox hbb = ep.holes[h].bounding_box();
-                            dbg_fill_print("z=%.3f [FILL]     ISLAND_HOLE [%zu][%zu] pts=%zu "
-                                           "bbox=(%.2f,%.2f)-(%.2f,%.2f)\n",
-                                           this->print_z, i, h, ep.holes[h].points.size(),
-                                           unscaled<double>(hbb.min.x()), unscaled<double>(hbb.min.y()),
-                                           unscaled<double>(hbb.max.x()), unscaled<double>(hbb.max.y()));
+                            dbg_log(Slic3r::DBG_FILL, this->print_z, "FILL",
+                                    "    ISLAND_HOLE [%zu][%zu] pts=%zu "
+                                    "bbox=(%.2f,%.2f)-(%.2f,%.2f)",
+                                    i, h, ep.holes[h].points.size(), unscaled<double>(hbb.min.x()),
+                                    unscaled<double>(hbb.min.y()), unscaled<double>(hbb.max.x()),
+                                    unscaled<double>(hbb.max.y()));
                         }
                     }
                 }
@@ -1687,9 +1860,9 @@ void Layer::make_fills(FillAdaptive::Octree *adaptive_fill_octree, FillAdaptive:
                 if (!island.perimeters.empty())
                 {
                     uint32_t last_perim_idx = *island.perimeters.end() - 1;
-                    if (last_perim_idx < layerm->m_perimeters.entities.size())
+                    if (last_perim_idx < perim_layerm->m_perimeters.entities.size())
                     {
-                        const ExtrusionEntity *last_perim = layerm->m_perimeters.entities[last_perim_idx];
+                        const ExtrusionEntity *last_perim = perim_layerm->m_perimeters.entities[last_perim_idx];
                         if (last_perim != nullptr)
                         {
                             last_fill_pos = last_perim->last_point();
@@ -1750,8 +1923,9 @@ void Layer::make_fills(FillAdaptive::Octree *adaptive_fill_octree, FillAdaptive:
                         }
                         catch (InfillFailedException &)
                         {
-                            dbg_fill_print("z=%.3f [FILL] FILL_EXCEPTION type=%-18s InfillFailedException!\n",
-                                           this->print_z, dbg_stype(surface_fill.surface.surface_type));
+                            dbg_log(Slic3r::DBG_FILL, this->print_z, "FILL",
+                                    "FILL_EXCEPTION type=%-18s InfillFailedException!",
+                                    dbg_stype(surface_fill.surface.surface_type));
                         }
                         {
                             extern Slic3r::PerfAccumTimer g_mf_fill_surface;
@@ -1952,8 +2126,9 @@ void Layer::make_fills(FillAdaptive::Octree *adaptive_fill_octree, FillAdaptive:
                         }
                         catch (InfillFailedException &)
                         {
-                            dbg_fill_print("z=%.3f [FILL] FILL_EXCEPTION type=%-18s InfillFailedException!\n",
-                                           this->print_z, dbg_stype(surface_fill.surface.surface_type));
+                            dbg_log(Slic3r::DBG_FILL, this->print_z, "FILL",
+                                    "FILL_EXCEPTION type=%-18s InfillFailedException!",
+                                    dbg_stype(surface_fill.surface.surface_type));
                         }
 
                         if (!polylines.empty())
@@ -1984,11 +2159,11 @@ void Layer::make_fills(FillAdaptive::Octree *adaptive_fill_octree, FillAdaptive:
                     if (!all_polylines.empty())
                     {
                         const Point *chain_start = have_last_pos ? &last_fill_pos : nullptr;
-                        dbg_fill_print("z=%.3f [FILL] PRE_CHAIN all_polylines=%zu flow_tags=%zu\n", this->print_z,
-                                       all_polylines.size(), flow_tags.size());
+                        dbg_log(Slic3r::DBG_FILL, this->print_z, "FILL", "PRE_CHAIN all_polylines=%zu flow_tags=%zu",
+                                all_polylines.size(), flow_tags.size());
                         auto [chained, index_map] = chain_polylines_with_indices(std::move(all_polylines), chain_start);
-                        dbg_fill_print("z=%.3f [FILL] POST_CHAIN chained=%zu index_map=%zu\n", this->print_z,
-                                       chained.size(), index_map.size());
+                        dbg_log(Slic3r::DBG_FILL, this->print_z, "FILL", "POST_CHAIN chained=%zu index_map=%zu",
+                                chained.size(), index_map.size());
 
                         // Reorder flow tags to match the chained polyline order
                         std::vector<PolylineFlowTag> reordered_tags;
@@ -1997,7 +2172,7 @@ void Layer::make_fills(FillAdaptive::Octree *adaptive_fill_octree, FillAdaptive:
                             reordered_tags.push_back(flow_tags[orig_idx]);
 
                         // Convert to extrusion entities with correct per-polyline flow
-                        if (FILL_DEBUG)
+                        if (Slic3r::debug_enabled(Slic3r::DBG_FILL))
                         {
                             size_t degen = 0;
                             double degen_len = 0, good_len = 0;
@@ -2007,9 +2182,9 @@ void Layer::make_fills(FillAdaptive::Octree *adaptive_fill_octree, FillAdaptive:
                                 else
                                     good_len += unscale<double>(chained[i].length());
                             if (degen > 0)
-                                dbg_fill_print("z=%.3f [FILL] DEGENERATE chained=%zu degen=%zu good=%zu "
-                                               "good_len=%.1fmm\n",
-                                               this->print_z, chained.size(), degen, chained.size() - degen, good_len);
+                                dbg_log(Slic3r::DBG_FILL, this->print_z, "FILL",
+                                        "DEGENERATE chained=%zu degen=%zu good=%zu good_len=%.1fmm", chained.size(),
+                                        degen, chained.size() - degen, good_len);
                         }
                         for (size_t i = 0; i < chained.size(); ++i)
                         {
@@ -2035,14 +2210,14 @@ void Layer::make_fills(FillAdaptive::Octree *adaptive_fill_octree, FillAdaptive:
                 // Add the collection to the layer (if it has any fills)
                 if (!eec->empty())
                 {
-                    dbg_fill_print("z=%.3f [FILL] FILL_OK type=%-18s entities=%zu\n", this->print_z,
-                                   dbg_stype(surface_fill.surface.surface_type), eec->entities.size());
+                    dbg_log(Slic3r::DBG_FILL, this->print_z, "FILL", "FILL_OK type=%-18s entities=%zu",
+                            dbg_stype(surface_fill.surface.surface_type), eec->entities.size());
                     layerm->m_fills.entities.push_back(eec);
                 }
                 else
                 {
-                    dbg_fill_print("z=%.3f [FILL] FILL_EMPTY type=%-18s (no extrusions generated)\n", this->print_z,
-                                   dbg_stype(surface_fill.surface.surface_type));
+                    dbg_log(Slic3r::DBG_FILL, this->print_z, "FILL", "FILL_EMPTY type=%-18s (no extrusions generated)",
+                            dbg_stype(surface_fill.surface.surface_type));
                     delete eec;
                 }
 

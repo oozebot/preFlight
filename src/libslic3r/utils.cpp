@@ -249,6 +249,15 @@ const std::string &data_dir()
     return g_data_dir;
 }
 
+#ifndef SLIC3R_PYTHON_VERSION_TAG
+#define SLIC3R_PYTHON_VERSION_TAG "unknown"
+#endif
+
+std::string user_python_packages_dir()
+{
+    return (boost::filesystem::path(g_data_dir) / "python-packages" / SLIC3R_PYTHON_VERSION_TAG).string();
+}
+
 std::string custom_shapes_dir()
 {
     return (boost::filesystem::path(g_data_dir) / "shapes").string();

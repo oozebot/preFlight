@@ -570,6 +570,14 @@ static std::string to_string(libvgcode::EGCodeExtrusionRole role)
     {
         return _u8L("Custom");
     }
+    case libvgcode::EGCodeExtrusionRole::Serpentine:
+    {
+        return _u8L("Serpentine");
+    }
+    case libvgcode::EGCodeExtrusionRole::SerpentineOverhang:
+    {
+        return _u8L("Serp. Overhang");
+    }
     default:
     {
         return _u8L("Unknown");
@@ -1749,8 +1757,8 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult &gcode_result, const 
                    libvgcode::EGCodeExtrusionRole::TopSolidInfill, libvgcode::EGCodeExtrusionRole::Ironing,
                    libvgcode::EGCodeExtrusionRole::BridgeInfill, libvgcode::EGCodeExtrusionRole::GapFill,
                    libvgcode::EGCodeExtrusionRole::Skirt, libvgcode::EGCodeExtrusionRole::SupportMaterial,
-                   libvgcode::EGCodeExtrusionRole::SupportMaterialInterface,
-                   libvgcode::EGCodeExtrusionRole::WipeTower});
+                   libvgcode::EGCodeExtrusionRole::SupportMaterialInterface, libvgcode::EGCodeExtrusionRole::WipeTower,
+                   libvgcode::EGCodeExtrusionRole::Serpentine, libvgcode::EGCodeExtrusionRole::SerpentineOverhang});
     m_paths_bounding_box = BoundingBoxf3(libvgcode::convert(bbox[0]).cast<double>(),
                                          libvgcode::convert(bbox[1]).cast<double>());
 
@@ -1981,8 +1989,6 @@ void GCodeViewer::render()
         // Following just makes sure that the shown marker is correct.
         auto [marker_model_opt, is_ht90] = m_canvas->get_current_marker_model();
         m_sequential_view.marker.init(marker_model_opt, is_ht90);
-        if (marker_model_opt.has_value())
-            m_max_bounding_box.reset();
 
         // When at the very end of a layer (100%), curr_vertex.gcode_id might be 0
         // Always try to use a valid gcode_id for the window

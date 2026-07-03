@@ -125,9 +125,13 @@ static constexpr std::size_t MOVE_TYPES_COUNT = static_cast<std::size_t>(EMoveTy
 //
 enum class EGCodeExtrusionRole : uint8_t
 {
-    // This enum is used as in index into extrusion_roles_visibility.
-    // Better only add things to the end.
+    // This enum is used as in index into extrusion_roles_visibility and the color
+    // array; keep both in sync with this order.
     None,
+    // preFlight: Serpentine fill types lead the list so they sort to the TOP of
+    // the preview legend (it orders roles by enum ordinal).
+    Serpentine,
+    SerpentineOverhang,
     Perimeter,
     ExternalPerimeter,
     OverhangPerimeter,

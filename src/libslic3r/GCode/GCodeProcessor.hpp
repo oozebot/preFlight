@@ -899,6 +899,14 @@ private:
     void parse_klipper_limits_from_config(const PrintConfig &config);
     // Process Klipper SET_VELOCITY_LIMIT command encountered mid-G-code
     void process_SET_VELOCITY_LIMIT(const std::string &line);
+    // Replace EVERY per-axis machine limit with the isotropic Klipper motion model so no
+    // hidden (UI-inaccessible) Marlin per-axis value can leak into the time estimate. A value
+    // <= 0 for velocity/accel/scv leaves that family of limits untouched.
+    void apply_klipper_isotropic_limits(float max_velocity, float max_accel, float scv);
+    // Seed RepRapFirmware's compiled-in firmware defaults (Configuration.h) into the per-axis limits
+    // so a blank/cleared/imported RRF profile never binds to hidden Marlin values. Call BEFORE
+    // parse_rrf_limits_from_config so user-supplied M-codes overlay these.
+    void apply_rrf_default_limits();
 
     // Unload the current filament into the MK3 MMU2 unit at the end of print.
     void process_M702(const GCodeReader::GCodeLine &line);

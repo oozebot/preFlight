@@ -319,6 +319,19 @@ enum InterlockFlowDetection
     ifdMinimal,  // 8mm sampling - fastest, least precise
 };
 
+enum SerpentineRidges
+{
+    srAligned,   // mouths stack vertically: straight external ridges
+    srStaggered, // half-tooth stagger per layer (brickwork)
+    srRandom,    // deterministic per-layer hash
+};
+
+enum SerpentineAimType
+{
+    satConvergent,    // depth teeth aim at the part anchor (smooth radial fan)
+    satPerpendicular, // depth teeth aim square to the inner boundary
+};
+
 enum SeamPosition
 {
     spRandom,
@@ -1036,6 +1049,12 @@ PRINT_CONFIG_CLASS_DEFINE(
         (ConfigOptionInt, interlock_solid_layers_bottom))((ConfigOptionPercent, interlock_perimeter_strength))(
         (ConfigOptionFloatOrPercent, interlock_perimeter_overlap))((ConfigOptionInt, interlocking_perimeter_extruder))(
         (ConfigOptionEnum<InterlockFlowDetection>, interlock_flow_detection))
+    // Serpentine fill
+    ((ConfigOptionBool, serpentine_enabled))((ConfigOptionFloatOrPercent, serpentine_extrusion_width))(
+        (ConfigOptionFloatOrPercent, serpentine_overlap))((ConfigOptionPercent, serpentine_max_bead))(
+        (ConfigOptionBool, serpentine_limit_depth))((ConfigOptionFloat, serpentine_depth))((ConfigOptionBool,
+                                                                                            serpentine_solid_surfaces))(
+        (ConfigOptionEnum<SerpentineRidges>, serpentine_ridges))((ConfigOptionEnum<SerpentineAimType>, serpentine_aim))
     // Ironing options
     ((ConfigOptionBool, ironing))((ConfigOptionEnum<IroningType>, ironing_type))(
         (ConfigOptionPercent, ironing_flowrate))((ConfigOptionFloat, ironing_spacing))((ConfigOptionFloat,
@@ -1054,8 +1073,8 @@ PRINT_CONFIG_CLASS_DEFINE(
         (ConfigOptionPercent, top_surface_flow_reduction))((ConfigOptionEnum<TopSurfaceVisibilityDetection>,
                                                             top_surface_visibility_detection))(
         (ConfigOptionBool, merge_top_solid_infills))((ConfigOptionBool, narrow_to_athena))(
-        (ConfigOptionFloat, narrow_to_athena_threshold))((ConfigOptionFloatOrPercent,
-                                                          top_solid_infill_speed))((ConfigOptionBool, wipe_into_infill))
+        (ConfigOptionFloat, narrow_to_athena_threshold))((ConfigOptionBool, narrow_to_athena_top_bottom))(
+        (ConfigOptionFloatOrPercent, top_solid_infill_speed))((ConfigOptionBool, wipe_into_infill))
     // Single perimeter.
     ((ConfigOptionEnum<TopOnePerimeterType>, top_one_perimeter_type))((ConfigOptionBool,
                                                                        only_one_perimeter_first_layer))
@@ -1144,7 +1163,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     //      w - whole word
     ((ConfigOptionStrings, gcode_substitutions))((ConfigOptionString, layer_gcode))((ConfigOptionBool, auto_speed))(
         (ConfigOptionFloat, max_print_speed))((ConfigOptionFloat, max_volumetric_speed))(
-        (ConfigOptionFloat, max_volumetric_extrusion_rate_slope_positive))(
+        (ConfigOptionFloat, max_volumetric_flow))((ConfigOptionFloat, max_volumetric_extrusion_rate_slope_positive))(
         (ConfigOptionFloat, max_volumetric_extrusion_rate_slope_negative))((ConfigOptionBools, travel_ramping_lift))(
         (ConfigOptionFloats, travel_max_lift))((ConfigOptionFloats, travel_slope))(
         (ConfigOptionBools, travel_lift_before_obstacle))((ConfigOptionBools, nozzle_high_flow))((ConfigOptionPercents,
@@ -1185,6 +1204,7 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
         (ConfigOptionInts, manual_fan_speed_external_perimeter))((ConfigOptionInts, manual_fan_speed_internal_infill))(
         (ConfigOptionInts, manual_fan_speed_interlocking_perimeter))((ConfigOptionInts, manual_fan_speed_ironing))(
         (ConfigOptionInts, manual_fan_speed_overhang_perimeter))((ConfigOptionInts, manual_fan_speed_perimeter))(
+        (ConfigOptionInts, manual_fan_speed_serpentine))((ConfigOptionInts, manual_fan_speed_serpentine_overhang))(
         (ConfigOptionInts, manual_fan_speed_skirt))((ConfigOptionInts, manual_fan_speed_solid_infill))(
         (ConfigOptionInts, manual_fan_speed_support_interface))((ConfigOptionInts, manual_fan_speed_support_material))(
         (ConfigOptionInts, manual_fan_speed_top_solid_infill))((ConfigOptionBools, enable_dynamic_fan_speeds))(
@@ -1201,16 +1221,16 @@ PRINT_CONFIG_CLASS_DERIVED_DEFINE(
         (ConfigOptionBools, fan_always_on))((ConfigOptionInts, fan_below_layer_time))(
         (ConfigOptionInts, fan_spinup_time))((ConfigOptionEnums<FanSpinupResponseType>, fan_spinup_response_type))(
         (ConfigOptionBools, fan_spinup_bridge_infill))((ConfigOptionBools, fan_spinup_overhang_perimeter))(
-        (ConfigOptionStrings, filament_colour))((ConfigOptionFloats, filament_transmission_distance))(
-        (ConfigOptionStrings, filament_notes))((ConfigOptionFloat, first_layer_acceleration))(
-        (ConfigOptionInts, first_layer_bed_temperature))((ConfigOptionFloatOrPercent, first_layer_extrusion_width))(
-        (ConfigOptionFloatOrPercent, first_layer_height))((ConfigOptionFloatOrPercent, first_layer_speed))(
-        (ConfigOptionFloatOrPercent, first_layer_infill_speed))((ConfigOptionFloatOrPercent, first_layer_travel_speed))(
-        (ConfigOptionInts, first_layer_temperature))((ConfigOptionIntsNullable, idle_temperature))(
-        (ConfigOptionInts, full_fan_speed_layer))((ConfigOptionFloat, infill_acceleration))(
-        (ConfigOptionBool, infill_first))((ConfigOptionInts, max_fan_speed))((ConfigOptionFloats, max_layer_height))(
-        (ConfigOptionInts, min_fan_speed))((ConfigOptionFloats, min_layer_height))((ConfigOptionFloat,
-                                                                                    max_print_height))(
+        (ConfigOptionBools, fan_spinup_serpentine_overhang))((ConfigOptionStrings, filament_colour))(
+        (ConfigOptionFloats, filament_transmission_distance))((ConfigOptionStrings, filament_notes))(
+        (ConfigOptionFloat, first_layer_acceleration))((ConfigOptionInts, first_layer_bed_temperature))(
+        (ConfigOptionFloatOrPercent, first_layer_extrusion_width))((ConfigOptionFloatOrPercent, first_layer_height))(
+        (ConfigOptionFloatOrPercent, first_layer_speed))((ConfigOptionFloatOrPercent, first_layer_infill_speed))(
+        (ConfigOptionFloatOrPercent, first_layer_travel_speed))((ConfigOptionInts, first_layer_temperature))(
+        (ConfigOptionIntsNullable, idle_temperature))((ConfigOptionInts, full_fan_speed_layer))(
+        (ConfigOptionFloat, infill_acceleration))((ConfigOptionBool, infill_first))((ConfigOptionInts, max_fan_speed))(
+        (ConfigOptionFloats, max_layer_height))((ConfigOptionInts, min_fan_speed))(
+        (ConfigOptionFloats, min_layer_height))((ConfigOptionFloat, max_print_height))(
         (ConfigOptionFloats, min_print_speed))((ConfigOptionFloat, min_skirt_length))((ConfigOptionString, notes))(
         (ConfigOptionString, custom_parameters_print))((ConfigOptionFloats, nozzle_diameter))(
         (ConfigOptionPercents, nozzle_width_warning_min))((ConfigOptionPercents, nozzle_width_warning_max))(

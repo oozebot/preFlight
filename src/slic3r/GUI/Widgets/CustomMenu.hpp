@@ -12,6 +12,7 @@
 #include <functional>
 #include <memory>
 #include <set>
+#include <chrono>
 
 #include "../wxExtensions.hpp"
 
@@ -95,6 +96,13 @@ public:
     void AppendSubMenu(std::shared_ptr<CustomMenu> submenu, const wxString &label,
                        const wxBitmapBundle &icon = wxBitmapBundle());
 
+    // preFlight: insert at the front (index 0), shifting existing items down. Used to add a
+    // leading section above items converted from a wxMenu.
+    void Prepend(int id, const wxString &label, const wxBitmapBundle &icon = wxBitmapBundle());
+    void PrependSeparator();
+    void PrependSubMenu(std::shared_ptr<CustomMenu> submenu, const wxString &label,
+                        const wxBitmapBundle &icon = wxBitmapBundle());
+
     // Set callback for a menu item by ID
     void SetCallback(int id, std::function<void()> callback);
 
@@ -118,6 +126,11 @@ public:
 
     // Set a callback to be called when the menu is dismissed
     void SetDismissCallback(std::function<void()> callback) { m_dismissCallback = std::move(callback); }
+
+    // True for a short window right after the menu is shown. Used to ignore spurious dismiss
+    // triggers (a stray app-deactivate or outside-click) that seamless/virtualized compositors
+    // deliver as part of opening the menu, which would otherwise close it on the opening click.
+    bool is_in_show_grace() const;
 
     // Dismiss any active context menu (call before showing a new one)
     static void DismissActiveContextMenu();
@@ -182,6 +195,11 @@ private:
     // Selection
     void SelectItem(int index);
     void ActivateItem(int index);
+
+    // preFlight: fire the dismiss callback, notify the menu bar, and release the self-reference.
+    // Idempotent (guarded by m_dismissNotified) so it can be safely invoked from every teardown
+    // path, including item activation which bypasses OnDismiss().
+    void NotifyDismissed();
     void HandleAccelerator(wxChar key);
 
     // Helper to get item by ID
@@ -239,6 +257,13 @@ private:
 
     // Dismiss callback (for async notification when menu closes)
     std::function<void()> m_dismissCallback;
+
+    // preFlight: guards NotifyDismissed() so the dismiss callback + self-ref release run
+    // exactly once regardless of teardown path (OnDismiss, item activation, or destruction).
+    bool m_dismissNotified{false};
+
+    // preFlight: time the menu was last shown (for is_in_show_grace()).
+    std::chrono::steady_clock::time_point m_shown_at{};
 
     // Self-reference to keep menu alive until dismissed (for context menus)
     std::shared_ptr<CustomMenu> m_selfRef;

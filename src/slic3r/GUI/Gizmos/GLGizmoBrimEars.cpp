@@ -162,6 +162,23 @@ void GLGizmoBrimEars::on_render()
     glsafe(::glDisable(GL_BLEND));
 }
 
+// Brim ears are flat discs that must lie flat on the build plate, whatever the object's pose.
+// Each marker is drawn as  instance_matrix * translate(pos) * scaling_inverse * q * scale(r,r,.2),
+// so before q the disc axis (local +Z) is acted on by the residual linear map
+// L = (instance_matrix * scaling_inverse).linear() (the instance rotation, plus any mirror/shear
+// left over). Orienting q toward L^-1 * world_up lands the disc axis on world +Z exactly - this
+// inverts the actual chain rather than a rotation decomposition, so it stays flat under rotation,
+// non-uniform scale, and mirrored/left-handed instances alike.
+static Eigen::Quaterniond brim_ear_flat_orientation(const Transform3d &instance_matrix,
+                                                    const Transform3d &instance_scaling_matrix_inverse)
+{
+    const Vec3d bed_up_local = (instance_matrix * instance_scaling_matrix_inverse).linear().inverse() *
+                               Vec3d{0., 0., 1.};
+    Eigen::Quaterniond q;
+    q.setFromTwoVectors(Vec3d{0., 0., 1.}, bed_up_local);
+    return q;
+}
+
 void GLGizmoBrimEars::render_points(const Selection &selection, bool use_object_color)
 {
     auto editing_cache = m_editing_cache;
@@ -189,6 +206,9 @@ void GLGizmoBrimEars::render_points(const Selection &selection, bool use_object_
     const Transform3d &instance_scaling_matrix_inverse =
         vol->get_instance_transformation().get_scaling_factor_matrix().inverse();
     const Transform3d &instance_matrix = vol->get_instance_transformation().get_matrix();
+    // Loop-invariant: the disc orientation depends only on the instance transform.
+    const Eigen::Quaterniond disc_orientation = brim_ear_flat_orientation(instance_matrix,
+                                                                          instance_scaling_matrix_inverse);
 
     shader->set_uniform("projection_matrix", camera.get_projection_matrix());
 
@@ -237,21 +257,17 @@ void GLGizmoBrimEars::render_points(const Selection &selection, bool use_object_
         if (vol->is_left_handed())
             glFrontFace(GL_CW);
 
-        // Matrices set, we can render the point mark now.
-        // If in editing mode, we'll also render a cone pointing to the sphere.
+        // The cached normal no longer orients the disc (it lies flat on the plate); it is kept
+        // only to seed the cone-base probe used by rectangle selection (see gizmo_event).
         if (editing_cache[i].normal == Vec3f::Zero())
             m_c->raycaster()->raycaster()->get_closest_point(editing_cache[i].brim_point.pos, &editing_cache[i].normal);
-
-        Eigen::Quaterniond q;
-        q.setFromTwoVectors(Vec3d{0., 0., 1.},
-                            instance_scaling_matrix_inverse * editing_cache[i].normal.cast<double>());
 
         double radius = (double) brim_point.head_front_radius * RenderPointScale;
         const Transform3d center_matrix =
             instance_matrix *
             Geometry::translation_transform(brim_point.pos.cast<double>())
             // Inverse matrix of the instance scaling is applied so that the mark does not scale with the object.
-            * instance_scaling_matrix_inverse * q * Geometry::scale_transform(Vec3d{radius, radius, .2});
+            * instance_scaling_matrix_inverse * disc_orientation * Geometry::scale_transform(Vec3d{radius, radius, .2});
         if (i < m_grabbers.size())
         {
             m_grabbers[i].raycasters[0]->set_transform(center_matrix);
@@ -334,6 +350,9 @@ void GLGizmoBrimEars::on_render_when_inactive()
             const Transform3d &instance_scaling_matrix_inverse =
                 target_volume->get_instance_transformation().get_scaling_factor_matrix().inverse();
             const Transform3d &instance_matrix = target_volume->get_instance_transformation().get_matrix();
+            // Loop-invariant per instance: same flat-on-plate orientation as the active path.
+            const Eigen::Quaterniond disc_orientation = brim_ear_flat_orientation(instance_matrix,
+                                                                                  instance_scaling_matrix_inverse);
 
             // Render each brim point from the ModelObject for this instance
             for (const BrimPoint &brim_point : mo->brim_points)
@@ -347,14 +366,10 @@ void GLGizmoBrimEars::on_render_when_inactive()
                 if (target_volume->is_left_handed())
                     glFrontFace(GL_CW);
 
-                // Note: We don't have normals stored in ModelObject->brim_points, so use default upward normal
-                Eigen::Quaterniond q;
-                q.setFromTwoVectors(Vec3d{0., 0., 1.}, instance_scaling_matrix_inverse * Vec3d{0., 0., 1.});
-
                 double radius = (double) brim_point.head_front_radius * RenderPointScale;
                 const Transform3d center_matrix = instance_matrix *
                                                   Geometry::translation_transform(brim_point.pos.cast<double>()) *
-                                                  instance_scaling_matrix_inverse * q *
+                                                  instance_scaling_matrix_inverse * disc_orientation *
                                                   Geometry::scale_transform(Vec3d{radius, radius, .2});
 
                 shader->set_uniform("view_model_matrix", view_matrix * center_matrix);
@@ -511,6 +526,13 @@ bool GLGizmoBrimEars::on_mouse(const MouseInput &mouse)
     {
         if (gizmo_event(SLAGizmoEventType::LeftUp, mouse_pos, mouse.shift, mouse.alt, control_down) &&
             !m_parent.is_mouse_dragging())
+            return true;
+    }
+    else if (mouse.type == MouseEventType::RightUp)
+    {
+        // Consume the right-button release so the canvas does not re-pick and open the platter
+        // context menu after a right-click has deleted a brim ear. Right-drag (camera pan) passes through.
+        if (!m_parent.is_mouse_dragging())
             return true;
     }
     return use_grabbers(mouse);
@@ -1212,16 +1234,8 @@ void GLGizmoBrimEars::on_set_state()
     if (m_state == Off && m_old_state != Off)
     {
         // the gizmo was just turned Off
-        // GizmosManager will take a LeavingGizmoWithAction snapshot after this returns,
-        // which clears the dirty flag because brim_points aren't in snapshot serialization.
-        // We save the current dirty state and will re-apply it via a deferred call.
-        bool was_dirty = m_parent.is_project_dirty();
         update_model_object();
         m_parent.leave_gizmos_stack();
-        if (was_dirty)
-        {
-            m_parent.call_after([this]() { m_parent.event_poster()->postEvent(CanvasEventType::SetPlaterDirty); });
-        }
     }
     m_old_state = m_state;
 }

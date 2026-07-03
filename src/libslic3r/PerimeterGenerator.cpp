@@ -7,6 +7,7 @@
 ///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
 ///|/
 #include "PerimeterGenerator.hpp"
+#include "Serpentine.hpp"
 #include "PreciseWalls.hpp"
 #include "Arachne/WallToolPaths.hpp"
 #include "Arachne/utils/ExtrusionLine.hpp"
@@ -1950,34 +1951,44 @@ void PerimeterRegion::merge_compatible_perimeter_regions(PerimeterRegions &perim
 namespace Slic3r
 {
 
+// True when either perimeter or interlock debug output is requested; gates the
+// computation in the debug helpers below. Each dbg_log call still enforces its
+// exact category, so --debug interlock yields only [INTERLOCK] lines and
+// --debug perimeters only [PERIM]; [WKT] geometry dumps appear under either.
+static inline bool pg_dbg_active()
+{
+    return Slic3r::debug_enabled(Slic3r::DBG_PERIMETERS | Slic3r::DBG_INTERLOCK);
+}
+
 // ===================== PERIMETER DEBUG HELPERS =====================
 static void dbg_perim_contours(const char *phase, double z, int layer_id, const ExPolygons &contours, const char *label)
 {
-    if (!FILL_DEBUG || contours.empty())
+    if (!pg_dbg_active() || contours.empty())
         return;
     double total_area = 0;
     for (const ExPolygon &ep : contours)
         total_area += std::abs(ep.area()) * 1e-12;
     BoundingBox bb = get_extents(contours);
-    dbg_fill_print("z=%.3f [PERIM] %s %s ep=%zu area=%8.4fmm2 bbox=(%.2f,%.2f)-(%.2f,%.2f)\n", z, phase, label,
-                   contours.size(), total_area, unscaled<double>(bb.min.x()), unscaled<double>(bb.min.y()),
-                   unscaled<double>(bb.max.x()), unscaled<double>(bb.max.y()));
+    dbg_log(Slic3r::DBG_PERIMETERS, z, "PERIM", "%s %s ep=%zu area=%8.4fmm2 bbox=(%.2f,%.2f)-(%.2f,%.2f)", phase, label,
+            contours.size(), total_area, unscaled<double>(bb.min.x()), unscaled<double>(bb.min.y()),
+            unscaled<double>(bb.max.x()), unscaled<double>(bb.max.y()));
     for (size_t i = 0; i < contours.size(); i++)
     {
         const ExPolygon &ep = contours[i];
         double a = std::abs(ep.area()) * 1e-12;
         BoundingBox epbb = get_extents(ep);
-        dbg_fill_print("z=%.3f [PERIM]   %s %s [%zu] area=%8.4fmm2 holes=%zu pts=%zu "
-                       "bbox=(%.2f,%.2f)-(%.2f,%.2f)\n",
-                       z, phase, label, i, a, ep.holes.size(), ep.contour.points.size(), unscaled<double>(epbb.min.x()),
-                       unscaled<double>(epbb.min.y()), unscaled<double>(epbb.max.x()), unscaled<double>(epbb.max.y()));
+        dbg_log(Slic3r::DBG_PERIMETERS, z, "PERIM",
+                "  %s %s [%zu] area=%8.4fmm2 holes=%zu pts=%zu "
+                "bbox=(%.2f,%.2f)-(%.2f,%.2f)",
+                phase, label, i, a, ep.holes.size(), ep.contour.points.size(), unscaled<double>(epbb.min.x()),
+                unscaled<double>(epbb.min.y()), unscaled<double>(epbb.max.x()), unscaled<double>(epbb.max.y()));
     }
 }
 
 static void dbg_perim_loops(double z, int layer_id, const Athena::Perimeters &perimeters, coord_t ext_perimeter_width,
                             coord_t perimeter_width)
 {
-    if (!FILL_DEBUG)
+    if (!pg_dbg_active())
         return;
     int total_loops = 0;
     for (const auto &perim_set : perimeters)
@@ -1999,53 +2010,56 @@ static void dbg_perim_loops(double z, int layer_id, const Athena::Perimeters &pe
                 min_w = std::min(min_w, j.w);
                 max_w = std::max(max_w, j.w);
             }
-            dbg_fill_print("z=%.3f [PERIM] LOOP inset=%zu closed=%d pts=%zu w=%.4f-%.4fmm "
-                           "bbox=(%.2f,%.2f)-(%.2f,%.2f)\n",
-                           z, el.inset_idx, (int) el.is_closed, el.junctions.size(), unscaled<double>(min_w),
-                           unscaled<double>(max_w), unscaled<double>(pmin.x()), unscaled<double>(pmin.y()),
-                           unscaled<double>(pmax.x()), unscaled<double>(pmax.y()));
+            dbg_log(Slic3r::DBG_PERIMETERS, z, "PERIM",
+                    "LOOP inset=%zu closed=%d pts=%zu w=%.4f-%.4fmm "
+                    "bbox=(%.2f,%.2f)-(%.2f,%.2f)",
+                    el.inset_idx, (int) el.is_closed, el.junctions.size(), unscaled<double>(min_w),
+                    unscaled<double>(max_w), unscaled<double>(pmin.x()), unscaled<double>(pmin.y()),
+                    unscaled<double>(pmax.x()), unscaled<double>(pmax.y()));
         }
     }
-    dbg_fill_print("z=%.3f [PERIM] LOOPS_TOTAL: %d loops, ext_w=%.4fmm perim_w=%.4fmm\n", z, total_loops,
-                   unscaled<double>(ext_perimeter_width), unscaled<double>(perimeter_width));
+    dbg_log(Slic3r::DBG_PERIMETERS, z, "PERIM", "LOOPS_TOTAL: %d loops, ext_w=%.4fmm perim_w=%.4fmm", total_loops,
+            unscaled<double>(ext_perimeter_width), unscaled<double>(perimeter_width));
 }
 
 static void dbg_perim_overlap(double z, int layer_id, int loop_number, coord_t spacing, coord_t inset_before,
                               coord_t inset_after, coord_t min_perim_infill_spacing)
 {
-    if (!FILL_DEBUG)
+    if (!pg_dbg_active())
         return;
-    dbg_fill_print("z=%.3f [PERIM] OVERLAP loops=%d spacing=%.4fmm inset_base=%.4fmm "
-                   "overlap=%.4fmm min_perim_infill_spacing=%.4fmm\n",
-                   z, loop_number + 1, unscaled<double>(spacing), unscaled<double>(inset_before),
-                   unscaled<double>(inset_after), unscaled<double>(min_perim_infill_spacing));
+    dbg_log(Slic3r::DBG_PERIMETERS, z, "PERIM",
+            "OVERLAP loops=%d spacing=%.4fmm inset_base=%.4fmm "
+            "overlap=%.4fmm min_perim_infill_spacing=%.4fmm",
+            loop_number + 1, unscaled<double>(spacing), unscaled<double>(inset_before), unscaled<double>(inset_after),
+            unscaled<double>(min_perim_infill_spacing));
 }
 // ===================== INTERLOCK DEBUG HELPERS =====================
 static void dbg_il_regions(double z, const char *phase, const ExPolygons &regions, const char *label)
 {
-    if (!FILL_DEBUG)
+    if (!pg_dbg_active())
         return;
     double total_area = 0;
     for (const ExPolygon &ep : regions)
         total_area += std::abs(ep.area()) * 1e-12;
     if (regions.empty())
     {
-        dbg_fill_print("z=%.3f [INTERLOCK] %s %s EMPTY\n", z, phase, label);
+        dbg_log(Slic3r::DBG_INTERLOCK, z, "INTERLOCK", "%s %s EMPTY", phase, label);
         return;
     }
     BoundingBox bb = get_extents(regions);
-    dbg_fill_print("z=%.3f [INTERLOCK] %s %s ep=%zu area=%8.4fmm2 bbox=(%.2f,%.2f)-(%.2f,%.2f)\n", z, phase, label,
-                   regions.size(), total_area, unscaled<double>(bb.min.x()), unscaled<double>(bb.min.y()),
-                   unscaled<double>(bb.max.x()), unscaled<double>(bb.max.y()));
+    dbg_log(Slic3r::DBG_INTERLOCK, z, "INTERLOCK", "%s %s ep=%zu area=%8.4fmm2 bbox=(%.2f,%.2f)-(%.2f,%.2f)", phase,
+            label, regions.size(), total_area, unscaled<double>(bb.min.x()), unscaled<double>(bb.min.y()),
+            unscaled<double>(bb.max.x()), unscaled<double>(bb.max.y()));
     for (size_t i = 0; i < regions.size(); i++)
     {
         const ExPolygon &ep = regions[i];
         double a = std::abs(ep.area()) * 1e-12;
         BoundingBox epbb = get_extents(ep);
-        dbg_fill_print("z=%.3f [INTERLOCK]   %s %s [%zu] area=%8.4fmm2 holes=%zu pts=%zu "
-                       "bbox=(%.2f,%.2f)-(%.2f,%.2f)\n",
-                       z, phase, label, i, a, ep.holes.size(), ep.contour.points.size(), unscaled<double>(epbb.min.x()),
-                       unscaled<double>(epbb.min.y()), unscaled<double>(epbb.max.x()), unscaled<double>(epbb.max.y()));
+        dbg_log(Slic3r::DBG_INTERLOCK, z, "INTERLOCK",
+                "  %s %s [%zu] area=%8.4fmm2 holes=%zu pts=%zu "
+                "bbox=(%.2f,%.2f)-(%.2f,%.2f)",
+                phase, label, i, a, ep.holes.size(), ep.contour.points.size(), unscaled<double>(epbb.min.x()),
+                unscaled<double>(epbb.min.y()), unscaled<double>(epbb.max.x()), unscaled<double>(epbb.max.y()));
     }
 }
 
@@ -2054,21 +2068,67 @@ static void dbg_il_params(double z, int layer_id, bool is_odd, int actual_shells
                           coord_t il_external, coord_t il_internal, coord_t il_innermost, coord_t overlap_amount,
                           coord_t perim_to_il_overlap)
 {
-    if (!FILL_DEBUG)
+    if (!pg_dbg_active())
         return;
-    dbg_fill_print("z=%.3f [INTERLOCK] PARAMS layer=%d odd=%d shells=%d/%d perim_w=%.4fmm "
-                   "base_w=%.4f main_w=%.4f boundary_w=%.4f il_ext=%.4f il_int=%.4f il_inner=%.4f "
-                   "overlap=%.4f p2il_overlap=%.4fmm\n",
-                   z, layer_id, (int) is_odd, actual_shells, requested_shells, unscaled<double>(perimeter_width),
-                   unscaled<double>(base_w), unscaled<double>(main_w), unscaled<double>(boundary_w),
-                   unscaled<double>(il_external), unscaled<double>(il_internal), unscaled<double>(il_innermost),
-                   unscaled<double>(overlap_amount), unscaled<double>(perim_to_il_overlap));
+    dbg_log(Slic3r::DBG_INTERLOCK, z, "INTERLOCK",
+            "PARAMS layer=%d odd=%d shells=%d/%d perim_w=%.4fmm "
+            "base_w=%.4f main_w=%.4f boundary_w=%.4f il_ext=%.4f il_int=%.4f il_inner=%.4f "
+            "overlap=%.4f p2il_overlap=%.4fmm",
+            layer_id, (int) is_odd, actual_shells, requested_shells, unscaled<double>(perimeter_width),
+            unscaled<double>(base_w), unscaled<double>(main_w), unscaled<double>(boundary_w),
+            unscaled<double>(il_external), unscaled<double>(il_internal), unscaled<double>(il_innermost),
+            unscaled<double>(overlap_amount), unscaled<double>(perim_to_il_overlap));
+}
+
+// Geometry debug (--debug perimeters/interlock): emit ExPolygons/polylines as WKT in mm, so a layer can be pasted into
+// shapely/QGIS/PostGIS (shapely.wkt.loads) for inspection. Generic - not interlocking-specific.
+static void dbg_wkt_expolys(double z, const char *label, const ExPolygons &eps)
+{
+    if (!pg_dbg_active() || eps.empty())
+        return;
+    auto pt = [](const Point &p)
+    {
+        return std::to_string(unscaled<double>(p.x())) + " " + std::to_string(unscaled<double>(p.y()));
+    };
+    auto ring = [&](const Polygon &poly)
+    {
+        std::string r = "(";
+        for (size_t k = 0; k < poly.points.size(); ++k)
+            r += (k ? "," : "") + pt(poly.points[k]);
+        if (!poly.points.empty())
+            r += "," + pt(poly.points.front()); // close the ring
+        return r + ")";
+    };
+    std::string s = "MULTIPOLYGON(";
+    for (size_t i = 0; i < eps.size(); ++i)
+    {
+        s += (i ? ",(" : "(") + ring(eps[i].contour);
+        for (const Polygon &h : eps[i].holes)
+            s += "," + ring(h);
+        s += ")";
+    }
+    s += ")";
+    dbg_log(Slic3r::DBG_PERIMETERS | Slic3r::DBG_INTERLOCK, z, "WKT", "%s %s", label, s.c_str());
+}
+
+static void dbg_wkt_polyline(double z, const char *label, size_t inset, bool odd,
+                             const std::vector<Athena::ExtrusionJunction> &js)
+{
+    if (!pg_dbg_active() || js.size() < 2)
+        return;
+    std::string s = "LINESTRING(";
+    for (size_t k = 0; k < js.size(); ++k)
+        s += (k ? "," : "") + std::to_string(unscaled<double>(js[k].p.x())) + " " +
+             std::to_string(unscaled<double>(js[k].p.y()));
+    s += ")";
+    dbg_log(Slic3r::DBG_PERIMETERS | Slic3r::DBG_INTERLOCK, z, "WKT", "%s inset=%zu odd=%d %s", label, inset, (int) odd,
+            s.c_str());
 }
 
 static void dbg_il_athena_shells(double z, const char *label, const std::vector<Athena::VariableWidthLines> &il_paths,
                                  int shells)
 {
-    if (!FILL_DEBUG)
+    if (!pg_dbg_active())
         return;
     for (size_t inset_idx = 0; inset_idx < il_paths.size() && inset_idx < size_t(shells); ++inset_idx)
     {
@@ -2092,16 +2152,17 @@ static void dbg_il_athena_shells(double z, const char *label, const std::vector<
             if (poly.size() < 3)
                 small_count++;
         }
-        dbg_fill_print("z=%.3f [INTERLOCK] ATHENA_SHELL %s inset=%zu lines=%zu closed=%d open=%d odd=%d "
-                       "small=%d empty=%d\n",
-                       z, label, inset_idx, il_paths[inset_idx].size(), closed_count, open_count, odd_count,
-                       small_count, empty_count);
+        dbg_log(Slic3r::DBG_INTERLOCK, z, "INTERLOCK",
+                "ATHENA_SHELL %s inset=%zu lines=%zu closed=%d open=%d odd=%d "
+                "small=%d empty=%d",
+                label, inset_idx, il_paths[inset_idx].size(), closed_count, open_count, odd_count, small_count,
+                empty_count);
     }
 }
 
 static void dbg_il_collect_result(double z, const char *label, const ExtrusionEntityCollection &coll)
 {
-    if (!FILL_DEBUG)
+    if (!pg_dbg_active())
         return;
     int loops = 0, paths = 0;
     double total_len = 0;
@@ -2115,14 +2176,14 @@ static void dbg_il_collect_result(double z, const char *label, const ExtrusionEn
             total_len += unscaled<double>(pp->polyline.length());
         }
     }
-    dbg_fill_print("z=%.3f [INTERLOCK] COLLECTED %s entities=%zu loops=%d paths=%d path_len=%.2fmm\n", z, label,
-                   coll.entities.size(), loops, paths, total_len);
+    dbg_log(Slic3r::DBG_INTERLOCK, z, "INTERLOCK", "COLLECTED %s entities=%zu loops=%d paths=%d path_len=%.2fmm", label,
+            coll.entities.size(), loops, paths, total_len);
 }
 
 static void dbg_il_inner_contour(double z, const Polygons &athena_inner, const Polygons &geometric_inner,
                                  const ExPolygons &final_contour)
 {
-    if (!FILL_DEBUG)
+    if (!pg_dbg_active())
         return;
     double athena_area = 0, geo_area = 0, final_area = 0;
     for (const Polygon &p : athena_inner)
@@ -2131,14 +2192,62 @@ static void dbg_il_inner_contour(double z, const Polygons &athena_inner, const P
         geo_area += std::abs(p.area()) * 1e-12;
     for (const ExPolygon &ep : final_contour)
         final_area += std::abs(ep.area()) * 1e-12;
-    dbg_fill_print("z=%.3f [INTERLOCK] INNER_CONTOUR athena_polys=%zu area=%.4fmm2 "
-                   "geo_polys=%zu area=%.4fmm2 final_ep=%zu area=%.4fmm2\n",
-                   z, athena_inner.size(), athena_area, geometric_inner.size(), geo_area, final_contour.size(),
-                   final_area);
+    dbg_log(Slic3r::DBG_INTERLOCK, z, "INTERLOCK",
+            "INNER_CONTOUR athena_polys=%zu area=%.4fmm2 "
+            "geo_polys=%zu area=%.4fmm2 final_ep=%zu area=%.4fmm2",
+            athena_inner.size(), athena_area, geometric_inner.size(), geo_area, final_contour.size(), final_area);
 }
 // ===================== END PERIMETER DEBUG HELPERS =====================
 
 // ===================== END INTERLOCK DEBUG HELPERS =====================
+
+// preFlight: portions of `probe` that lose coverage within m_top layers above
+// or m_bot layers below (i.e. are visible from outside the solid range).
+// Layer::id() is raft-offset, so the index into the object's layer vector is
+// corrected before walking.
+//
+// min_exposure > 0 drops each PER-LAYER exposure step narrower than twice
+// that radius before accumulating: a slope retreats by one thin ring per
+// layer while a true flat face appears as one wide step, so this separates
+// faces (kept) from slopes, chamfers, thread flanks and noise (dropped).
+static ExPolygons visible_within_solid_range(const Layer *layer, const ExPolygons &probe, int m_top, int m_bot,
+                                             float min_exposure = 0.f)
+{
+    auto significant = [min_exposure](ExPolygons &&exposed) -> ExPolygons
+    {
+        return min_exposure > 0.f ? opening_ex(exposed, min_exposure) : std::move(exposed);
+    };
+
+    ExPolygons vis;
+    const auto &all_layers = layer->object()->layers();
+    const size_t raft = layer->object()->slicing_parameters().raft_layers();
+    const size_t cur_idx = size_t(layer->id()) >= raft ? size_t(layer->id()) - raft : 0;
+    if (m_top > 0)
+    {
+        ExPolygons covered = probe;
+        for (int k = 1; k <= m_top && !covered.empty() && (cur_idx + k) < all_layers.size(); ++k)
+        {
+            append(vis, significant(diff_ex(covered, all_layers[cur_idx + k]->lslices)));
+            covered = intersection_ex(covered, all_layers[cur_idx + k]->lslices);
+        }
+        // Ran out of layers = top of object, everything remaining is visible
+        if (!covered.empty() && (cur_idx + m_top) >= all_layers.size())
+            append(vis, significant(std::move(covered)));
+    }
+    if (m_bot > 0)
+    {
+        ExPolygons covered = probe;
+        for (int k = 1; k <= m_bot && !covered.empty() && cur_idx >= static_cast<size_t>(k); ++k)
+        {
+            append(vis, significant(diff_ex(covered, all_layers[cur_idx - k]->lslices)));
+            covered = intersection_ex(covered, all_layers[cur_idx - k]->lslices);
+        }
+        // Ran out of layers = bottom of object
+        if (!covered.empty() && cur_idx < static_cast<size_t>(m_bot))
+            append(vis, significant(std::move(covered)));
+    }
+    return vis;
+}
 
 void PerimeterGenerator::process_athena(
     // Inputs:
@@ -2161,47 +2270,25 @@ void PerimeterGenerator::process_athena(
     // Detect how many perimeters must be generated for this island
     int loop_number = params.config.perimeters + surface.extra_perimeters - 1; // 0-indexed loops
 
-    // Interlock perimeter override: reduce perimeter count on layers where interlocking
-    // is active. The reduction is speculative - if the actual interlocking generation
-    // later determines this surface is too narrow (opening filter), we redo with the
-    // original perimeter count. See the il_retry_with_full_perimeters block below.
+    // "Perimeters while Interlocking" (per-region, additive). Generate the REDUCED wall count from the
+    // island boundary up front, so spacing/overlap are the reduced-count values - byte-identical to plain
+    // perimeters=<reduced>. The buried core then gets interlocking on the clean leftover; the extra
+    // (full - reduced) walls are added back ONLY where interlocking is suppressed (the additive Athena
+    // refill below), so interlocking in one part of an island never reduces the walls in another part.
     const int il_regular_override = params.config.interlock_regular_perimeters.value;
-    const int original_loop_number = loop_number;
-    bool il_perimeters_were_reduced = false;
-    bool il_retry_active = false;
-    if (il_regular_override > 0 && il_regular_override - 1 < loop_number &&
-        params.config.interlock_perimeters_enabled && !params.spiral_vase && params.layer != nullptr)
+    const bool il_feature_active = il_regular_override > 0 && il_regular_override < params.config.perimeters.value &&
+                                   params.config.interlock_perimeters_enabled && !params.config.serpentine_enabled &&
+                                   !params.spiral_vase && params.layer != nullptr;
+    // Only reduce a surface that will actually get some interlocking; a fully-solid surface (e.g. a
+    // top/bottom layer) keeps its full walls in a single pass and is never under-walled. The additive block
+    // below restores full walls in the suppressed sub-regions of a partially-buried surface.
+    bool il_reduce_walls = false;
+    if (il_feature_active)
     {
-        const auto &all_layers = params.layer->object()->layers();
-        const size_t cur_idx = params.layer->id();
-        const int m_top = params.config.interlock_solid_layers_top.value;
-        const int m_bot = params.config.interlock_solid_layers_bottom.value;
-        // Per-surface probe: only reduce perimeters if THIS surface will get interlocking
         const ExPolygons probe{surface.expolygon};
-
-        ExPolygons vis;
-        if (m_top > 0)
-        {
-            ExPolygons covered = probe;
-            for (int k = 1; k <= m_top && !covered.empty() && (cur_idx + k) < all_layers.size(); ++k)
-            {
-                append(vis, diff_ex(covered, all_layers[cur_idx + k]->lslices));
-                covered = intersection_ex(covered, all_layers[cur_idx + k]->lslices);
-            }
-            if (!covered.empty() && (cur_idx + m_top) >= all_layers.size())
-                append(vis, covered);
-        }
-        if (m_bot > 0)
-        {
-            ExPolygons covered = probe;
-            for (int k = 1; k <= m_bot && !covered.empty() && cur_idx >= static_cast<size_t>(k); ++k)
-            {
-                append(vis, diff_ex(covered, all_layers[cur_idx - k]->lslices));
-                covered = intersection_ex(covered, all_layers[cur_idx - k]->lslices);
-            }
-            if (!covered.empty() && cur_idx < static_cast<size_t>(m_bot))
-                append(vis, covered);
-        }
+        const ExPolygons vis = visible_within_solid_range(params.layer, probe,
+                                                          params.config.interlock_solid_layers_top.value,
+                                                          params.config.interlock_solid_layers_bottom.value);
         bool has_il = vis.empty();
         if (!has_il)
         {
@@ -2210,24 +2297,13 @@ void PerimeterGenerator::process_athena(
                 remaining += std::abs(ep.area());
             has_il = remaining > double(perimeter_width) * double(perimeter_width);
         }
-        if (has_il)
-        {
-            loop_number = il_regular_override + surface.extra_perimeters - 1;
-            il_perimeters_were_reduced = true;
-        }
+        il_reduce_walls = has_il;
     }
+    if (il_reduce_walls)
+        loop_number = il_regular_override - 1;
 
-    // Snapshot sizes so the interlocking retry can truncate back to our entry point
-    // instead of clearing the entire collection (which destroys prior slices' perimeters).
-    const size_t out_loops_begin = out_loops.size();
-    const size_t out_fill_begin = out_fill_expolygons.size();
-
-    // Compute spacing using the effective perimeter count.
-    // Variables are non-const to allow retry with full perimeters if interlocking fails.
-il_retry_with_full_perimeters:
-    int effective_perims = (il_regular_override > 0 && loop_number == il_regular_override - 1)
-                               ? il_regular_override
-                               : params.config.perimeters.value;
+    // Compute spacing using the effective (reduced when PWI-active) perimeter count.
+    int effective_perims = il_reduce_walls ? il_regular_override : params.config.perimeters.value;
     coord_t perimeter_spacing = preFlight::PreciseWalls::calculate_perimeter_spacing(
         params.perimeter_flow,
         preFlight::PreciseWalls::get_effective_perimeter_overlap(params.config.perimeter_perimeter_overlap,
@@ -2324,6 +2400,614 @@ il_retry_with_full_perimeters:
         break;
     }
 
+    // Serpentine depth-limit hand-off: the band was emitted and the Athena block
+    // below owns the interior with exactly one wall plus normal infill. Gates the
+    // TopSurfaces and interlocking machinery, which assume Athena owns the island.
+    bool serp_band_handoff = false;
+    // The band's own no_sort collection, captured on hand-off so the inner Athena
+    // wall can be spliced to its front (the inner beads print before the band bead).
+    ExtrusionEntityCollection *serp_band_coll = nullptr;
+    // Perpendicular depth past which the depth-limit fill may live, so the fill
+    // overlaps the band even where the wall was too thin for an Athena bead.
+    // Currently always 0 (the depth hand-off bounds the fill at the caps and no
+    // path sets it non-zero), so the serp_fill_clip > 0 consumer never fires.
+    coord_t serp_fill_clip = 0;
+    // The flow the smooth wall renders with: the serpentine bead's flow, so the
+    // wall matches the serpentine width (sp_params.flow already inherits the
+    // external perimeter flow when serpentine_extrusion_width is 0). External by
+    // default for non-serpentine islands.
+    Flow serp_wall_flow = params.ext_perimeter_flow;
+
+    // Serpentine fill: replaces both perimeters and infill with a single
+    // continuous extrusion.
+    if (params.config.serpentine_enabled && !params.spiral_vase)
+    {
+        const double sp_nozzle = params.print_config.nozzle_diameter.get_at(params.config.perimeter_extruder.value - 1);
+        // First-layer width overrides the explicit serpentine width, matching
+        // every other extrusion width in the pipeline; both honor the
+        // percent-of-nozzle interpretation flag.
+        Flow sp_flow = params.ext_perimeter_flow;
+        if (params.layer_id == 0 && params.print_config.first_layer_extrusion_width.value > 0)
+            sp_flow = Flow::new_from_config_width(frExternalPerimeter, params.print_config.first_layer_extrusion_width,
+                                                  (float) sp_nozzle, (float) params.layer_height,
+                                                  params.object_config.extrusion_width_percent_of_nozzle.value);
+        else if (params.config.serpentine_extrusion_width.value > 0)
+            sp_flow = Flow::new_from_config_width(frExternalPerimeter, params.config.serpentine_extrusion_width,
+                                                  (float) sp_nozzle, (float) params.layer_height,
+                                                  params.object_config.extrusion_width_percent_of_nozzle.value);
+
+        Serpentine::Params sp_params;
+        sp_params.bead_width = scaled<coord_t>((double) sp_flow.width());
+        // Overlap shares PreciseWalls semantics: percent values are percent
+        // of layer height doubled internally, absolute values are mm. Clamped
+        // here once so the generator and the fill inset arithmetic below
+        // always agree on the effective value.
+        const auto &ov_opt = params.config.serpentine_overlap;
+        const double bw_mm = (double) sp_flow.width();
+        double ov_mm = ov_opt.percent ? (2.0 * ov_opt.value * 0.01 * params.layer_height) : ov_opt.value;
+        ov_mm = std::clamp(ov_mm, -3.0 * bw_mm, 0.45 * bw_mm);
+        sp_params.overlap = scaled<coord_t>(ov_mm);
+        sp_params.max_bead = scaled<coord_t>(sp_nozzle * params.config.serpentine_max_bead.value * 0.01);
+        sp_params.phase_mode = int(params.config.serpentine_ridges.value);
+        sp_params.aim = int(params.config.serpentine_aim.value);
+        sp_params.flow = sp_flow;
+        sp_params.layer_id = params.layer_id;
+        sp_params.print_z = (params.layer != nullptr) ? params.layer->print_z : 0.0;
+
+        // Serpentine's boundary walk rides the contour with its bead centerline, so
+        // generating on the raw slice leaves the bead's outer edge a half-bead proud
+        // and the part prints ~one bead oversize. Inset the outer contour a half-bead,
+        // like a normal external perimeter, so the outer bead edge lands on the slice
+        // contour, but keep the holes at the true boundary: a whole-island inset also
+        // grows every hole, and ring-mode teeth form the bore surface with no boundary
+        // bead, so a grown hole leaves the inside a bead short of the real bore.
+        // Intersecting the slice (true holes) with the inset outer disc insets only the
+        // contour. Every serpentine branch derives its geometry from this.
+        // The inset can erase a sub-bead sliver (empty) or split a necked island
+        // (size > 1); both fall back to the raw slice. Empty usually fails
+        // generate()'s min-dimension gate (Athena then prints it at the right size),
+        // but a large-bbox diagonal sliver could clear the gate and print ~half a bead
+        // oversize; size > 1 prints serpentine on the raw slice ~half a bead oversize
+        // per side. Log both so neither ships silently.
+        ExPolygons serp_in = intersection_ex(ExPolygons{surface.expolygon},
+                                             offset_ex(ExPolygon(surface.expolygon.contour),
+                                                       -0.5f * float(sp_params.bead_width)));
+        if (serp_in.size() > 1)
+            dbg_log(Slic3r::DBG_SERPENTINE, sp_params.print_z, "SRP",
+                    "serpentine half-bead inset split the island into %zu pieces (sub-bead neck or hole "
+                    "near the edge); using the raw slice, so this island prints ~half a bead oversize",
+                    serp_in.size());
+        else if (serp_in.empty())
+            dbg_log(Slic3r::DBG_SERPENTINE, sp_params.print_z, "SRP",
+                    "serpentine half-bead inset erased the island (sub-bead sliver); using the raw slice - "
+                    "prints ~half a bead oversize if it clears generate()'s min-dimension gate");
+        const ExPolygon &serp_island = (serp_in.size() == 1) ? serp_in.front() : surface.expolygon;
+
+        // Solid surfaces: portions of this island within the top/bottom solid
+        // range print as ordinary solid infill. Slice-to-slice noise produces
+        // hairline slivers in the visibility diffs; the opening drops them so
+        // only real exposure (at least a bead wide) triggers shell mode.
+        // Only true faces flip a layer into shell mode. The lslices walk
+        // proposes candidate exposure regions (the per-step opening already
+        // drops the thin rings slopes and noise contribute layer by layer);
+        // each candidate must then confirm through the layer visibility API:
+        // interior sample discs genuinely visible from above or below within
+        // the solid range. Slopes, chamfers and thread flanks fail (their
+        // disc neighbors are covered beyond the range, or they are too thin
+        // to seat a sample); flat faces pass.
+        ExPolygons vis;
+        if (!params.config.serpentine_limit_depth && params.config.serpentine_solid_surfaces && params.layer != nullptr)
+        {
+            // Serpentine needs two solid layers per face (the face layer and
+            // the one beneath/above it); the maze provides the rest of the
+            // shell. The configured counts act as on/off here (minimum shell
+            // thickness has nothing to act on, since covered layers hand the
+            // fill machinery no regions at all). The confirmation below keeps
+            // the second layer on the same confirmed face footprint.
+            const int m_top = params.config.top_solid_layers.value > 0 ? 2 : 0;
+            const int m_bot = params.config.bottom_solid_layers.value > 0 ? 2 : 0;
+            const float step_open = 1.5f * float(sp_params.bead_width);
+
+            auto face_confirmed = [&](const ExPolygon &cand, bool from_top, int range) -> bool
+            {
+                if (range <= 0)
+                    return false;
+                const double inward_d = scale_(1.5);
+                const coord_t disc_r = coord_t(scale_(1.0));
+                static const double ct[8] = {1., .707, 0., -.707, -1., -.707, 0., .707};
+                static const double st[8] = {0., .707, 1., .707, 0., -.707, -1., -.707};
+                auto disc_visible = [&](const Point &s) -> bool
+                {
+                    for (int j = 0; j < 8; ++j)
+                    {
+                        Point p(s.x() + coord_t(ct[j] * disc_r), s.y() + coord_t(st[j] * disc_r));
+                        // points off the island do not count against the disc
+                        if (!surface.expolygon.contains(p))
+                            continue;
+                        int k = from_top ? params.layer->layers_until_visible_from_top(p, range)
+                                         : params.layer->layers_until_visible_from_bottom(p, range);
+                        if (k > range)
+                            return false;
+                    }
+                    return true;
+                };
+                // Interior samples: the centroid plus contour quarter points
+                // pushed inward. A candidate too thin to seat any sample is
+                // not a face.
+                size_t n_samples = 0;
+                Point centroid = cand.contour.centroid();
+                if (cand.contains(centroid))
+                {
+                    ++n_samples;
+                    if (!disc_visible(centroid))
+                        return false;
+                }
+                const Polygon &c = cand.contour;
+                for (int q = 0; q < 4 && c.points.size() >= 3; ++q)
+                {
+                    size_t i = c.points.size() * q / 4;
+                    const Point &a = c.points[i];
+                    const Point &b = c.points[(i + 1) % c.points.size()];
+                    Vec2d t = (b - a).cast<double>();
+                    double len = t.norm();
+                    if (len < SCALED_EPSILON)
+                        continue;
+                    t /= len;
+                    Point s = a + Point(coord_t(-t.y() * inward_d), coord_t(t.x() * inward_d));
+                    if (!cand.contains(s))
+                        continue;
+                    ++n_samples;
+                    if (!disc_visible(s))
+                        return false;
+                }
+                return n_samples > 0;
+            };
+
+            ExPolygons cand_top = visible_within_solid_range(params.layer, ExPolygons{surface.expolygon}, m_top, 0,
+                                                             step_open);
+            ExPolygons cand_bot = visible_within_solid_range(params.layer, ExPolygons{surface.expolygon}, 0, m_bot,
+                                                             step_open);
+            for (ExPolygon &cand : cand_top)
+                if (face_confirmed(cand, true, m_top))
+                    vis.push_back(std::move(cand));
+            for (ExPolygon &cand : cand_bot)
+                if (face_confirmed(cand, false, m_bot))
+                    vis.push_back(std::move(cand));
+        }
+
+        // A continuous inner perimeter sits one bead inside the band caps, bonded
+        // to them by the configured serpentine overlap, so the inner bead and the
+        // band weld by the same amount the user set for the pattern itself.
+        // Prepended into the band's own per-island collection, it prints first,
+        // anchors to the layer below, and gives the band caps (outside) and the
+        // fill (inside) one continuous edge to fuse to all the way around, which
+        // rectilinear fill cannot. The fill inset is moved in by one bead (less
+        // the bond) to make room for it.
+        const coord_t serp_inner_bond = sp_params.overlap;
+        auto prepend_inner_perimeter = [&](const ExPolygons &perim_region)
+        {
+            if (out_loops.entities.empty())
+                return;
+            auto *band_coll = dynamic_cast<ExtrusionEntityCollection *>(out_loops.entities.back());
+            if (band_coll == nullptr)
+                return;
+            const ExtrusionFlow pflow(sp_params.flow.mm3_per_mm(), sp_params.flow.width(), sp_params.flow.height());
+            std::vector<ExtrusionEntity *> perims;
+            auto make_perim = [&](const Polygon &poly)
+            {
+                if (poly.points.size() < 3)
+                    return;
+                ExtrusionPath p(ExtrusionAttributes(ExtrusionRole::Serpentine, pflow));
+                for (const Point &pt : poly.points)
+                    p.polyline.append(pt);
+                p.polyline.append(p.polyline.first_point());
+                ExtrusionPaths ps;
+                ps.push_back(std::move(p));
+                perims.push_back(new ExtrusionLoop(std::move(ps)));
+            };
+            for (const ExPolygon &ep : perim_region)
+            {
+                make_perim(ep.contour);
+                for (const Polygon &h : ep.holes)
+                    make_perim(h);
+            }
+            if (!perims.empty())
+                band_coll->entities.insert(band_coll->entities.begin(), perims.begin(), perims.end());
+        };
+
+        // Serpentine overhang detection: split each serpentine path into supported
+        // (Serpentine) and overhanging (SerpentineOverhang) spans against the lower
+        // slices grown by half a nozzle (the same support envelope the normal
+        // perimeter overhang pass uses). A centerline outside that envelope is an
+        // overhang. Re-tags the role only; the serpentine flow is kept, so the
+        // overhang spans take the overhang speed/fan/color without reflowing.
+        const bool serp_detect_overhang = params.config.overhangs &&
+                                          params.layer_id > params.object_config.raft_layers &&
+                                          !lower_slices_polygons_cache.empty();
+        const ExPolygons serp_supported = serp_detect_overhang ? union_ex(lower_slices_polygons_cache) : ExPolygons{};
+        auto tag_serpentine_overhangs = [&](ExtrusionEntity *band_entity)
+        {
+            if (!serp_detect_overhang || band_entity == nullptr)
+                return;
+            auto *coll = dynamic_cast<ExtrusionEntityCollection *>(band_entity);
+            if (coll == nullptr)
+                return;
+            const double step = double(scale_(0.5)); // overhang split granularity
+            auto supported_at = [&](const Point &p)
+            {
+                for (const ExPolygon &ex : serp_supported)
+                    if (ex.contains(p))
+                        return true;
+                return false;
+            };
+            auto split_paths = [&](ExtrusionPaths &paths)
+            {
+                ExtrusionPaths out;
+                out.reserve(paths.size());
+                for (ExtrusionPath &src : paths)
+                {
+                    if (!src.role().is_serpentine() || src.polyline.size() < 2)
+                    {
+                        out.push_back(std::move(src));
+                        continue;
+                    }
+                    const ExtrusionAttributes base_attr = src.attributes();
+                    ExtrusionAttributes over_attr = base_attr;
+                    over_attr.role = ExtrusionRole::SerpentineOverhang;
+                    // Subdivide every segment, classify each step by its midpoint,
+                    // then group consecutive same-class steps into sub-paths. The
+                    // sub-paths share endpoints, so the tour stays continuous.
+                    const Points &pts = src.polyline.points;
+                    std::vector<Point> sp;
+                    std::vector<char> seg_over;
+                    sp.push_back(pts.front());
+                    for (size_t i = 0; i + 1 < pts.size(); ++i)
+                    {
+                        const Vec2d a = pts[i].cast<double>();
+                        const Vec2d d = pts[i + 1].cast<double>() - a;
+                        const double len = d.norm();
+                        const int steps = std::max(1, int(std::ceil(len / step)));
+                        for (int k = 1; k <= steps; ++k)
+                        {
+                            sp.push_back((a + d * (double(k) / steps)).cast<coord_t>());
+                            const Point mid = (a + d * ((double(k) - 0.5) / steps)).cast<coord_t>();
+                            seg_over.push_back(supported_at(mid) ? char(0) : char(1));
+                        }
+                    }
+                    // Fast path: a fully supported path keeps its original
+                    // geometry (Serpentine); a fully overhanging one only flips
+                    // role. Only genuinely mixed paths are subdivided.
+                    bool mixed = false;
+                    for (char c : seg_over)
+                        if (c != seg_over.front())
+                        {
+                            mixed = true;
+                            break;
+                        }
+                    if (seg_over.empty() || !mixed)
+                    {
+                        if (!seg_over.empty() && seg_over.front())
+                        {
+                            ExtrusionPath p(over_attr);
+                            p.polyline = src.polyline;
+                            out.push_back(std::move(p));
+                        }
+                        else
+                            out.push_back(std::move(src));
+                        continue;
+                    }
+                    size_t i = 0;
+                    while (i < seg_over.size())
+                    {
+                        const char ov = seg_over[i];
+                        size_t j = i;
+                        while (j < seg_over.size() && seg_over[j] == ov)
+                            ++j;
+                        ExtrusionPath p(ov ? over_attr : base_attr);
+                        for (size_t k = i; k <= j; ++k)
+                            p.polyline.append(sp[k]);
+                        out.push_back(std::move(p));
+                        i = j;
+                    }
+                }
+                paths = std::move(out);
+            };
+            for (ExtrusionEntity *e : coll->entities)
+            {
+                if (auto *mp = dynamic_cast<ExtrusionMultiPath *>(e))
+                    split_paths(mp->paths);
+                else if (auto *lp = dynamic_cast<ExtrusionLoop *>(e))
+                    split_paths(lp->paths);
+            }
+        };
+
+        if (params.config.serpentine_limit_depth)
+        {
+            // Depth-limited mode: run the full serpentine pattern (anchor aim, ring
+            // mode, no band corners) but stop every tooth at the configured depth,
+            // so the result is the full fan clamped shallow. Athena then prints one
+            // perimeter just inside the tooth tips and normal infill beyond. band_clamp
+            // stays 0 so generate() runs full mode; depth_clamp does the limiting. The
+            // shallowest closable pattern is two beads, so smaller depths floor.
+            Serpentine::Params band_params = sp_params;
+            const coord_t depth_floor = coord_t(2.0 * sp_params.bead_width);
+            const coord_t serp_depth = std::max(scaled<coord_t>(params.config.serpentine_depth.value), depth_floor);
+            band_params.band_clamp = 0;
+            band_params.depth_clamp = serp_depth;
+            // The depth line each tooth set stops on: the region at least serp_depth
+            // behind every boundary, so a tooth cap lands on the Athena bead's near edge
+            // and adheres by the configured overlap without crossing into it. On an annulus
+            // the contour's inward line and a bore's outward line cross once 2*serp_depth
+            // exceeds the local wall; a single offset_ex of the holed island returns a
+            // non-empty inverted mid-wall ring there, and each tooth set then conforms to
+            // the opposite wall's line (outer teeth stop serp_depth from the bore, bore
+            // teeth serp_depth from the contour) instead of meeting at the midplane. Build
+            // it from per-boundary offsets and difference them so it empties cleanly when
+            // the lines cross; with no depth line the rc/2 cap in generate() governs (each
+            // tooth half the near wall) and both sets meet there.
+            ExPolygon serp_contour_only;
+            serp_contour_only.contour = serp_island.contour;
+            ExPolygons serp_depth_region = offset_ex(serp_contour_only, -float(serp_depth));
+            for (const Polygon &bore : serp_island.holes)
+            {
+                ExPolygon bore_solid;
+                bore_solid.contour = bore;
+                bore_solid.contour.make_counter_clockwise();
+                serp_depth_region = diff_ex(serp_depth_region, offset_ex(bore_solid, float(serp_depth)));
+            }
+            band_params.fill_core = std::move(serp_depth_region);
+            // On a thin or eccentric wall the two boundaries' depth lines cross and fill_core empties
+            // there, so each tooth falls back to a per-ray midplane scalar; the two fans' midplanes do
+            // not coincide on an off-centre wall and the anchor bead the teeth bond to pinches out (it
+            // fragments into disconnected loops on the thin side). Floor fill_core with a continuous
+            // mid-wall ribbon: where the wall is thick the ribbon sits inside fill_core and has no
+            // effect; where it is thin the ribbon governs, the teeth conform to it and back their depth
+            // off, so a band at least one Athena seat wide survives all the way around and the depth
+            // varies to keep it. Empty for a solid island.
+            size_t band_samples = 0, band_loops = 0, band_rejected = 0, band_pruned = 0;
+            ExPolygons anchor_ribbon = Serpentine::wall_anchor_band(serp_island, sp_params.bead_width,
+                                                                    sp_params.overlap, &band_samples, &band_loops,
+                                                                    &band_rejected, &band_pruned);
+            if (!anchor_ribbon.empty())
+                band_params.fill_core = union_ex(band_params.fill_core, anchor_ribbon);
+            // An empty band on a holed island (all holes rejected, or the wall pinched to nothing) means
+            // the fill_core floor was lost; flag it. A solid island legitimately has no band, so the
+            // warning is gated on holes to keep the tripwire meaningful. pruned counts the hole-to-hole
+            // projections the bounding-box test skipped (0 on a 1-2 bore part; large on a many-bore part).
+            dbg_log(Slic3r::DBG_SERPENTINE, sp_params.print_z, "SRP",
+                    "wall band: samples=%zu loops=%zu rejected=%zu pruned=%zu%s", band_samples, band_loops,
+                    band_rejected, band_pruned,
+                    (!serp_island.holes.empty() && anchor_ribbon.empty()) ? " (EMPTY - no floor)" : "");
+            // generate() returns the interior band bounded by the smooth tooth-tip line; the holed
+            // hand-off uses it so Athena never sees the inter-tooth gaps.
+            ExPolygons serp_interior;
+            if (band_params.fill_core.empty() && serp_island.holes.empty())
+            {
+                // Solid island shallower than the requested depth everywhere: no interior
+                // beyond the depth to hand to Athena, and depth mode disables the center ring,
+                // so the teeth fall back to the scalar clamp, converge, collide and fragment at
+                // the center. Run full serpentine instead; its center ring / hub weave the
+                // converging tips into the continuous tour. A small pin, or a depth set deeper
+                // than the part, hits this. A holed island whose depth lines have crossed also
+                // empties fill_core, but it must stay in depth mode (below): the rc/2 cap holds
+                // each tooth at half the near wall and the Athena wall bonds both tooth sets.
+                dbg_log(Slic3r::DBG_SERPENTINE, sp_params.print_z, "SRP",
+                        "serpentine island shallower than the %.2fmm depth; running full mode (no depth limit)",
+                        unscale<double>(serp_depth));
+                if (Serpentine::generate(serp_island, sp_params, out_loops))
+                {
+                    tag_serpentine_overhangs(out_loops.entities.back());
+                    return;
+                }
+                // generate() failed: fall through to Athena below.
+            }
+            else if (Serpentine::generate(serp_island, band_params, out_loops, &serp_interior))
+            {
+                tag_serpentine_overhangs(out_loops.entities.back());
+                // generate() appended exactly one no_sort collection for this island;
+                // hold it so the Athena wall can be prepended into it below.
+                serp_band_coll = out_loops.entities.empty()
+                                     ? nullptr
+                                     : dynamic_cast<ExtrusionEntityCollection *>(out_loops.entities.back());
+                // The smooth wall takes the serpentine bead's width and overlap, not
+                // the external perimeter's: override the external flow/width/spacing
+                // that drive wall-0 (the only wall here). The spacing is the
+                // serpentine bead spacing (width - overlap), so the wall overlaps its
+                // serpentine neighbour by exactly the configured serpentine overlap.
+                serp_wall_flow = sp_params.flow;
+                ext_perimeter_width = sp_params.bead_width;
+                ext_perimeter_spacing = std::max<coord_t>(sp_params.bead_width - sp_params.overlap, coord_t(1));
+                // Build the region Athena lays its wall + infill on, from the interior the
+                // teeth did not cover (bounded by the tooth cap line).
+                Polygons cov;
+                if (serp_band_coll != nullptr)
+                    serp_band_coll->polygons_covered_by_width(cov, float(SCALED_EPSILON));
+                ExPolygons core = diff_ex(serp_island, cov);
+                ExPolygons opened;
+                if (!serp_island.holes.empty())
+                {
+                    // Holed island (annulus, e.g. a nut): open the full core for a smooth gap-free
+                    // centre, then intersect with fill_core (the mid-wall conform band) so the
+                    // inter-tooth fingers (all nearer the boundary than the band) are clipped out. The
+                    // open runs on the wide core so it never pinches the centre apart; the band only
+                    // masks the fingers, it never bounds the smooth centre.
+                    ExPolygons core_open = opening_ex(core, 0.5f * float(sp_params.bead_width));
+                    // Mask the inter-tooth fingers with fill_core (the mid-wall conform region the
+                    // teeth stopped on), not the tip-disc serp_interior: on an eccentric wall the
+                    // contour and bore tip discs cross and their difference slivers, fragmenting the
+                    // bead. fill_core is continuous by construction (the mid-wall ribbon floors it) and
+                    // already sits mid-wall, so the masked seat comes back one continuous loop.
+                    opened = intersection_ex(core_open, band_params.fill_core);
+                    if (opened.empty() && !core_open.empty())
+                    {
+                        // fill_core masked the interior away (a degenerate core) while the opened core
+                        // still holds a real central region. Seat the wall on the opened core rather
+                        // than leave an empty interior, which prints as a void; logged.
+                        opened = std::move(core_open);
+                        dbg_log(Slic3r::DBG_SERPENTINE, sp_params.print_z, "SRP",
+                                "serpentine anchor mask empty; interior recovered from the opened core");
+                    }
+                    // Drop solid specks. Where the knurl floors a tooth the band mask pinches off a
+                    // small island (a finger-mouth or floored-tooth bit); on a bottom or solid layer
+                    // each would print as a stray solid patch. Keep only the anchor band (the one
+                    // large loop the mid-wall ribbon floors continuous) and let areas below min_speck
+                    // pass through unfilled. min_speck is the knob; it is tiny against the band, so
+                    // the band itself is never dropped.
+                    const double min_speck = 8.0 * double(sp_params.bead_width) * double(sp_params.bead_width);
+                    size_t n_specks = 0;
+                    if (opened.size() > 1)
+                    {
+                        // Keep the largest loop unconditionally so the drop can never hollow a band that
+                        // fragmented (loops>1); drop only the genuine sub-min_speck pockets around it.
+                        size_t best = 0;
+                        for (size_t i = 1; i < opened.size(); ++i)
+                            if (opened[i].area() > opened[best].area())
+                                best = i;
+                        ExPolygons keep;
+                        keep.reserve(opened.size());
+                        for (size_t i = 0; i < opened.size(); ++i)
+                            if (i == best || opened[i].area() >= min_speck)
+                                keep.push_back(std::move(opened[i]));
+                            else
+                                ++n_specks;
+                        opened = std::move(keep);
+                    }
+                    if (opened.empty())
+                        dbg_log(Slic3r::DBG_SERPENTINE, sp_params.print_z, "SRP",
+                                "serpentine holed interior empty (teeth met or band collapsed); no Athena wall");
+                    dbg_log(Slic3r::DBG_SERPENTINE, sp_params.print_z, "SRP",
+                            "anchor seat: %zu loop(s) specks_dropped=%zu%s", opened.size(), n_specks,
+                            anchor_ribbon.empty() ? "" : " (anchor band)");
+                }
+                else
+                {
+                    // Solid island: one tooth set, but core grows a pitch-wide finger out to
+                    // every shallow ruler slit (a level-1 tooth a fraction of the depth) that the
+                    // wall must not follow out to the surface. Separate by depth, not width, since a
+                    // width-based open cannot tell them apart (fingers and the deep-cap gaps are both
+                    // ~pitch wide): keep only core within cap_band of the depth line. A light 0.5*bw
+                    // open then clears slivers without bridging the deep-cap gaps, so the wall conforms
+                    // and bonds each convergent deep cap.
+                    const float cap_band = 1.0f * float(sp_params.bead_width);
+                    ExPolygons deep = intersection_ex(core, offset_ex(serp_island, -(float(serp_depth) - cap_band)));
+                    opened = opening_ex(deep, 0.5f * float(sp_params.bead_width));
+                    if (opened.empty() && !core.empty())
+                    {
+                        // Deep band collapsed (over-deep for this solid): fall back to the blanket
+                        // 1.5*bw open (erases the fingers; no per-cap conform, but gap-free).
+                        opened = opening_ex(core, 1.5f * float(sp_params.bead_width));
+                        dbg_log(Slic3r::DBG_SERPENTINE, sp_params.print_z, "SRP",
+                                "serpentine deep band too thin; wall uses the blanket smooth this island");
+                    }
+                }
+                // Athena seats wall-0 a half serpentine-spacing inside last. The wall
+                // always bonds the serpentine skin to the interior. Positive overlap is
+                // honored exactly: grow last out by half the overlap so the wall lands one
+                // full serpentine spacing from the caps, overlapping them by exactly the
+                // overlap. In spread mode (negative overlap) the spacing inflates by the
+                // gap, so the same overlap/2 grow would seat the wall one inflated spacing
+                // out and leave the skin gapped from the interior by |overlap|. The
+                // requested spread belongs in the infill behind the wall, not at the skin,
+                // so the wall bonds at a small positive floor: grow = wall_bond - overlap/2
+                // places the wall wall_bond inside the caps regardless of the spacing.
+                const coord_t wall_bond = sp_params.overlap >= 0 ? sp_params.overlap
+                                                                 : coord_t(0.15 * sp_params.bead_width);
+                const float grow = float(wall_bond) - 0.5f * float(sp_params.overlap);
+                last = offset_ex(opened.empty() && serp_island.holes.empty() ? core : opened, grow);
+                // Solid-island fallback: an empty interior here would print as a void. For a holed
+                // island an empty interior means the teeth met at the midplane (nothing to fill), and
+                // falling back to the full core would re-admit the gaps the tip line excluded.
+                if (serp_island.holes.empty() && last.empty() && !core.empty())
+                    last = core;
+                last_p = to_polygons(last);
+                loop_number = 0;          // exactly one Athena wall behind the band
+                serp_band_handoff = true; // gate TopSurfaces / interlocking below
+                serp_fill_clip = 0;       // the opened core already bounds the fill at the caps
+            }
+            // generate() failed: fall through with the original last_p/loop_number, the
+            // normal full-perimeter fallback.
+        }
+        else if (vis.empty())
+        {
+            // Fully covered (or solid surfaces off): serpentine everything.
+            if (Serpentine::generate(serp_island, sp_params, out_loops))
+            {
+                tag_serpentine_overhangs(out_loops.entities.back());
+                return;
+            }
+        }
+        else
+        {
+            // The boundary keeps the zigzag band at its shortest depth, so
+            // the side pattern stays continuous and the band caps give the
+            // fill a clean edge to bond into. Behind the band, the visible
+            // portions (grown by the standard anchoring margin) become fill
+            // surfaces; the covered remainder continues as serpentine
+            // sub-islands.
+            Serpentine::Params band_params = sp_params;
+            // One bead of tooth depth: the minimum that keeps the band a
+            // continuous zigzag (emission cutoff 0.5 bw, crowd floor 0.6 bw),
+            // and shallow enough that corner teeth floored by the crossing
+            // neighbor still meet the fill corner within the bond.
+            band_params.band_clamp = coord_t(1.0 * sp_params.bead_width);
+            // The fill must always bond into the band caps, even in spread
+            // mode (negative overlap): the roof anchors to the band, the
+            // requested gaps live inside the pattern only.
+            const coord_t fill_bond = std::max(sp_params.overlap, coord_t(0.15 * sp_params.bead_width));
+            // A continuous inner perimeter sits one bead inside the band caps,
+            // bonded to them at a fixed 10.73% overlap (independent of the user's
+            // serpentine overlap, so the structural weld is always solid). It is
+            // emitted first, so it anchors to the layer below far better than the
+            // discrete teeth, and gives the band caps (outside) and the solid
+            // fill (inside) one continuous edge to fuse to all the way around,
+            // which rectilinear solid fill cannot. The fill then starts one bead
+            // further in, inside this perimeter.
+            const coord_t perim_depth = band_params.band_clamp + sp_params.bead_width - serp_inner_bond;
+            const float inset = float(perim_depth + sp_params.bead_width / 2 - fill_bond);
+            ExPolygons interior = offset_ex(serp_island, -inset);
+            if (interior.empty())
+            {
+                // Too narrow to host band + perimeter + fill: the full pattern
+                // covers such an island better than a hollow band would.
+                if (Serpentine::generate(serp_island, sp_params, out_loops))
+                {
+                    tag_serpentine_overhangs(out_loops.entities.back());
+                    return;
+                }
+            }
+            else if (Serpentine::generate(serp_island, band_params, out_loops))
+            {
+                tag_serpentine_overhangs(out_loops.entities.back());
+                // Inner perimeter only where the surface is genuinely visible.
+                prepend_inner_perimeter(intersection_ex(vis, offset_ex(serp_island, -float(perim_depth))));
+                {
+                    // The solid zone is the visible area inside the perimeter;
+                    // every part of it types solid downstream. It overlaps the
+                    // inner perimeter by the standard infill/perimeters overlap
+                    // (not the serpentine bond), so the solid face bonds to the
+                    // smooth bead exactly like ordinary fill bonds to a perimeter.
+                    // The maze claims the covered remainder.
+                    const coord_t infill_ov = coord_t(
+                        scale_(params.config.get_abs_value("infill_overlap", unscale<double>(ext_perimeter_spacing))));
+                    ExPolygons solid_zone = intersection_ex(
+                        vis, offset_ex(serp_island, -float(perim_depth + sp_params.bead_width / 2 - infill_ov)));
+                    ExPolygons maze_interior = offset_ex(serp_island, -(inset + 0.5f * float(sp_params.bead_width)));
+                    ExPolygons maze_zone = opening_ex(
+                        diff_ex(maze_interior, offset_ex(solid_zone, float(sp_params.bead_width / 2 - fill_bond))),
+                        float(sp_params.bead_width));
+                    for (const ExPolygon &sub : maze_zone)
+                        if (!Serpentine::generate(sub, sp_params, out_loops))
+                            out_fill_expolygons.push_back(sub); // too small or hostile: plain fill takes it
+                        else
+                            tag_serpentine_overhangs(out_loops.entities.back());
+                    append(out_fill_expolygons, std::move(solid_zone));
+                    return;
+                }
+            }
+        }
+        // Fall through to Athena on failure.
+    }
+
     Athena::WallToolPaths wall_tool_paths(last_p, ext_perimeter_spacing, perimeter_spacing, coord_t(loop_number + 1), 0,
                                           params.layer_height, params.object_config, params.print_config,
                                           ext_perimeter_width, perimeter_width, ext_perimeter_spacing2,
@@ -2334,10 +3018,8 @@ il_retry_with_full_perimeters:
     // Arachne treats widths as "suggestions" and recalculates them. We enforce exact user values.
     // This fixes the core issue where extrusion widths vary from user settings (e.g., 0.5mm -> 0.499mm)
     preFlight::PreciseWalls::enforce_exact_widths(perimeters, ext_perimeter_width, perimeter_width, tw_snap);
-    // After Athena's spacing/width separation refactoring, skeletal trapezoidation receives
-    // both spacing AND width values separately. The inner_contour calculation already accounts
-    // for the actual bead widths, so no adjustment is needed (unlike the old system where only
-    // spacing was passed and widths were applied later, requiring a compensating offset).
+    // Skeletal trapezoidation receives spacing and width separately, and inner_contour already
+    // accounts for the actual bead widths, so no compensating offset is needed here.
     ExPolygons infill_contour = union_ex(wall_tool_paths.getInnerContour());
     // Athena's skeleton decomposition generates high-vertex-count inner contours.
     // Simplify early so all downstream Clipper2 operations run on reduced geometry.
@@ -2350,7 +3032,8 @@ il_retry_with_full_perimeters:
 
     // Check if there are some remaining perimeters to generate (the number of perimeters
     // is greater than one together with enabled the single perimeter on top surface feature).
-    if (inner_loop_number >= 0)
+    // Skipped under the serpentine band hand-off: the wall count is fixed at one there.
+    if (inner_loop_number >= 0 && !serp_band_handoff)
     {
         assert(upper_slices != nullptr);
 
@@ -2458,13 +3141,398 @@ il_retry_with_full_perimeters:
             return true;
         }());
 
+    // ===== Per-region "Perimeters while Interlocking": footprint + additive suppressed-region walls =====
+    // The footprint (where interlocking lands vs where it is suppressed) is computed ONCE here and reused
+    // by the interlocking block below, so the wall count and the shell placement share one region and
+    // cannot disagree. In suppressed sub-regions the extra (full - reduced) walls are regenerated as clean
+    // closed Athena loops; the buried core keeps the reduced count plus its interlocking shells.
+    ExPolygons il_regions, non_il_regions, bridge_anchor_zone, il_suppressed_core, il_wall_footprint;
+    // The reduced-count inner contour, saved so the seam-knit closing below can be re-bounded to it
+    // (the closing must never bridge a real interior hole or overrun the external wall).
+    ExPolygons il_reduced_inner;
+    bool il_have_region = false;
+
+    // Inward depth the interlocking shell stack consumes (outline edge -> innermost shell -> inner edge),
+    // mirroring the interlocking block's total_depth. A region narrower than this on both sides has no room
+    // for an infill core: the shells cram into it and shatter the regular perimeters (the narrow-arm void).
+    // The footprint drops such regions so they keep full perimeters instead of being interlocked.
+    coord_t il_core_depth = 0;
+    {
+        const coord_t il_base_w = perimeter_width;
+        const coord_t il_main_w = coord_t(perimeter_width * std::sqrt(2.0));
+        constexpr double IL_BOUNDARY_FLOW = (3.0 + 2.0 * 1.41421356) / 4.0;
+        const coord_t il_boundary_w = coord_t(perimeter_width * std::sqrt(IL_BOUNDARY_FLOW));
+        const coord_t il_boundary_shift = (il_boundary_w - il_base_w) / 2;
+        const coord_t il_overlap_reduction = preFlight::PreciseWalls::calculate_perimeter_spacing(
+            params.perimeter_flow, params.config.interlock_perimeter_overlap);
+        const coord_t il_overlap_amount = perimeter_width - il_overlap_reduction;
+        const coord_t il_adjacent_d = (il_base_w + il_main_w) / 2 - il_overlap_amount;
+        const coord_t il_gapped_d = 2 * il_adjacent_d;
+        const int il_num_shells = params.config.interlock_perimeter_count.value;
+        il_core_depth = il_base_w / 2; // ic_bead_width_0/2
+        if (il_num_shells >= 2)
+            il_core_depth += il_adjacent_d; // ic_external
+        if (il_num_shells >= 3)
+            il_core_depth += il_gapped_d * (il_num_shells - 3) + (il_gapped_d - il_boundary_shift); // +ic_innermost
+        il_core_depth += perimeter_width / 2;
+    }
+
+    // pwi_active: true only on the PWI (wall-reduced) path. The visibility split, bridge subtraction and
+    // 4.47 opening run on every interlocking island (HEAD behavior). The reclassifications and the
+    // core/sliver filters that follow are PWI-only, so with the feature off (interlock_regular_perimeters=0)
+    // the footprint is byte-identical to HEAD.
+    auto il_compute_footprint = [&](const ExPolygons &contour, bool pwi_active)
+    {
+        il_regions.clear();
+        non_il_regions.clear();
+        bridge_anchor_zone.clear();
+        ExPolygons visibility_zone = visible_within_solid_range(params.layer, contour,
+                                                                params.config.interlock_solid_layers_top.value,
+                                                                params.config.interlock_solid_layers_bottom.value);
+        if (!visibility_zone.empty())
+        {
+            visibility_zone = union_ex(visibility_zone);
+            il_regions = diff_ex(contour, visibility_zone);
+            non_il_regions = intersection_ex(contour, visibility_zone);
+        }
+        else
+            il_regions = contour;
+        if (lower_slices != nullptr && !il_regions.empty())
+        {
+            ExPolygons overhang = diff_ex(contour, *lower_slices);
+            if (!overhang.empty())
+            {
+                coord_t anchor_depth = (il_regular_override > 0 ? coord_t(il_regular_override) * perimeter_width
+                                                                : coord_t(loop_number + 1) * perimeter_width) +
+                                       ext_perimeter_width / 2;
+                ExPolygons overhang_grown = offset_ex(overhang, anchor_depth);
+                ExPolygons lower_in_infill = intersection_ex(contour, *lower_slices);
+                bridge_anchor_zone = intersection_ex(overhang_grown, lower_in_infill);
+                if (!bridge_anchor_zone.empty())
+                {
+                    il_regions = diff_ex(il_regions, bridge_anchor_zone);
+                    // PWI: fold the anchor zone into the suppressed set so the il_regions.empty() early exit
+                    // still covers it with full walls + solid fill (otherwise it is in neither region -> void).
+                    if (pwi_active)
+                    {
+                        append(non_il_regions, bridge_anchor_zone);
+                        non_il_regions = union_ex(non_il_regions);
+                    }
+                }
+            }
+        }
+        const coord_t opening = coord_t(perimeter_width * 4.47) / 2;
+        if (opening > 0 && !il_regions.empty())
+        {
+            const ExPolygons before_open = il_regions;
+            il_regions = offset_ex(offset_ex(il_regions, -opening), opening);
+            // Thin buried features the opening removes are too narrow for interlocking - reclassify them as
+            // suppressed (full walls) instead of dropping them, which would leave the area void.
+            const ExPolygons opening_removed = diff_ex(before_open, il_regions);
+            if (pwi_active && !opening_removed.empty())
+            {
+                append(non_il_regions, opening_removed);
+                non_il_regions = union_ex(non_il_regions);
+            }
+        }
+
+        // Core-existence filter (per connected component): interlocking only where the full shell pattern
+        // leaves room for a FILLABLE infill core. The shells consume il_core_depth inward from the
+        // boundary; a component must also leave a core at least a couple beads wide, or the shells cram
+        // together and shatter the regular perimeters (the narrow-arm/spoke voids). Components that fail
+        // keep full perimeters (moved to non_il); wide regions with a real core are kept whole.
+        const coord_t il_core_min = 2 * perimeter_width; // a fillable core, not a sliver
+        const coord_t il_core_req = il_core_depth + il_core_min;
+        if (pwi_active && il_core_req > 0 && !il_regions.empty())
+        {
+            ExPolygons wide, narrow;
+            for (const ExPolygon &comp : il_regions)
+            {
+                if (offset_ex(ExPolygons{comp}, -float(il_core_req)).empty())
+                    narrow.push_back(comp);
+                else
+                    wide.push_back(comp);
+            }
+            if (!narrow.empty())
+            {
+                il_regions = std::move(wide);
+                append(non_il_regions, narrow);
+                non_il_regions = union_ex(non_il_regions);
+            }
+        }
+
+        // Drop thin taper "slope-ring" slivers from non_il (the perimeter<->interlocking seam, not real
+        // solid faces) so the additive block never jams an extra wall into them. They are intentionally NOT
+        // unioned into il_regions - that fragments il_regions into many holes and breaks the inner-contour
+        // offset. Instead the interlocking shells generate over the WHOLE reduced contour and flow across
+        // the slivers (no jammed wall, no gap). A bead-or-wider face is a genuine solid surface and stays
+        // suppressed. Average width (2*area / boundary length) is offset-free, unlike a morphological
+        // opening which fails to collapse a thin closed ring. Only when interlocking actually exists
+        // (il_regions non-empty): with no interlocking there is no seam, and a thin FEATURE region would
+        // otherwise be wrongly dropped here instead of kept for its full walls.
+        if (pwi_active && !il_regions.empty() && !non_il_regions.empty())
+        {
+            ExPolygons genuine;
+            for (const ExPolygon &face : non_il_regions)
+            {
+                double blen = face.contour.length();
+                for (const Polygon &h : face.holes)
+                    blen += h.length();
+                if (blen > 0.0 && 2.0 * std::abs(face.area()) / blen >= double(perimeter_width))
+                    genuine.push_back(face);
+            }
+            non_il_regions = std::move(genuine);
+        }
+    };
+
+    // Additive per-region walls. The base stack is already the REDUCED count (il_reduce_walls set
+    // loop_number = reduced - 1 before wall generation, so perimeters/infill_contour are byte-identical to
+    // plain perimeters=<reduced>). The buried core keeps the reduced stack plus its interlocking shells; the
+    // suppressed sub-regions get the extra (full - reduced) walls back as CLOSED concentric loops generated by
+    // Athena directly on the suppressed region (reduced_inner INTERSECT non_il) - so they fill that region
+    // with the PWI-off nesting and are inherently bounded by the il-interface (no overlap into the buried core).
+    if (il_reduce_walls && !perimeters.empty() && !infill_contour.empty())
+    {
+        const size_t reduced_count = size_t(il_regular_override);
+        const size_t full_count = size_t(params.config.perimeters.value);
+
+        // The reduced inner contour IS infill_contour here (getInnerContour of the reduced stack). Saved at
+        // function scope so the seam-knit closing can re-bound to it.
+        il_reduced_inner = infill_contour;
+
+        il_compute_footprint(il_reduced_inner, /*pwi_active=*/true);
+        if (full_count > reduced_count)
+        {
+            if (!non_il_regions.empty())
+            {
+                // Feed the SUPPRESSED region itself (reduced_inner INTERSECT non_il) - the correct boundary -
+                // through Athena concentric. The (full - reduced) extra walls nest inward from the reduced
+                // inner edge as CLOSED loops, filling the suppressed flanks with the PWI-off nesting. Because
+                // they are generated INSIDE non_il they are inherently bounded by the il-interface: they fill
+                // up to the interlocking and STOP, never riding over the buried core. inset_idx is bumped by
+                // reduced_count so the extra loops index contiguously after the base reduced stack.
+                const ExPolygons extra_outline_ex = intersection_ex(il_reduced_inner, non_il_regions);
+                // Per-PWI-layer geometry dump (debug only) - load the regions/loops in shapely to inspect
+                // the band decision on any part.
+                const bool wkt_dump = pg_dbg_active();
+                if (wkt_dump)
+                {
+                    dbg_wkt_expolys(dbg_z, "last", last);
+                    dbg_wkt_expolys(dbg_z, "non_il", non_il_regions);
+                    dbg_wkt_expolys(dbg_z, "il_regions", il_regions);
+                    dbg_wkt_expolys(dbg_z, "extra_outline", extra_outline_ex);
+                }
+                int extra_loops = 0, extra_dropped = 0;
+                ExPolygons extra_inner, kept_footprint;
+                if (!extra_outline_ex.empty())
+                {
+                    const Polygons extra_outline = to_polygons(extra_outline_ex);
+                    Athena::WallToolPaths extra_wall_tool_paths(extra_outline, perimeter_spacing, perimeter_spacing,
+                                                                coord_t(full_count - reduced_count), 0,
+                                                                params.layer_height, params.object_config,
+                                                                params.print_config, perimeter_width, perimeter_width,
+                                                                0, perimeter_spacing, 0, params.layer_id,
+                                                                min_bead_width_factor, tw_snap, max_perimeter_width);
+                    Athena::Perimeters extra_perimeters = extra_wall_tool_paths.getToolPaths();
+                    preFlight::PreciseWalls::enforce_exact_widths(extra_perimeters, ext_perimeter_width,
+                                                                  perimeter_width, tw_snap);
+                    extra_inner = union_ex(extra_wall_tool_paths.getInnerContour());
+
+                    // Legitimacy by CONNECTIVITY (the user's rule, no magic depth): an additive perimeter is
+                    // legitimate only if it chains back to a real island boundary through other perimeters.
+                    // Build the merged wall band - every base + additive centerline fattened just past half the
+                    // nesting pitch, so adjacent nested loops touch and form one connected component, while a
+                    // ring stranded around a buried core (separated by an infill gap) lands in its OWN
+                    // component. Keep additive loops whose component reaches the base (already-anchored) stack;
+                    // drop the rest. The only quantity is perimeter_spacing (a setting) - no depth threshold,
+                    // so it is invariant to nozzle / line width / perimeter count. inset_idx is bumped so kept
+                    // loops index contiguously after the base reduced stack. Odd thin-wall lines are always kept.
+                    const float merge_r = float(perimeter_spacing) * 0.75f;
+                    auto centerline = [](const Athena::ExtrusionLine &ln)
+                    {
+                        Polyline pl;
+                        for (const Athena::ExtrusionJunction &j : ln.junctions)
+                            pl.append(j.p);
+                        return pl;
+                    };
+                    Polylines base_cl; // the already-anchored real perimeters (current `perimeters` = base stack)
+                    for (const Athena::VariableWidthLines &lvl : perimeters)
+                        for (const Athena::ExtrusionLine &ln : lvl)
+                            if (ln.junctions.size() >= 2)
+                                base_cl.push_back(centerline(ln));
+                    Polylines all_cl = base_cl;
+                    for (Athena::VariableWidthLines &lvl : extra_perimeters)
+                        for (Athena::ExtrusionLine &ln : lvl)
+                        {
+                            ln.inset_idx += reduced_count;
+                            if (ln.junctions.size() >= 2)
+                                all_cl.push_back(centerline(ln));
+                        }
+                    const ExPolygons full_band = base_cl.empty() ? ExPolygons{} : union_ex(offset(all_cl, merge_r));
+                    const ExPolygons base_fp = base_cl.empty() ? ExPolygons{} : union_ex(offset(base_cl, merge_r));
+                    ExPolygons anchored_band; // the wall-band components that reach the anchored base stack
+                    for (const ExPolygon &comp : full_band)
+                        if (!intersection_ex(ExPolygons{comp}, base_fp).empty())
+                            anchored_band.push_back(comp);
+                    auto pt_anchored = [&anchored_band](const Point &p)
+                    {
+                        for (const ExPolygon &ep : anchored_band)
+                            if (ep.contains(p))
+                                return true;
+                        return false;
+                    };
+                    for (Athena::VariableWidthLines &level : extra_perimeters)
+                    {
+                        Athena::VariableWidthLines kept;
+                        for (Athena::ExtrusionLine &line : level)
+                        {
+                            if (line.junctions.empty())
+                                continue;
+                            bool anchored = line.is_odd; // odd thin-wall centerlines are always legit
+                            if (!anchored)
+                            {
+                                size_t n_in = 0;
+                                for (const Athena::ExtrusionJunction &j : line.junctions)
+                                    if (pt_anchored(j.p))
+                                        ++n_in;
+                                anchored = n_in * 2 >= line.junctions.size(); // majority chained to the boundary
+                            }
+                            if (wkt_dump)
+                                dbg_wkt_polyline(dbg_z, anchored ? "loop" : "band", line.inset_idx, line.is_odd,
+                                                 line.junctions);
+                            if (!anchored)
+                            {
+                                ++extra_dropped;
+                                continue;
+                            }
+                            ++extra_loops;
+                            kept.push_back(std::move(line));
+                        }
+                        level = std::move(kept);
+                    }
+                    Athena::WallToolPaths::removeEmptyToolPaths(extra_perimeters);
+
+                    // Footprint of the KEPT loops only (centerlines fattened by half a bead), so the dropped
+                    // band area is NOT walled and falls back to fill.
+                    Polylines kept_centerlines;
+                    for (const Athena::VariableWidthLines &level : extra_perimeters)
+                        for (const Athena::ExtrusionLine &line : level)
+                        {
+                            if (line.junctions.size() < 2)
+                                continue;
+                            Polyline pl;
+                            for (const Athena::ExtrusionJunction &j : line.junctions)
+                                pl.append(j.p);
+                            kept_centerlines.push_back(std::move(pl));
+                        }
+                    if (!kept_centerlines.empty())
+                        kept_footprint = union_ex(offset(kept_centerlines, float(perimeter_width) / 2.f));
+
+                    perimeters.insert(perimeters.end(), extra_perimeters.begin(), extra_perimeters.end());
+                    loop_number = int(perimeters.size()) - 1;
+                }
+
+                // Suppressed fill = the suppressed region MINUS the kept additive walls. The dropped band area
+                // returns to fill, so interlocking bonds directly to fill there. "Perimeters win": the final
+                // fill rebuild re-clips off il_wall_footprint after the seam closing. infill_contour stays the
+                // WHOLE reduced inner contour so the interlocking shells run over the whole buried area.
+                {
+                    const ExPolygons supp = intersection_ex(il_reduced_inner, non_il_regions);
+                    if (extra_outline_ex.empty())
+                        il_suppressed_core = supp; // no extra walls: the whole suppressed region is fill
+                    else if (extra_dropped > 0)
+                    {
+                        // A band was removed: bound the fill by the KEPT walls so the dropped band area returns
+                        // to fill. The constant-offset footprint is acceptable here - the vacated area is a wide
+                        // bridge annulus, re-clipped and overlap-padded downstream.
+                        il_suppressed_core = kept_footprint.empty() ? supp : diff_ex(supp, kept_footprint);
+                        il_wall_footprint = kept_footprint;
+                    }
+                    else
+                    {
+                        // Nothing dropped (the common case, incl. every complex flank): use Athena's precise
+                        // variable-width inner contour so the fill is pristine - identical to plain concentric.
+                        il_suppressed_core = intersection_ex(extra_inner, non_il_regions);
+                        il_wall_footprint = diff_ex(supp, il_suppressed_core);
+                    }
+                }
+                if (wkt_dump)
+                {
+                    dbg_wkt_expolys(dbg_z, "suppressed_core", il_suppressed_core);
+                    dbg_wkt_expolys(dbg_z, "wall_footprint", il_wall_footprint);
+                }
+                if (pg_dbg_active())
+                {
+                    auto a = [](const ExPolygons &e)
+                    {
+                        double s = 0;
+                        for (const ExPolygon &p : e)
+                            s += std::abs(p.area()) * 1e-12;
+                        return s;
+                    };
+                    BoundingBox nb = get_extents(non_il_regions);
+                    dbg_log(Slic3r::DBG_INTERLOCK, dbg_z, "ILADD",
+                            "layer=%d full=%zu reduced=%zu loops=%d band_dropped=%d "
+                            "il_reg=%.2f(%zu) non_il=%.2f(%zu) non_il_bbox=(%.2f,%.2f)-(%.2f,%.2f)",
+                            params.layer_id, full_count, reduced_count, extra_loops, extra_dropped, a(il_regions),
+                            il_regions.size(), a(non_il_regions), non_il_regions.size(), unscaled<double>(nb.min.x()),
+                            unscaled<double>(nb.min.y()), unscaled<double>(nb.max.x()), unscaled<double>(nb.max.y()));
+                }
+            }
+            // il_have_region drives the buried-core fill rebuild + seam closing below even on a fully buried
+            // island (no suppressed region): there il_suppressed_core / il_wall_footprint stay empty and the
+            // walls stay at the reduced count, matching the fully-buried (roller) path.
+            il_have_region = true;
+        }
+    }
+
     Athena::PerimeterOrder::PerimeterExtrusions ordered_extrusions =
         Athena::PerimeterOrder::ordered_perimeter_extrusions(perimeters, params.config.external_perimeters_first);
 
-    if (ExtrusionEntityCollection extrusion_coll = traverse_extrusions(params, lower_slices_polygons_cache,
+    // Render the serpentine band's wall-0 with the serpentine flow (its width),
+    // not the external perimeter flow; non-serpentine islands use params unchanged.
+    // NOTE: the derived Parameters::ext_mm3_per_mm is NOT recomputed here, so it is
+    // stale on this copy. It is currently dead (per-path mm3 comes from the Flow at
+    // each construction site), but anyone wiring ext_mm3_per_mm into a flow calc must
+    // recompute it from serp_wall_flow.
+    Parameters wall_params = params;
+    if (serp_band_handoff)
+        wall_params.ext_perimeter_flow = serp_wall_flow;
+    if (ExtrusionEntityCollection extrusion_coll = traverse_extrusions(wall_params, lower_slices_polygons_cache,
                                                                        lower_slices_raw, ordered_extrusions);
         !extrusion_coll.empty())
-        out_loops.append(extrusion_coll);
+    {
+        if (serp_band_handoff && serp_band_coll != nullptr)
+        {
+            // Limit-depth hand-off: the inner Athena wall attaches to the
+            // serpentine teeth, so it prints as the Serpentine feature type
+            // (overhang spans Athena already detected become Serp. Overhang). Then
+            // splice it to the front of the band's no_sort collection so it prints
+            // first; clearing the source vector transfers ownership (no double free).
+            auto reclass = [](ExtrusionPaths &paths)
+            {
+                for (ExtrusionPath &p : paths)
+                {
+                    const ExtrusionRole r = p.role();
+                    if (r.is_perimeter() && !r.is_serpentine())
+                        p.attributes().role = r.is_bridge() ? ExtrusionRole::SerpentineOverhang
+                                                            : ExtrusionRole::Serpentine;
+                }
+            };
+            for (ExtrusionEntity *e : extrusion_coll.entities)
+            {
+                if (auto *mp = dynamic_cast<ExtrusionMultiPath *>(e))
+                    reclass(mp->paths);
+                else if (auto *lp = dynamic_cast<ExtrusionLoop *>(e))
+                    reclass(lp->paths);
+            }
+            serp_band_coll->entities.insert(serp_band_coll->entities.begin(), extrusion_coll.entities.begin(),
+                                            extrusion_coll.entities.end());
+            extrusion_coll.entities.clear();
+        }
+        else
+            out_loops.append(extrusion_coll);
+    }
 
     // Note: Gap fill is intentionally not implemented for Athena (matches Arachne behavior)
 
@@ -2478,120 +3546,34 @@ il_retry_with_full_perimeters:
     // remains. The Visibility API excludes areas near top/bottom surfaces.
     // Skip on retry: we're here because IL failed with fewer perimeters; with more perimeters
     // the infill contour is even smaller, so IL would fail again. Go straight to infill.
-    if (params.config.interlock_perimeters_enabled && !infill_contour.empty() && params.layer != nullptr &&
-        !il_retry_active)
+    // Serpentine depth mode reaches here with one Athena wall behind the band and the
+    // inner core as infill_contour, so interlocking runs inside it. Full serpentine mode
+    // returns above (never reaches here), so interlocking is ignored there as intended.
+    if (params.config.interlock_perimeters_enabled && !infill_contour.empty() && params.layer != nullptr)
     {
         const int num_interlocking_shells = params.config.interlock_perimeter_count.value;
         if (num_interlocking_shells > 0)
         {
-            // Visibility check: exclude areas near visible surfaces
-            const int margin_top = params.config.interlock_solid_layers_top.value;
-            const int margin_bottom = params.config.interlock_solid_layers_bottom.value;
-
-            // Polygon-level visibility: walk layers upward/downward from the current layer.
-            // At each step, areas of infill_contour that lose coverage become the visibility zone.
-            // Subtract the visibility zone from infill_contour to get il_regions.
-            // Interlocking naturally reduces its area near visible surfaces instead of
-            // disappearing entirely.
-            ExPolygons il_regions;
-            ExPolygons non_il_regions;
-            {
-                const auto &all_layers = params.layer->object()->layers();
-                const size_t current_idx = params.layer->id();
-
-                ExPolygons visibility_zone;
-
-                // Top: walk upward, track what parts of infill_contour lose coverage
-                if (margin_top > 0)
-                {
-                    ExPolygons covered = infill_contour;
-                    for (int k = 1; k <= margin_top && !covered.empty() && (current_idx + k) < all_layers.size(); ++k)
-                    {
-                        ExPolygons still_covered = intersection_ex(covered, all_layers[current_idx + k]->lslices);
-                        ExPolygons newly_exposed = diff_ex(covered, all_layers[current_idx + k]->lslices);
-                        append(visibility_zone, newly_exposed);
-                        covered = std::move(still_covered);
-                    }
-                    // Ran out of layers = top of object, everything remaining is visible
-                    if (!covered.empty() && (current_idx + margin_top) >= all_layers.size())
-                        append(visibility_zone, covered);
-                }
-
-                // Bottom: walk downward
-                if (margin_bottom > 0)
-                {
-                    ExPolygons covered = infill_contour;
-                    for (int k = 1; k <= margin_bottom && !covered.empty() && current_idx >= static_cast<size_t>(k);
-                         ++k)
-                    {
-                        ExPolygons still_covered = intersection_ex(covered, all_layers[current_idx - k]->lslices);
-                        ExPolygons newly_exposed = diff_ex(covered, all_layers[current_idx - k]->lslices);
-                        append(visibility_zone, newly_exposed);
-                        covered = std::move(still_covered);
-                    }
-                    // Ran out of layers = bottom of object
-                    if (!covered.empty() && current_idx < static_cast<size_t>(margin_bottom))
-                        append(visibility_zone, covered);
-                }
-
-                if (!visibility_zone.empty())
-                {
-                    visibility_zone = union_ex(visibility_zone);
-                    il_regions = diff_ex(infill_contour, visibility_zone);
-                    non_il_regions = intersection_ex(infill_contour, visibility_zone);
-                }
-                else
-                {
-                    il_regions = infill_contour;
-                }
-            }
-
-            // Bridge fill anchoring: where overhang exists, trim il_regions to exclude the
-            // area directly adjacent to the overhang so bridge fill can anchor to perimeters
-            // below. Only the INNER edge of lower perimeters is affected - the outer edges
-            // remain available for interlocking. The anchor zone is saved separately and
-            // added to non_il_opened later, bypassing the opening filter that would remove
-            // narrow strips at the top/bottom of the bridge.
-            ExPolygons bridge_anchor_zone;
-            if (lower_slices != nullptr && !il_regions.empty())
-            {
-                ExPolygons overhang = diff_ex(infill_contour, *lower_slices);
-                if (!overhang.empty())
-                {
-                    // Depth accounts for perimeter count plus half ext_perimeter for spacing
-                    coord_t anchor_depth = (il_regular_override > 0 ? coord_t(il_regular_override) * perimeter_width
-                                                                    : coord_t(loop_number + 1) * perimeter_width) +
-                                           ext_perimeter_width / 2;
-                    ExPolygons overhang_grown = offset_ex(overhang, anchor_depth);
-                    ExPolygons lower_in_infill = intersection_ex(infill_contour, *lower_slices);
-                    bridge_anchor_zone = intersection_ex(overhang_grown, lower_in_infill);
-                    if (!bridge_anchor_zone.empty())
-                        il_regions = diff_ex(il_regions, bridge_anchor_zone);
-                }
-            }
+            // Reuse the per-region footprint computed above when PWI reduced the walls, so the wall count
+            // and the shell placement are driven by ONE region. When the override is off the footprint was
+            // not computed, so compute it here from infill_contour (same visibility split, bridge
+            // anchoring, 4.47 opening and core filter - centralized in il_compute_footprint).
+            if (!il_have_region)
+                il_compute_footprint(infill_contour, il_reduce_walls);
 
             dbg_il_regions(dbg_z, "VISIBILITY", infill_contour, "infill_contour");
             dbg_il_regions(dbg_z, "VISIBILITY", il_regions, "il_regions");
             dbg_il_regions(dbg_z, "VISIBILITY", non_il_regions, "non_il_regions");
 
-            // Opening filter: remove regions narrower than 3 shells (~4.47 perimeter widths)
-            ExPolygons il_regions_before_opening = il_regions;
-            {
-                const coord_t min_width = coord_t(perimeter_width * 4.47);
-                const coord_t opening = min_width / 2;
-                if (opening > 0 && !il_regions.empty())
-                    il_regions = offset_ex(offset_ex(il_regions, -opening), opening);
-            }
-            if (FILL_DEBUG)
-            {
-                ExPolygons opening_removed = diff_ex(il_regions_before_opening, il_regions);
-                if (!opening_removed.empty())
-                    dbg_il_regions(dbg_z, "OPENING_REMOVED", opening_removed, "filtered_out");
-                dbg_il_regions(dbg_z, "OPENING_RESULT", il_regions, "after_filter");
-            }
-
             if (il_regions.empty())
+            {
+                // No interlocking lands on this surface. If the per-region additive walls ran, bound the
+                // fill by them (il_suppressed_core) so sparse/solid does not overflow the injected
+                // perimeters; otherwise leave infill_contour as the whole reduced contour (HEAD behavior).
+                if (il_have_region)
+                    infill_contour = il_suppressed_core;
                 goto skip_interlocking;
+            }
 
             // Always true here (empty case handled above); guard kept to avoid re-indenting ~600 lines.
             if (!il_regions.empty())
@@ -2631,7 +3613,13 @@ il_retry_with_full_perimeters:
                 {
                     actual_shells = min_dim / (perimeter_width * 2);
                     if (actual_shells <= 0)
+                    {
+                        // No room for shells. Mirror the il_regions.empty() bailout: bound the fill by the
+                        // additive walls so solid/sparse does not overflow the injected perimeters.
+                        if (il_have_region)
+                            infill_contour = il_suppressed_core;
                         goto skip_interlocking;
+                    }
                 }
 
                 dbg_il_params(dbg_z, params.layer_id, is_odd_layer, actual_shells, num_interlocking_shells,
@@ -2656,17 +3644,21 @@ il_retry_with_full_perimeters:
 
                     const bool prefer_cw = params.print_config.prefer_clockwise_movements;
 
-                    // Opening filter on non_il_regions: remove narrow boundary
-                    // strips (< 2*perimeter_width) while keeping wide visibility
-                    // zones. All shells clip against the opened version so they
-                    // bridge through narrow gaps but respect wide zones.
-                    // Uses perimeter_width (constant) for consistent behavior
-                    // across even/odd layers.
+                    // Keep only genuine wide visibility faces; drop hairline taper "slope-ring" slivers
+                    // (the perimeter<->interlocking seam) so they neither clip the shells nor reach solid
+                    // fill - interlocking bonds across that lane, it is never gap-filled. A morphological
+                    // opening (offset -w/+w) does not reliably collapse a thin closed annulus, so test
+                    // average width (2*area / boundary length) directly: a bead or wider is a real solid
+                    // face and stays suppressed; thinner is seam noise the shells flow over.
                     ExPolygons non_il_opened;
-                    if (!non_il_regions.empty())
-                        non_il_opened = intersection_ex(offset_ex(offset_ex(non_il_regions, -float(perimeter_width)),
-                                                                  float(perimeter_width)),
-                                                        non_il_regions);
+                    for (const ExPolygon &face : non_il_regions)
+                    {
+                        double blen = face.contour.length();
+                        for (const Polygon &h : face.holes)
+                            blen += h.length();
+                        if (blen > 0.0 && 2.0 * std::abs(face.area()) / blen >= double(perimeter_width))
+                            non_il_opened.push_back(face);
+                    }
                     // Add bridge anchor zone after opening filter so narrow anchor
                     // strips at top/bottom of bridges aren't removed
                     if (!bridge_anchor_zone.empty())
@@ -2723,30 +3715,31 @@ il_retry_with_full_perimeters:
 
                                     double shell_len = unscaled<double>(shell_pl.length());
                                     Polylines clipped = diff_pl(shell_pl, non_il_opened);
-                                    if (FILL_DEBUG)
+                                    if (pg_dbg_active())
                                     {
                                         BoundingBox pbb = get_extents(poly);
                                         if (clipped.empty())
                                         {
-                                            dbg_fill_print("z=%.3f [INTERLOCK] VIS_CLIP inset=%zu FULLY_CLIPPED "
-                                                           "shell_len=%.2fmm bbox=(%.2f,%.2f)-(%.2f,%.2f)\n",
-                                                           dbg_z, inset_idx, shell_len, unscaled<double>(pbb.min.x()),
-                                                           unscaled<double>(pbb.min.y()), unscaled<double>(pbb.max.x()),
-                                                           unscaled<double>(pbb.max.y()));
+                                            dbg_log(Slic3r::DBG_INTERLOCK, dbg_z, "INTERLOCK",
+                                                    "VIS_CLIP inset=%zu FULLY_CLIPPED "
+                                                    "shell_len=%.2fmm bbox=(%.2f,%.2f)-(%.2f,%.2f)",
+                                                    inset_idx, shell_len, unscaled<double>(pbb.min.x()),
+                                                    unscaled<double>(pbb.min.y()), unscaled<double>(pbb.max.x()),
+                                                    unscaled<double>(pbb.max.y()));
                                         }
                                         else
                                         {
                                             double total_clip_len = 0;
                                             for (const Polyline &pl : clipped)
                                                 total_clip_len += unscaled<double>(pl.length());
-                                            dbg_fill_print("z=%.3f [INTERLOCK] VIS_CLIP inset=%zu segs=%zu "
-                                                           "shell_len=%.2fmm clip_len=%.2fmm (%.1f%%) "
-                                                           "bbox=(%.2f,%.2f)-(%.2f,%.2f)\n",
-                                                           dbg_z, inset_idx, clipped.size(), shell_len, total_clip_len,
-                                                           (total_clip_len / shell_len) * 100.0,
-                                                           unscaled<double>(pbb.min.x()), unscaled<double>(pbb.min.y()),
-                                                           unscaled<double>(pbb.max.x()),
-                                                           unscaled<double>(pbb.max.y()));
+                                            dbg_log(Slic3r::DBG_INTERLOCK, dbg_z, "INTERLOCK",
+                                                    "VIS_CLIP inset=%zu segs=%zu "
+                                                    "shell_len=%.2fmm clip_len=%.2fmm (%.1f%%) "
+                                                    "bbox=(%.2f,%.2f)-(%.2f,%.2f)",
+                                                    inset_idx, clipped.size(), shell_len, total_clip_len,
+                                                    (total_clip_len / shell_len) * 100.0, unscaled<double>(pbb.min.x()),
+                                                    unscaled<double>(pbb.min.y()), unscaled<double>(pbb.max.x()),
+                                                    unscaled<double>(pbb.max.y()));
                                         }
                                     }
                                     if (clipped.empty())
@@ -2804,9 +3797,9 @@ il_retry_with_full_perimeters:
                                         for (size_t ci = 0; ci + 1 < pts.size(); ++ci)
                                             clipped_poly.points.push_back(pts[ci]);
                                         make_il_loop(coll, clipped_poly, inset_idx);
-                                        if (FILL_DEBUG)
-                                            dbg_fill_print("z=%.3f [INTERLOCK] VIS_RESULT inset=%zu REJOINED_LOOP\n",
-                                                           dbg_z, inset_idx);
+                                        if (pg_dbg_active())
+                                            dbg_log(Slic3r::DBG_INTERLOCK, dbg_z, "INTERLOCK",
+                                                    "VIS_RESULT inset=%zu REJOINED_LOOP", inset_idx);
                                     }
                                     else
                                     {
@@ -2816,17 +3809,19 @@ il_retry_with_full_perimeters:
                                             double seg_len = unscaled<double>(seg.length());
                                             if (seg.size() < 2 || seg.length() < min_segment_len)
                                             {
-                                                if (FILL_DEBUG)
-                                                    dbg_fill_print("z=%.3f [INTERLOCK] VIS_RESULT inset=%zu "
-                                                                   "DROPPED_SHORT len=%.2fmm min=%.2fmm\n",
-                                                                   dbg_z, inset_idx, seg_len,
-                                                                   unscaled<double>(perimeter_width) * 3.0);
+                                                if (pg_dbg_active())
+                                                    dbg_log(Slic3r::DBG_INTERLOCK, dbg_z, "INTERLOCK",
+                                                            "VIS_RESULT inset=%zu "
+                                                            "DROPPED_SHORT len=%.2fmm min=%.2fmm",
+                                                            inset_idx, seg_len,
+                                                            unscaled<double>(perimeter_width) * 3.0);
                                                 continue;
                                             }
-                                            if (FILL_DEBUG)
-                                                dbg_fill_print("z=%.3f [INTERLOCK] VIS_RESULT inset=%zu "
-                                                               "KEPT_PATH len=%.2fmm\n",
-                                                               dbg_z, inset_idx, seg_len);
+                                            if (pg_dbg_active())
+                                                dbg_log(Slic3r::DBG_INTERLOCK, dbg_z, "INTERLOCK",
+                                                        "VIS_RESULT inset=%zu "
+                                                        "KEPT_PATH len=%.2fmm",
+                                                        inset_idx, seg_len);
                                             ExtrusionFlow sf(params.perimeter_flow.mm3_per_mm(),
                                                              params.perimeter_flow.width(),
                                                              params.perimeter_flow.height());
@@ -2924,7 +3919,7 @@ il_retry_with_full_perimeters:
                                                            params.layer_id, 1.0, 10000);
                             const auto &ep_paths = ep_walls.generate();
 
-                            if (FILL_DEBUG)
+                            if (pg_dbg_active())
                             {
                                 char label[64];
                                 snprintf(label, sizeof(label), "ep[%zu]", ep_idx);
@@ -2933,7 +3928,7 @@ il_retry_with_full_perimeters:
                             ExPolyIL ep_il;
                             ep_il.expoly = expoly;
                             collect_shells(ep_il.entities, ep_paths, actual_shells);
-                            if (FILL_DEBUG)
+                            if (pg_dbg_active())
                             {
                                 char label[64];
                                 snprintf(label, sizeof(label), "ep[%zu]", ep_idx);
@@ -2949,9 +3944,6 @@ il_retry_with_full_perimeters:
                     // in out_loops. Each sub-collection corresponds to an island/feature group.
                     // Match each interlocking entity to the nearest perimeter (by centroid)
                     // across ALL sub-collections to find which island it belongs to.
-                    if (any_il_generated)
-                        il_perimeters_were_reduced = false;
-
                     if (any_il_generated && !out_loops.entities.empty())
                     {
                         auto get_fid = [](const ExtrusionEntity *ee) -> uint16_t
@@ -2962,6 +3954,12 @@ il_retry_with_full_perimeters:
                             if (auto *path = dynamic_cast<const ExtrusionPath *>(ee))
                                 if (path->attributes().feature_id)
                                     return *path->attributes().feature_id;
+                            // Open/odd thin-wall perimeters are emitted as ExtrusionMultiPath; without this they
+                            // read as feature 0 and the interleave dumps them after the interlocking instead of
+                            // with their region's perimeters.
+                            if (auto *mp = dynamic_cast<const ExtrusionMultiPath *>(ee))
+                                if (!mp->paths.empty() && mp->paths.front().attributes().feature_id)
+                                    return *mp->paths.front().attributes().feature_id;
                             return uint16_t(0);
                         };
 
@@ -3183,12 +4181,43 @@ il_retry_with_full_perimeters:
                         append(combined_inner, geometric_inner);
 
                         ExPolygons new_inner = intersection_ex(union_ex(combined_inner), il_regions);
-                        // Narrow boundary strips removed from fill area so sparse
-                        // infill can't appear between perimeters and interlocking.
-                        // Wide visibility zones keep their fill area for solid infill.
-                        append(new_inner, non_il_opened);
+                        // The suppressed (non-interlocking) fill area must be bounded by the FULL kept walls,
+                        // not the reduced footprint, or solid infill overlaps the additive perimeters. The
+                        // per-region additive block stored that full-depth core in il_suppressed_core (it left
+                        // infill_contour as the whole reduced contour so the shells could run on it). With the
+                        // override off, keep the opened non_il region (HEAD behavior).
+                        if (il_have_region)
+                            append(new_inner, il_suppressed_core);
+                        else
+                            append(new_inner, non_il_opened);
                         infill_contour = union_ex(new_inner);
+                        // Knit the buried-core and suppressed-core fill pieces into one continuous region and
+                        // close the hairline seam holes where they meet (a closing: expand, clip, retract).
+                        // Their shared edge comes from two different offsets (shells vs walls) so it never
+                        // tiles exactly, leaving sub-bead holes that split the bridge/solid infill.
+                        if (il_have_region)
+                        {
+                            infill_contour = offset_ex(offset_ex(infill_contour, float(perimeter_width)),
+                                                       -float(perimeter_width));
+                            // A blind closing bridges any throat narrower than two beads, so it would fill a
+                            // real interior void (vent slot / bolt hole) and expand fill outward over the
+                            // external wall. The reduced inner contour is the largest the fill may ever be
+                            // (it carries the real holes and the outer-wall edge), so clip the closing back to
+                            // it: the seam knit lives inside it (kept), hole-bridging and outward overrun do
+                            // not (rejected).
+                            if (!il_reduced_inner.empty())
+                                infill_contour = intersection_ex(infill_contour, union_ex(il_reduced_inner));
+                            // Perimeters always win: re-clip the fill off the additive wall footprint so the
+                            // closing cannot ride it onto an injected wall. The fill stage re-adds the normal
+                            // infill-overlap afterward.
+                            if (!il_wall_footprint.empty())
+                                infill_contour = diff_ex(infill_contour, il_wall_footprint);
+                        }
                         infill_contour = expolygons_simplify(infill_contour, params.scaled_resolution);
+
+                        // Diagnostic: the final fill region after interlocking (debug only).
+                        if (pg_dbg_active())
+                            dbg_wkt_expolys(dbg_z, "infill_contour", infill_contour);
 
                         dbg_il_inner_contour(dbg_z, il_inner, geometric_inner, infill_contour);
                     }
@@ -3198,25 +4227,6 @@ il_retry_with_full_perimeters:
     }
 skip_interlocking:
     // ===================== END INTERLOCKING =====================
-
-    // If we reduced perimeters for interlocking but no interlocking was actually generated
-    // (opening filter, narrow zone, or visibility excluded everything), redo with the
-    // original perimeter count so walls aren't left with too few perimeters.
-    if (il_perimeters_were_reduced)
-    {
-        loop_number = original_loop_number;
-        il_perimeters_were_reduced = false;
-        il_retry_active = true;
-        // Truncate back to entry point, not clear - other slices' perimeters precede ours.
-        while (out_loops.size() > out_loops_begin)
-        {
-            delete out_loops.entities.back();
-            out_loops.entities.pop_back();
-        }
-        while (out_fill_expolygons.size() > out_fill_begin)
-            out_fill_expolygons.pop_back();
-        goto il_retry_with_full_perimeters;
-    }
 
     // Debug: log infill contour after interlocking consumed space
     dbg_perim_contours("INNER_CONTOUR", dbg_z, params.layer_id, infill_contour, "after_interlocking");
@@ -3261,7 +4271,7 @@ skip_interlocking:
     // preserving the simplified topology that offset2_ex needs.
     pp = intersection(pp, to_polygons(infill_contour));
     // Debug: log simplification point count
-    if (FILL_DEBUG)
+    if (pg_dbg_active())
     {
         size_t pp_pts = 0;
         for (const Polygon &p : pp)
@@ -3273,8 +4283,8 @@ skip_interlocking:
             for (const Polygon &h : ep.holes)
                 ic_pts += h.points.size();
         }
-        dbg_fill_print("z=%.3f [PERIM] SIMPLIFY before=%zu after=%zu resolution=%.4fmm\n", dbg_z, ic_pts, pp_pts,
-                       unscaled<double>(params.scaled_resolution));
+        dbg_log(Slic3r::DBG_PERIMETERS, dbg_z, "PERIM", "SIMPLIFY before=%zu after=%zu resolution=%.4fmm", ic_pts,
+                pp_pts, unscaled<double>(params.scaled_resolution));
     }
     // collapse too narrow infill areas
     const auto min_perimeter_infill_spacing = coord_t(solid_infill_spacing * (1. - INSET_OVERLAP_TOLERANCE));
@@ -3284,7 +4294,7 @@ skip_interlocking:
                                          float(inset + min_perimeter_infill_spacing / 2.));
     dbg_perim_contours("INFILL_AREA", dbg_z, params.layer_id, infill_areas, "after_overlap");
     // Debug: compute overshoot - infill area that extends beyond innermost perimeter inner edge
-    if (FILL_DEBUG && !infill_areas.empty() && !infill_contour.empty())
+    if (pg_dbg_active() && !infill_areas.empty() && !infill_contour.empty())
     {
         ExPolygons overshoot = diff_ex(infill_areas, infill_contour);
         if (!overshoot.empty())
@@ -3293,19 +4303,20 @@ skip_interlocking:
             for (const ExPolygon &ep : overshoot)
                 overshoot_area += std::abs(ep.area()) * 1e-12;
             BoundingBox obb = get_extents(overshoot);
-            dbg_fill_print("z=%.3f [PERIM] OVERSHOOT ep=%zu area=%8.4fmm2 bbox=(%.2f,%.2f)-(%.2f,%.2f)\n", dbg_z,
-                           overshoot.size(), overshoot_area, unscaled<double>(obb.min.x()),
-                           unscaled<double>(obb.min.y()), unscaled<double>(obb.max.x()), unscaled<double>(obb.max.y()));
+            dbg_log(Slic3r::DBG_PERIMETERS, dbg_z, "PERIM",
+                    "OVERSHOOT ep=%zu area=%8.4fmm2 bbox=(%.2f,%.2f)-(%.2f,%.2f)", overshoot.size(), overshoot_area,
+                    unscaled<double>(obb.min.x()), unscaled<double>(obb.min.y()), unscaled<double>(obb.max.x()),
+                    unscaled<double>(obb.max.y()));
             for (size_t i = 0; i < overshoot.size(); i++)
             {
                 const ExPolygon &ep = overshoot[i];
                 double a = std::abs(ep.area()) * 1e-12;
                 BoundingBox epbb = get_extents(ep);
-                dbg_fill_print("z=%.3f [PERIM]   OVERSHOOT [%zu] area=%8.4fmm2 pts=%zu "
-                               "bbox=(%.2f,%.2f)-(%.2f,%.2f)\n",
-                               dbg_z, i, a, ep.contour.points.size(), unscaled<double>(epbb.min.x()),
-                               unscaled<double>(epbb.min.y()), unscaled<double>(epbb.max.x()),
-                               unscaled<double>(epbb.max.y()));
+                dbg_log(Slic3r::DBG_PERIMETERS, dbg_z, "PERIM",
+                        "  OVERSHOOT [%zu] area=%8.4fmm2 pts=%zu "
+                        "bbox=(%.2f,%.2f)-(%.2f,%.2f)",
+                        i, a, ep.contour.points.size(), unscaled<double>(epbb.min.x()), unscaled<double>(epbb.min.y()),
+                        unscaled<double>(epbb.max.x()), unscaled<double>(epbb.max.y()));
             }
         }
     }
@@ -3331,6 +4342,11 @@ skip_interlocking:
             infill_areas = diff_ex(infill_areas, filled_area);
         }
     }
+
+    // Depth-limit serpentine: keep the solid/sparse fill from overrunning the band
+    // beyond the configured infill/perimeters overlap (see serp_fill_clip).
+    if (serp_band_handoff && serp_fill_clip > 0)
+        infill_areas = intersection_ex(infill_areas, offset_ex(surface.expolygon, -float(serp_fill_clip)));
 
     append(out_fill_expolygons, std::move(infill_areas));
 }

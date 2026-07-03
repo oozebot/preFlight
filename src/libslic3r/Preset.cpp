@@ -346,6 +346,18 @@ void Preset::normalize(DynamicPrintConfig &config)
             speed->values = flow->values;
         }
     }
+    // Print-level volumetric cap: max_volumetric_flow is primary, max_volumetric_speed is the
+    // legacy alias kept for scripting. Legacy presets have the speed key but a zero flow key.
+    {
+        auto *flow = config.option<ConfigOptionFloat>("max_volumetric_flow", false);
+        auto *speed = config.option<ConfigOptionFloat>("max_volumetric_speed", false);
+        if (flow && speed)
+        {
+            if (flow->value == 0 && speed->value > 0)
+                flow->value = speed->value;
+            speed->value = flow->value;
+        }
+    }
     if (auto *first_layer_height = config.option<ConfigOptionFloatOrPercent>("first_layer_height", false);
         first_layer_height && first_layer_height->percent)
         if (const auto *layer_height = config.option<ConfigOptionFloat>("layer_height", false); layer_height)
@@ -569,12 +581,22 @@ static std::vector<std::string> s_Preset_print_options{
     "solid_fill_pattern",
     "narrow_to_athena",
     "narrow_to_athena_threshold",
+    "narrow_to_athena_top_bottom",
     "fill_angle",
     "bridge_angle",
     "counterbore_bridge_layers",
     "solid_infill_below_area",
     "only_retract_when_crossing_perimeters",
     "infill_first",
+    "serpentine_enabled",
+    "serpentine_extrusion_width",
+    "serpentine_overlap",
+    "serpentine_max_bead",
+    "serpentine_limit_depth",
+    "serpentine_depth",
+    "serpentine_solid_surfaces",
+    "serpentine_ridges",
+    "serpentine_aim",
     "interlock_perimeters_enabled",
     "interlock_perimeter_count",
     "interlock_regular_perimeters",
@@ -592,6 +614,7 @@ static std::vector<std::string> s_Preset_print_options{
     "auto_speed",
     "max_print_speed",
     "max_volumetric_speed",
+    "max_volumetric_flow",
     "avoid_crossing_perimeters_max_detour",
     "fuzzy_skin",
     "fuzzy_skin_thickness",
@@ -789,15 +812,16 @@ static std::vector<std::string> s_Preset_filament_options{
     "filament_multitool_ramming", "filament_multitool_ramming_volume", "filament_multitool_ramming_flow", "temperature",
     "idle_temperature", "first_layer_temperature", "bed_temperature", "first_layer_bed_temperature", "fan_always_on",
     "cooling", "cooling_slowdown_logic", "cooling_perimeter_transition_distance", "min_fan_speed", "max_fan_speed",
-    "bridge_fan_speed", "fan_spinup_bridge_infill", "fan_spinup_overhang_perimeter", "enable_manual_fan_speeds",
-    "manual_fan_speed_overhang_perimeter", "manual_fan_speed_interlocking_perimeter",
-    "manual_fan_speed_external_perimeter", "manual_fan_speed_perimeter", "manual_fan_speed_top_solid_infill",
-    "manual_fan_speed_solid_infill", "manual_fan_speed_internal_infill", "manual_fan_speed_ironing",
-    "manual_fan_speed_skirt", "manual_fan_speed_support_material", "manual_fan_speed_support_interface",
-    "disable_fan_first_layers", "full_fan_speed_layer", "fan_below_layer_time", "slowdown_below_layer_time",
-    "dont_slow_down_outer_wall", "min_print_speed", "custom_parameters_filament", "start_filament_gcode",
-    "end_filament_gcode", "enable_dynamic_fan_speeds", "chamber_temperature", "chamber_minimal_temperature",
-    "overhang_fan_speed_0", "overhang_fan_speed_1", "overhang_fan_speed_2", "overhang_fan_speed_3",
+    "bridge_fan_speed", "fan_spinup_bridge_infill", "fan_spinup_overhang_perimeter", "fan_spinup_serpentine_overhang",
+    "enable_manual_fan_speeds", "manual_fan_speed_overhang_perimeter", "manual_fan_speed_interlocking_perimeter",
+    "manual_fan_speed_serpentine", "manual_fan_speed_serpentine_overhang", "manual_fan_speed_external_perimeter",
+    "manual_fan_speed_perimeter", "manual_fan_speed_top_solid_infill", "manual_fan_speed_solid_infill",
+    "manual_fan_speed_internal_infill", "manual_fan_speed_ironing", "manual_fan_speed_skirt",
+    "manual_fan_speed_support_material", "manual_fan_speed_support_interface", "disable_fan_first_layers",
+    "full_fan_speed_layer", "fan_below_layer_time", "slowdown_below_layer_time", "dont_slow_down_outer_wall",
+    "min_print_speed", "custom_parameters_filament", "start_filament_gcode", "end_filament_gcode",
+    "enable_dynamic_fan_speeds", "chamber_temperature", "chamber_minimal_temperature", "overhang_fan_speed_0",
+    "overhang_fan_speed_1", "overhang_fan_speed_2", "overhang_fan_speed_3",
     // Retract overrides
     "filament_retract_length", "filament_retract_lift", "filament_retract_lift_above", "filament_retract_lift_below",
     "filament_retract_speed", "filament_deretract_speed", "filament_retract_restart_extra",

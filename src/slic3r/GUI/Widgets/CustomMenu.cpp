@@ -217,6 +217,12 @@ int CustomMenuMouseFilter::FilterEvent(wxEvent &event)
     // Check if click is inside the menu hierarchy
     if (!CustomMenu::ActiveMenuContainsPoint(screenPt))
     {
+        // preFlight: ignore an outside-click within the show grace window. Under seamless /
+        // virtualized compositors the press that opened the menu (landing on the menu-bar item,
+        // i.e. outside the popup) can reach this filter while the menu is already active and would
+        // dismiss it instantly. A real click-outside arrives well after the grace window.
+        if (activeMenu->is_in_show_grace())
+            return Event_Skip;
         // Click is outside - dismiss the menu
         CustomMenu::DismissActiveContextMenu();
         // Don't consume the event - let the canvas handle it
@@ -249,7 +255,9 @@ void CustomMenu::DismissActiveContextMenu()
         // Hide immediately
         activeMenu->Hide();
 
-        // Dismiss will trigger OnDismiss which clears self-ref
+        // Note: an explicit Dismiss() does NOT call OnDismiss() (only the framework's
+        // focus-loss path does). Consumer cleanup and the self-reference release happen via
+        // OnDismiss()/NotifyDismissed() on the normal dismissal paths, or the destructor net.
         activeMenu->Dismiss();
     }
     s_activeContextMenu.reset();
@@ -451,6 +459,15 @@ CustomMenu::~CustomMenu()
             CustomMenuMouseFilter::Uninstall();
         }
     }
+
+    // preFlight: final safety net. If we are torn down without OnDismiss() or item activation
+    // ever notifying, fire the dismiss callback directly so consumer cleanup still runs exactly
+    // once. Skipped during shutdown - the event loop is gone and a leak then is harmless.
+    if (!m_dismissNotified && m_dismissCallback && wxTheApp && wxTheApp->IsMainLoopRunning())
+    {
+        m_dismissNotified = true;
+        m_dismissCallback();
+    }
 }
 
 void CustomMenu::Create(wxWindow *parent)
@@ -494,6 +511,21 @@ void CustomMenu::AppendSeparator()
 void CustomMenu::AppendSubMenu(std::shared_ptr<CustomMenu> submenu, const wxString &label, const wxBitmapBundle &icon)
 {
     m_items.emplace_back(wxID_ANY, label, submenu, icon);
+}
+
+void CustomMenu::Prepend(int id, const wxString &label, const wxBitmapBundle &icon)
+{
+    m_items.emplace(m_items.begin(), id, label, icon);
+}
+
+void CustomMenu::PrependSeparator()
+{
+    m_items.insert(m_items.begin(), CustomMenuItem::Separator());
+}
+
+void CustomMenu::PrependSubMenu(std::shared_ptr<CustomMenu> submenu, const wxString &label, const wxBitmapBundle &icon)
+{
+    m_items.emplace(m_items.begin(), wxID_ANY, label, submenu, icon);
 }
 
 void CustomMenu::SetCallback(int id, std::function<void()> callback)
@@ -815,6 +847,19 @@ void CustomMenu::ShowAt(const wxPoint &pos, wxWindow *parent)
         // Install mouse filter to catch clicks outside menu
         CustomMenuMouseFilter::Install();
     }
+
+    // Mark the show time so spurious dismiss triggers fired by the act of opening (seamless /
+    // virtualized compositors deliver a stray app-deactivate or outside-click) can be ignored
+    // during a short grace window. See is_in_show_grace().
+    m_shown_at = std::chrono::steady_clock::now();
+}
+
+bool CustomMenu::is_in_show_grace() const
+{
+    // ~150 ms: long enough to swallow the same-event spurious dismiss the compositor delivers when
+    // the popup opens, far shorter than a deliberate human click-to-dismiss, so native behavior is
+    // unchanged.
+    return IsShown() && (std::chrono::steady_clock::now() - m_shown_at) < std::chrono::milliseconds(150);
 }
 
 void CustomMenu::ShowBelow(wxWindow *anchor)
@@ -965,8 +1010,32 @@ void CustomMenu::OnDismiss()
         CustomMenuMouseFilter::Uninstall();
     }
 
-    // Check if app is shutting down - avoid CallAfter during shutdown
-    bool appShuttingDown = !wxTheApp || !wxTheApp->IsMainLoopRunning();
+    // preFlight: fire the dismiss callback + release the self-reference exactly once.
+    // Item activation closes the menu via Hide()+Dismiss(), which skips OnDismiss(), so
+    // NotifyDismissed() is also called from ActivateItem(); the guard makes that safe.
+    NotifyDismissed();
+
+#ifdef __APPLE__
+    // preFlight: We bypassed Popup() on macOS, so just hide the window.
+    // Calling wxPopupTransientWindow::OnDismiss() after Show()/Hide() can
+    // trigger Cocoa assertions about unbalanced event tracking.
+    Hide();
+#else
+    wxPopupTransientWindow::OnDismiss();
+#endif
+}
+
+void CustomMenu::NotifyDismissed()
+{
+    // Run exactly once, no matter which teardown path reaches us. Without this guard the
+    // dismiss callback (consumer cleanup) and the self-reference release would either be
+    // skipped (item activation bypasses OnDismiss) or run twice.
+    if (m_dismissNotified)
+        return;
+    m_dismissNotified = true;
+
+    // Avoid CallAfter during shutdown - the event loop is gone.
+    const bool appShuttingDown = !wxTheApp || !wxTheApp->IsMainLoopRunning();
 
     // Call the dismiss callback if set (for context menus that need notification)
     if (m_dismissCallback)
@@ -1024,15 +1093,6 @@ void CustomMenu::OnDismiss()
             m_selfRef.reset();
         }
     }
-
-#ifdef __APPLE__
-    // preFlight: We bypassed Popup() on macOS, so just hide the window.
-    // Calling wxPopupTransientWindow::OnDismiss() after Show()/Hide() can
-    // trigger Cocoa assertions about unbalanced event tracking.
-    Hide();
-#else
-    wxPopupTransientWindow::OnDismiss();
-#endif
 }
 
 void CustomMenu::OnPaint(wxPaintEvent & /*evt*/)
@@ -1441,6 +1501,11 @@ void CustomMenu::OnAppActivate(wxActivateEvent &evt)
     evt.Skip(); // Let other handlers process the event
     if (!evt.GetActive() && IsShown())
     {
+        // preFlight: under seamless/virtualized compositors (e.g. Qubes) the popup is its own X
+        // window, so opening it makes the main frame report an app-deactivate, which would close
+        // the menu on the very click that opened it. Ignore deactivations within the show grace.
+        if (is_in_show_grace())
+            return;
         // App is being deactivated (losing focus) - close this menu
         Dismiss();
     }
@@ -1513,8 +1578,10 @@ void CustomMenu::ActivateItem(int index)
         return;
     }
 
-    // Store selected ID before dismissing
+    // Store selected ID and copy the callback before any teardown, so neither the selected id
+    // nor the action depends on this menu's storage once it begins closing.
     m_selectedId = item.id;
+    auto callback = item.callback;
 
     // IMPORTANT: Find the root menu BEFORE calling CloseAllSubmenus,
     // because CloseAllSubmenus sets m_parentMenu to nullptr and breaks the chain
@@ -1524,23 +1591,32 @@ void CustomMenu::ActivateItem(int index)
         rootMenu = rootMenu->m_parentMenu;
     }
 
+    // preFlight: keep the root alive across the action + dismissal below, in case the action
+    // spins a nested event loop (e.g. a modal dialog) that would otherwise destroy it mid-call.
+    std::shared_ptr<CustomMenu> keepRoot = rootMenu->m_selfRef;
+
     // Close all submenus
     CloseAllSubmenus();
 
     // Hide the root menu (which will hide everything since submenus are gone)
     rootMenu->Hide();
 
-    // Dismiss the root menu properly (triggers OnDismiss for cleanup)
+    // Dismiss the root menu. Note: the Hide() above makes wxPopupTransientWindow::Dismiss()
+    // skip OnDismiss(), so the dismiss callback is fired explicitly via NotifyDismissed() below.
     rootMenu->Dismiss();
 
     // Also use static tracking for extra safety
     DismissActiveContextMenu();
 
-    // Execute callback after dismissing
-    if (item.callback)
-    {
-        item.callback();
-    }
+    // Execute the item action while the menu is still alive (the self-reference is only
+    // released by NotifyDismissed() afterwards).
+    if (callback)
+        callback();
+
+    // preFlight: item activation bypasses OnDismiss(), so fire the dismiss callback and release
+    // the self-reference here. Without this the menu and its consumer state leak (e.g.
+    // m_tracking_popup_menu stuck true, which silently suppresses later slicing-error dialogs).
+    rootMenu->NotifyDismissed();
 }
 
 void CustomMenu::HandleAccelerator(wxChar key)

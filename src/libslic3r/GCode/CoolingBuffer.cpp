@@ -2153,6 +2153,7 @@ std::string CoolingBuffer::apply_layer_cooldown(
             // And only once per bridge region (not for every bridge marker)
             bool is_bridge_infill = (current_feature_role == GCodeExtrusionRole::BridgeInfill);
             bool is_overhang_perimeter = (current_feature_role == GCodeExtrusionRole::OverhangPerimeter);
+            bool is_serpentine_overhang = (current_feature_role == GCodeExtrusionRole::SerpentineOverhang);
 
             // Fan ramp unsupported on firmware with non-standard fan commands (M126/M127, M106 P)
             bool fan_ramp_supported = (m_config.gcode_flavor != gcfMakerWare && m_config.gcode_flavor != gcfSailfish &&
@@ -2161,8 +2162,12 @@ std::string CoolingBuffer::apply_layer_cooldown(
                                          m_config.fan_spinup_bridge_infill.get_at(m_current_extruder);
             bool overhang_spinup_enabled = fan_ramp_supported &&
                                            m_config.fan_spinup_overhang_perimeter.get_at(m_current_extruder);
+            bool serpentine_overhang_spinup_enabled = fan_ramp_supported &&
+                                                      m_config.fan_spinup_serpentine_overhang.get_at(
+                                                          m_current_extruder);
             bool needs_early_ramp = (is_bridge_infill && bridge_spinup_enabled) ||
-                                    (is_overhang_perimeter && overhang_spinup_enabled);
+                                    (is_overhang_perimeter && overhang_spinup_enabled) ||
+                                    (is_serpentine_overhang && serpentine_overhang_spinup_enabled);
             bool did_early_ramp = false;
 
             // The SET_FAN_SPEED marker appears AFTER BRIDGE_FAN_START in the G-code,

@@ -50,6 +50,8 @@ struct Settings
 
     std::array<bool, std::size_t(EGCodeExtrusionRole::COUNT)> extrusion_roles_visibility{
         true, // None
+        true, // Serpentine
+        true, // SerpentineOverhang
         true, // Perimeter
         true, // ExternalPerimeter
         true, // OverhangPerimeter

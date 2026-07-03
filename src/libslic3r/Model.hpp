@@ -576,8 +576,6 @@ public:
     // This vector holds position of brim ear points. The data are saved in mesh
     // coordinates to allow using them for several instances.
     BrimPoints brim_points;
-    // To keep track of where the brim points came from
-    BrimPointsStatus brim_points_status = BrimPointsStatus::NoPoints;
 
     // Connectors to be added into the object before cut and are used to create a solid/negative volumes during a cut perform
     CutConnectors cut_connectors;
@@ -860,7 +858,7 @@ private:
         Internal::StaticSerializationWrapper<ModelConfigObject> config_wrapper(config);
         Internal::StaticSerializationWrapper<LayerHeightProfile> layer_heigth_profile_wrapper(layer_height_profile);
         ar(name, input_file, notes, instances, volumes, config_wrapper, layer_config_ranges,
-           layer_heigth_profile_wrapper, sla_support_points, sla_points_status, sla_drain_holes, printable,
+           layer_heigth_profile_wrapper, sla_support_points, sla_points_status, sla_drain_holes, brim_points, printable,
            origin_translation, m_bounding_box_approx, m_bounding_box_approx_valid, m_bounding_box_exact,
            m_bounding_box_exact_valid, m_min_max_z_valid, m_raw_bounding_box, m_raw_bounding_box_valid,
            m_raw_mesh_bounding_box, m_raw_mesh_bounding_box_valid, cut_connectors, cut_id);

@@ -81,8 +81,8 @@ class SkeletalTrapezoidation
     coord_t ext_perimeter_width;     //!< External perimeter width
     coord_t ext_perimeter_spacing;   //!< External perimeter spacing matching the pre-inset
     coord_t ext_split_spacing;       //!< External perimeter spacing for split overlap (ext/perimeter overlap setting)
-    double debug_print_z{0.0};       //!< Print z for FILL_DEBUG log lines
-    int debug_layer_id{-1};          //!< Layer ID for FILL_DEBUG log lines
+    double debug_print_z{0.0};       //!< Print z for debug log lines
+    int debug_layer_id{-1};          //!< Layer ID for debug log lines
     static constexpr coord_t central_filter_dist = scaled<coord_t>(
         0.02); //!< Filter areas marked as 'central' smaller than this
     static constexpr coord_t snap_dist = scaled<coord_t>(

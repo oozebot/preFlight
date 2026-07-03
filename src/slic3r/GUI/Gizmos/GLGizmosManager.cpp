@@ -631,6 +631,23 @@ bool GLGizmosManager::on_char(const KeyInput &key)
     return processed;
 }
 
+bool GLGizmosManager::process_delete_key()
+{
+    // Mirrors the Delete handling in on_char(): the gizmos that use the Delete key to manage their
+    // own selection must get the key instead of the object being deleted. The object list and the
+    // Edit menu's "Del" accelerator reach object deletion without going through the canvas, so they
+    // call this first to give the active gizmo a chance to consume the key.
+    if (m_current == Cut || m_current == Measure || m_current == BrimEars)
+    {
+        if (gizmo_event(SLAGizmoEventType::Delete))
+        {
+            m_parent.set_as_dirty();
+            return true;
+        }
+    }
+    return false;
+}
+
 bool GLGizmosManager::on_key(const KeyInput &key)
 {
     const int keyCode = key.key_code;

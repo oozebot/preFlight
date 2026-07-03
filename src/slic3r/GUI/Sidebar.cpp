@@ -1726,6 +1726,21 @@ wxPanel *PrintSettingsPanel::BuildLayersContent()
         sizer->Add(hshells_group, 0, wxEXPAND | wxALL, em / 4);
     }
 
+    // Serpentine group (after Horizontal shells, before Interlocking per Tab.cpp order)
+    {
+        auto *serpentine_group = CreateFlatStaticBoxSizer(content, _L("Serpentine"));
+        CreateSettingRow(content, serpentine_group, "serpentine_enabled", _L("Enable Serpentine"));
+        CreateSettingRow(content, serpentine_group, "serpentine_extrusion_width", _L("Extrusion width"));
+        CreateSettingRow(content, serpentine_group, "serpentine_overlap", _L("Overlap"));
+        CreateSettingRow(content, serpentine_group, "serpentine_max_bead", _L("Maximum bead width"));
+        CreateSettingRow(content, serpentine_group, "serpentine_limit_depth", _L("Limit depth"));
+        CreateSettingRow(content, serpentine_group, "serpentine_depth", _L("Depth"));
+        CreateSettingRow(content, serpentine_group, "serpentine_solid_surfaces", _L("Solid top/bottom surfaces"));
+        CreateSettingRow(content, serpentine_group, "serpentine_ridges", _L("Ridges"));
+        CreateSettingRow(content, serpentine_group, "serpentine_aim", _L("Aim"));
+        sizer->Add(serpentine_group, 0, wxEXPAND | wxALL, em / 4);
+    }
+
     // Interlock Perimeters group (before Quality per Tab.cpp order)
     {
         auto *interlock_group = CreateFlatStaticBoxSizer(content, _L("Interlocking"));
@@ -1856,6 +1871,7 @@ wxPanel *PrintSettingsPanel::BuildInfillContent()
                          _L("Max combined layer height"));
         CreateSettingRow(content, time_group, "infill_every_layers", _L("Combine infill every"));
         CreateSettingRow(content, time_group, "narrow_to_athena", _L("Narrow to Athena"));
+        CreateSettingRow(content, time_group, "narrow_to_athena_top_bottom", _L("Narrow to Athena on top/bottom"));
         CreateSettingRow(content, time_group, "narrow_to_athena_threshold", _L("Narrow to Athena threshold"));
         sizer->Add(time_group, 0, wxEXPAND | wxALL, em / 4);
     }
@@ -2009,6 +2025,7 @@ wxPanel *PrintSettingsPanel::BuildSpeedContent()
     {
         auto *auto_group = CreateFlatStaticBoxSizer(content, _L("Speed for print moves"));
         CreateSettingRow(content, auto_group, "auto_speed", _L("Auto speed"));
+        CreateSettingRow(content, auto_group, "max_volumetric_flow", _L("Max volumetric flow"));
         CreateSettingRow(content, auto_group, "max_print_speed", _L("Max print speed"));
         sizer->Add(auto_group, 0, wxEXPAND | wxALL, em / 4);
     }
@@ -2034,10 +2051,10 @@ wxPanel *PrintSettingsPanel::BuildSpeedContent()
         auto *overhang_group = CreateFlatStaticBoxSizer(content, _L("Overhang speed"));
         CreateSettingRow(content, overhang_group, "enable_dynamic_overhang_speeds",
                          _L("Enable dynamic overhang speeds"));
-        CreateSettingRow(content, overhang_group, "overhang_speed_0", _L("Overhang speed 0%"));
-        CreateSettingRow(content, overhang_group, "overhang_speed_1", _L("Overhang speed 25%"));
-        CreateSettingRow(content, overhang_group, "overhang_speed_2", _L("Overhang speed 50%"));
-        CreateSettingRow(content, overhang_group, "overhang_speed_3", _L("Overhang speed 75%"));
+        CreateSettingRow(content, overhang_group, "overhang_speed_0", _L("Speed at 100% overhang"));
+        CreateSettingRow(content, overhang_group, "overhang_speed_1", _L("Speed at 75% overhang"));
+        CreateSettingRow(content, overhang_group, "overhang_speed_2", _L("Speed at 50% overhang"));
+        CreateSettingRow(content, overhang_group, "overhang_speed_3", _L("Speed at 25% overhang"));
         sizer->Add(overhang_group, 0, wxEXPAND | wxALL, em / 4);
     }
 
@@ -2782,6 +2799,43 @@ void PrintSettingsPanel::OnSettingChanged(const std::string &opt_key)
         break;
     }
 
+    // Serpentine coupling, matching the Print Settings tab: confirm on enable and revert if
+    // declined, switch the perimeter generator to Athena on enable, and turn Serpentine off if the
+    // generator moves away from Athena. The coupled controls do not reflect a programmatic edit
+    // here until a refresh (RefreshFromConfig is inert while a change is in flight), so request one
+    // once the current handler unwinds whenever the coupling changed a value.
+    bool serp_coupling_changed = false;
+    if (opt_key == "serpentine_enabled" && config.opt_bool("serpentine_enabled"))
+    {
+        MessageDialog dlg(wxGetApp().mainframe,
+                          _L("Serpentine prints each region as a single continuous extrusion in place of "
+                             "perimeters and infill, overriding most other print settings (perimeters, fill "
+                             "density, fill pattern and related options). With a depth limit set, the "
+                             "serpentine is confined to a band along the walls and the interior is filled "
+                             "with normal infill.\n\n"
+                             "Enable Serpentine?"),
+                          _L("Serpentine"), wxICON_WARNING | wxYES | wxNO);
+        if (dlg.ShowModal() != wxID_YES)
+        {
+            config.set_key_value("serpentine_enabled", new ConfigOptionBool(false));
+            serp_coupling_changed = true;
+        }
+        else if (config.opt_enum<PerimeterGeneratorType>("perimeter_generator") != PerimeterGeneratorType::Athena)
+        {
+            config.set_key_value("perimeter_generator",
+                                 new ConfigOptionEnum<PerimeterGeneratorType>(PerimeterGeneratorType::Athena));
+            serp_coupling_changed = true;
+        }
+    }
+    else if (opt_key == "perimeter_generator" && config.opt_bool("serpentine_enabled") &&
+             config.opt_enum<PerimeterGeneratorType>("perimeter_generator") != PerimeterGeneratorType::Athena)
+    {
+        config.set_key_value("serpentine_enabled", new ConfigOptionBool(false));
+        serp_coupling_changed = true;
+    }
+    if (serp_coupling_changed)
+        CallAfter([this]() { RefreshFromConfig(); });
+
     // Run validation through ConfigManipulation (same as Tab.cpp)
     // Use mainframe as dialog parent for proper centering
     ConfigManipulation config_manipulation(
@@ -2797,6 +2851,16 @@ void PrintSettingsPanel::OnSettingChanged(const std::string &opt_key)
     );
     // Pass the changed key so validation only runs for relevant changes
     config_manipulation.update_print_fff_config(&config, true, opt_key);
+
+    // Keep the legacy max_volumetric_speed alias in sync with max_volumetric_flow for
+    // pre/post-processing scripts (mirrors the filament MVF/MVS sync and Tab.cpp).
+    if (opt_key == "max_volumetric_flow")
+    {
+        auto *flow = config.option<ConfigOptionFloat>("max_volumetric_flow");
+        auto *speed = config.option<ConfigOptionFloat>("max_volumetric_speed");
+        if (flow && speed)
+            speed->value = flow->value;
+    }
 
     // Update the Print Settings tab to reflect the change
     // Note: Don't call update() as it runs validation again
@@ -3031,6 +3095,7 @@ void PrintSettingsPanel::ApplyToggleLogic()
 
     bool has_narrow_to_athena = config.opt_bool("narrow_to_athena");
     ToggleOption("narrow_to_athena_threshold", has_narrow_to_athena);
+    ToggleOption("narrow_to_athena_top_bottom", has_narrow_to_athena);
 
     bool has_ensure_vertical_shell_thickness = config.opt_enum<EnsureVerticalShellThickness>(
                                                    "ensure_vertical_shell_thickness") !=
@@ -3058,6 +3123,20 @@ void PrintSettingsPanel::ApplyToggleLogic()
     bool have_persistence = have_structured_noise &&
                             (noise_type == FuzzySkinNoiseType::Perlin || noise_type == FuzzySkinNoiseType::Billow);
     ToggleOption("fuzzy_skin_persistence", have_persistence);
+
+    // Serpentine dependencies
+    bool serpentine_athena = config.opt_enum<PerimeterGeneratorType>("perimeter_generator") ==
+                             PerimeterGeneratorType::Athena;
+    ToggleOption("serpentine_enabled", !has_spiral_vase);
+    bool serpentine_enabled = !has_spiral_vase && serpentine_athena && config.opt_bool("serpentine_enabled");
+    ToggleOption("serpentine_extrusion_width", serpentine_enabled);
+    ToggleOption("serpentine_overlap", serpentine_enabled);
+    ToggleOption("serpentine_max_bead", serpentine_enabled);
+    ToggleOption("serpentine_limit_depth", serpentine_enabled);
+    ToggleOption("serpentine_depth", serpentine_enabled && config.opt_bool("serpentine_limit_depth"));
+    ToggleOption("serpentine_solid_surfaces", serpentine_enabled);
+    ToggleOption("serpentine_ridges", serpentine_enabled);
+    ToggleOption("serpentine_aim", serpentine_enabled && config.opt_bool("serpentine_limit_depth"));
 
     // Interlocking perimeters dependencies
     bool interlock_enabled = config.opt_bool("interlock_perimeters_enabled");
@@ -6770,6 +6849,8 @@ wxPanel *FilamentSettingsPanel::BuildCoolingContent()
         CreateSettingRow(content, manual_group, "manual_fan_speed_overhang_perimeter", _L("Overhang perimeter"));
         CreateSettingRow(content, manual_group, "manual_fan_speed_interlocking_perimeter",
                          _L("Interlocking perimeter"));
+        CreateSettingRow(content, manual_group, "manual_fan_speed_serpentine", _L("Serpentine"));
+        CreateSettingRow(content, manual_group, "manual_fan_speed_serpentine_overhang", _L("Serpentine overhang"));
         CreateSettingRow(content, manual_group, "manual_fan_speed_internal_infill", _L("Internal infill"));
         CreateSettingRow(content, manual_group, "manual_fan_speed_solid_infill", _L("Solid infill"));
         CreateSettingRow(content, manual_group, "bridge_fan_speed", _L("Bridge"));
@@ -6797,6 +6878,7 @@ wxPanel *FilamentSettingsPanel::BuildCoolingContent()
         auto *spinup_group = CreateFlatStaticBoxSizer(content, _L("Fan spin-up"));
         CreateSettingRow(content, spinup_group, "fan_spinup_bridge_infill", _L("Bridge infill"));
         CreateSettingRow(content, spinup_group, "fan_spinup_overhang_perimeter", _L("Overhang perimeter"));
+        CreateSettingRow(content, spinup_group, "fan_spinup_serpentine_overhang", _L("Serpentine overhang"));
         sizer->Add(spinup_group, 0, wxEXPAND | wxALL, em / 4);
     }
 
@@ -8430,6 +8512,37 @@ void FilamentSettingsPanel::OnSettingChanged(const std::string &opt_key)
         }
     }
 
+    // Mutual exclusion: manual fan speeds and auto cooling cannot both be enabled (auto cooling
+    // adjusts fan speed per layer time, overriding manual values). Mirrors TabFilament::on_value_change().
+    if (opt_key == "enable_manual_fan_speeds" && config.has("cooling") &&
+        config.opt_bool("enable_manual_fan_speeds", 0) && config.opt_bool("cooling", 0))
+    {
+        auto *opt = config.option<ConfigOptionBools>("cooling", true);
+        if (opt && !opt->values.empty())
+            opt->values[0] = false;
+        auto cooling_it = m_setting_controls.find("cooling");
+        if (cooling_it != m_setting_controls.end())
+        {
+            if (auto *cb = dynamic_cast<::CheckBox *>(cooling_it->second.control))
+                cb->SetValue(false);
+            UpdateUndoUI("cooling");
+        }
+    }
+    else if (opt_key == "cooling" && config.has("enable_manual_fan_speeds") && config.opt_bool("cooling", 0) &&
+             config.opt_bool("enable_manual_fan_speeds", 0))
+    {
+        auto *opt = config.option<ConfigOptionBools>("enable_manual_fan_speeds", true);
+        if (opt && !opt->values.empty())
+            opt->values[0] = false;
+        auto manual_it = m_setting_controls.find("enable_manual_fan_speeds");
+        if (manual_it != m_setting_controls.end())
+        {
+            if (auto *cb = dynamic_cast<::CheckBox *>(manual_it->second.control))
+                cb->SetValue(false);
+            UpdateUndoUI("enable_manual_fan_speeds");
+        }
+    }
+
     // Keep legacy MVS alias in sync when MVF changes
     if (opt_key == "filament_max_volumetric_flow")
     {
@@ -8784,9 +8897,10 @@ void FilamentSettingsPanel::ApplyToggleLogic()
     // Manual fan controls require enable_manual_fan_speeds to be ON
     for (const char *el :
          {"manual_fan_speed_perimeter", "manual_fan_speed_external_perimeter",
-          "manual_fan_speed_interlocking_perimeter", "manual_fan_speed_internal_infill",
-          "manual_fan_speed_solid_infill", "manual_fan_speed_top_solid_infill", "manual_fan_speed_ironing",
-          "manual_fan_speed_skirt", "manual_fan_speed_support_material", "manual_fan_speed_support_interface"})
+          "manual_fan_speed_interlocking_perimeter", "manual_fan_speed_serpentine",
+          "manual_fan_speed_serpentine_overhang", "manual_fan_speed_internal_infill", "manual_fan_speed_solid_infill",
+          "manual_fan_speed_top_solid_infill", "manual_fan_speed_ironing", "manual_fan_speed_skirt",
+          "manual_fan_speed_support_material", "manual_fan_speed_support_interface"})
         ToggleOption(el, manual_fan_enabled);
 
     // Dynamic fan speed sub-options disabled when manual fan is enabled

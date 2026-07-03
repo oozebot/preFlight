@@ -800,7 +800,8 @@ void PlaterPresetComboBox::show_add_menu()
         menu, wxID_ANY, _L("Add physical printer"), "", [this](wxCommandEvent &) { add_physical_printer(); },
         "edit_uni", menu, []() { return true; }, wxGetApp().plater());
 
-    wxGetApp().plater()->PopupMenu(menu);
+    // Show at the cursor; Plater::PopupMenu() defaults to the top-left corner without a position.
+    wxGetApp().plater()->PopupMenu(menu, wxGetApp().plater()->ScreenToClient(wxGetMousePosition()));
 }
 
 void PlaterPresetComboBox::show_edit_menu()
@@ -841,7 +842,8 @@ void PlaterPresetComboBox::show_edit_menu()
         menu, wxID_ANY, _L("Add physical printer"), "", [this](wxCommandEvent &) { this->add_physical_printer(); },
         "edit_uni", menu, []() { return true; }, wxGetApp().plater());
 
-    wxGetApp().plater()->PopupMenu(menu);
+    // Show at the cursor; Plater::PopupMenu() defaults to the top-left corner without a position.
+    wxGetApp().plater()->PopupMenu(menu, wxGetApp().plater()->ScreenToClient(wxGetMousePosition()));
 }
 
 wxString PlaterPresetComboBox::get_preset_name(const Preset &preset)

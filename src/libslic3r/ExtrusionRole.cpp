@@ -21,6 +21,8 @@ GCodeExtrusionRole extrusion_role_to_gcode_extrusion_role(ExtrusionRole role)
         return GCodeExtrusionRole::None;
     if (role.is_perimeter())
     {
+        if (role.has(ExtrusionRoleModifier::Serpentine))
+            return role.is_bridge() ? GCodeExtrusionRole::SerpentineOverhang : GCodeExtrusionRole::Serpentine;
         if (role.has(ExtrusionRoleModifier::Interlocking))
             return GCodeExtrusionRole::InterlockingPerimeter;
         return role.is_bridge()     ? GCodeExtrusionRole::OverhangPerimeter
@@ -89,6 +91,10 @@ std::string gcode_extrusion_role_to_string(GCodeExtrusionRole role)
         return L("Wipe tower");
     case GCodeExtrusionRole::Custom:
         return L("Custom");
+    case GCodeExtrusionRole::Serpentine:
+        return L("Serpentine");
+    case GCodeExtrusionRole::SerpentineOverhang:
+        return L("Serp. Overhang");
     default:
         assert(false);
     }
@@ -129,6 +135,10 @@ GCodeExtrusionRole string_to_gcode_extrusion_role(const std::string_view role)
         return GCodeExtrusionRole::WipeTower;
     else if (role == L("Custom"))
         return GCodeExtrusionRole::Custom;
+    else if (role == L("Serp. Overhang"))
+        return GCodeExtrusionRole::SerpentineOverhang;
+    else if (role == L("Serpentine"))
+        return GCodeExtrusionRole::Serpentine;
     else
         return GCodeExtrusionRole::None;
 }

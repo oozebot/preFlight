@@ -534,6 +534,11 @@ boost::variant<Point, Scarf::Scarf> Placer::place_seam(const Layer *layer, const
     if (po->config().seam_position.value == spNearest)
     {
         const std::vector<Perimeters::BoundedPerimeter> &perimeters{this->perimeters_per_layer.at(po)[layer_index]};
+        // Same empty-precalc guard as the else branch below: a degenerate or overhang-sliver
+        // layer can produce no perimeters here, and place_seam_near would index an empty vector
+        // (pick_closest_bounding_box returns index 0 on an empty set). Fall back to the loop start.
+        if (perimeters.empty())
+            return loop.first_point();
         const auto [seam_choice, perimeter_index] = place_seam_near(perimeters, loop, last_pos,
                                                                     this->params.max_nearest_detour);
         return finalize_seam_position(loop, region, seam_choice, perimeters[perimeter_index].perimeter,
@@ -542,6 +547,12 @@ boost::variant<Point, Scarf::Scarf> Placer::place_seam(const Layer *layer, const
     else
     {
         const std::vector<SeamPerimeterChoice> &seams_on_perimeters{this->seams_per_object.at(po)[layer_index]};
+
+        // A loop can reach gcode emission on a layer for which seam precalculation produced no
+        // choices (a degenerate or overhang sliver the perimeter-creation step filtered out).
+        // choose_closest_seam would index an empty vector; fall back to the loop start instead.
+        if (seams_on_perimeters.empty())
+            return loop.first_point();
 
         // Special case.
         // If there are only two perimeters and the current perimeter is hole (clockwise).

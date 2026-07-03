@@ -16,6 +16,7 @@
 #include <vector>
 #include <utility>
 #include <cassert>
+#include <cmath>
 
 #include "Point.hpp"
 #include "libslic3r.h"
@@ -30,6 +31,24 @@ class PrintObjectConfig;
 class ModelConfig;
 class ModelObject;
 class DynamicPrintConfig;
+
+// preFlight: 1/N mm layer heights for N = 3, 6, 7, 9 are repeating decimals, so the user enters a
+// rounded value (0.3333, 0.1667, 0.1429, 0.1111) but means the exact fraction - N such layers should
+// tile exactly 1mm. Accumulating the rounded decimal drifts (3 * 0.3333 = 0.9999, not 1.0); returning
+// the exact 1/N removes that drift for any first-layer height. N = 2,4,5,8,10 are already exact
+// decimals (0.5, 0.25, 0.2, 0.125, 0.1) and are intentionally omitted, so heights near them are never
+// altered. Every other height passes through unchanged.
+inline coordf_t exact_layer_height(coordf_t layer_height)
+{
+    // Within this tolerance of 1/N the entry is treated as the exact fraction. Covers the 4-digit
+    // (0.3333) and 3-digit (0.333) roundings, and stays well below any height meant as distinct.
+    static constexpr coordf_t fraction_snap_tolerance = 0.0005;
+    if (layer_height > 0.0)
+        for (int n : {3, 6, 7, 9})
+            if (std::abs(layer_height - 1.0 / coordf_t(n)) < fraction_snap_tolerance)
+                return 1.0 / coordf_t(n);
+    return layer_height;
+}
 
 // Parameters to guide object slicing and support generation.
 // The slicing parameters account for a raft and whether the 1st object layer is printed with a normal or a bridging flow

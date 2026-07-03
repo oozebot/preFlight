@@ -374,6 +374,19 @@ static const t_config_enum_values s_keys_map_InterlockFlowDetection{
 };
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(InterlockFlowDetection)
 
+static const t_config_enum_values s_keys_map_SerpentineRidges{
+    {"aligned", int(srAligned)},
+    {"staggered", int(srStaggered)},
+    {"random", int(srRandom)},
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SerpentineRidges)
+
+static const t_config_enum_values s_keys_map_SerpentineAimType{
+    {"convergent", int(satConvergent)},
+    {"perpendicular", int(satPerpendicular)},
+};
+CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SerpentineAimType)
+
 static void assign_printer_technology_to_unknown(t_optiondef_map &options, PrinterTechnology printer_technology)
 {
     for (std::pair<const t_config_option_key, ConfigOptionDef> &kvp : options)
@@ -456,8 +469,16 @@ void PrintConfigDef::init_common_params()
     def = this->add("layer_height", coFloat);
     def->label = L("Layer height");
     def->category = L("Layers and Perimeters");
-    def->tooltip = L("This setting controls the height (and thus the total number) of the slices/layers. "
-                     "Thinner layers give better accuracy but take more time to print.");
+    def->tooltip = L("This setting controls the layer height used throughout the slice, except for the "
+                     "first layer. Thinner layers give better accuracy but take more time to print. When "
+                     "the height that fits a whole number of layers into 1 mm is a repeating decimal, enter "
+                     "the rounded value and it is used as the exact fraction, so the layers stay aligned to "
+                     "millimeter boundaries:\n\n"
+                     "0.3333 = 3 layers/mm\n"
+                     "0.1667 = 6 layers/mm\n"
+                     "0.1429 = 7 layers/mm\n"
+                     "0.1111 = 9 layers/mm\n\n"
+                     "1, 2, 4, 5, 8, and 10 layers/mm are exact decimals and are used as entered.");
     def->sidetext = L("mm");
     def->min = 0;
     def->set_default_value(new ConfigOptionFloat(0.3));
@@ -827,6 +848,26 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionInts{0});
 
+    def = this->add("manual_fan_speed_serpentine", coInts);
+    def->label = L("Serpentine");
+    def->tooltip = L("Fan speed for serpentine extrusions when auto cooling is disabled. "
+                     "Set to 0 to use no fan for this feature type.");
+    def->sidetext = L("%");
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInts{0});
+
+    def = this->add("manual_fan_speed_serpentine_overhang", coInts);
+    def->label = L("Serpentine overhang");
+    def->tooltip = L("Fan speed for overhanging serpentine extrusions when auto cooling is disabled. "
+                     "Set to 0 to use no fan for this feature type.");
+    def->sidetext = L("%");
+    def->min = 0;
+    def->max = 100;
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionInts{100});
+
     def = this->add("manual_fan_speed_external_perimeter", coInts);
     def->label = L("External perimeters");
     def->tooltip = L("Fan speed for external perimeters when auto cooling is disabled. "
@@ -992,14 +1033,14 @@ void PrintConfigDef::init_fff_params()
 
     // TRN PrintSettings : "Dynamic overhang speed"
     auto overhang_speed_setting_description = L(
-        "Overhang size is expressed as a percentage of overlap of the extrusion with the previous layer: "
-        "100% would be full overlap (no overhang), while 0% represents full overhang (floating extrusion, bridge). "
+        "Overhang size is expressed as the percentage of the extrusion that is unsupported by the previous layer: "
+        "100% is fully unsupported (floating extrusion, bridge), while 0% is fully supported (no overhang). "
         "Speeds for overhang sizes in between are calculated via linear interpolation. "
         "If set as percentage, the speed is calculated over the external perimeter speed. "
-        "Note that the speeds generated to gcode will never exceed the max volumetric speed value.");
+        "Note that the speeds generated to gcode will never exceed the max volumetric flow value.");
 
     def = this->add("overhang_speed_0", coFloatOrPercent);
-    def->label = L("Overhang speed 0%");
+    def->label = L("Speed at 100% overhang");
     def->category = L("Speed");
     def->tooltip = overhang_speed_setting_description;
     def->sidetext = L("mm/s or %");
@@ -1008,7 +1049,7 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloatOrPercent(40, true));
 
     def = this->add("overhang_speed_1", coFloatOrPercent);
-    def->label = L("Overhang speed 25%");
+    def->label = L("Speed at 75% overhang");
     def->category = L("Speed");
     def->tooltip = overhang_speed_setting_description;
     def->sidetext = L("mm/s or %");
@@ -1017,7 +1058,7 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloatOrPercent(55, true));
 
     def = this->add("overhang_speed_2", coFloatOrPercent);
-    def->label = L("Overhang speed 50%");
+    def->label = L("Speed at 50% overhang");
     def->category = L("Speed");
     def->tooltip = overhang_speed_setting_description;
     def->sidetext = L("mm/s or %");
@@ -1026,7 +1067,7 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloatOrPercent(70, true));
 
     def = this->add("overhang_speed_3", coFloatOrPercent);
-    def->label = L("Overhang speed 75%");
+    def->label = L("Speed at 25% overhang");
     def->category = L("Speed");
     def->tooltip = overhang_speed_setting_description;
     def->sidetext = L("mm/s or %");
@@ -1550,6 +1591,14 @@ void PrintConfigDef::init_fff_params()
     def = this->add("fan_spinup_overhang_perimeter", coBools);
     def->label = L("Overhang perimeters");
     def->tooltip = L("Enable early fan spin-up before overhang perimeters. "
+                     "When enabled, the fan command is issued early enough for the fan to reach target speed "
+                     "before the overhang begins. Requires Spin-up time > 0.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBools{false});
+
+    def = this->add("fan_spinup_serpentine_overhang", coBools);
+    def->label = L("Serpentine overhang");
+    def->tooltip = L("Enable early fan spin-up before overhanging serpentine extrusions. "
                      "When enabled, the fan command is issued early enough for the fan to reach target speed "
                      "before the overhang begins. Requires Spin-up time > 0.");
     def->mode = comAdvanced;
@@ -2943,27 +2992,27 @@ void PrintConfigDef::init_fff_params()
                      "The P parameter controls jerk policy:\n"
                      "  P0 (default): Jerk only between consecutive extrusion or travel moves\n"
                      "  P1: Marlin-like behavior (jerk between any moves)\n\n"
-                     "Example: M566 X600 Y600 Z24 E300 P0");
+                     "Default: M566 X900 Y900 Z600 E300 P0");
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionString(""));
+    def->set_default_value(new ConfigOptionString("M566 X900 Y900 Z600 E300 P0"));
 
     def = this->add("machine_rrf_m201", coString);
     def->label = L("M201 (Max Accel)");
     def->category = L("Machine limits");
     def->tooltip = L("Enter your M201 command from config.g.\n\n"
                      "Sets maximum acceleration per axis in mm/s\u00B2.\n\n"
-                     "Example: M201 X500 Y500 Z20 E250");
+                     "Default: M201 X1000 Y1000 Z200 E500");
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionString(""));
+    def->set_default_value(new ConfigOptionString("M201 X1000 Y1000 Z200 E500"));
 
     def = this->add("machine_rrf_m203", coString);
     def->label = L("M203 (Max Speed)");
     def->category = L("Machine limits");
     def->tooltip = L("Enter your M203 command from config.g.\n\n"
                      "Sets maximum feedrate per axis in mm/min (NOT mm/sec!).\n\n"
-                     "Example: M203 X18000 Y18000 Z900 E3600");
+                     "Default: M203 X6000 Y6000 Z1200 E6000");
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionString(""));
+    def->set_default_value(new ConfigOptionString("M203 X6000 Y6000 Z1200 E6000"));
 
     def = this->add("machine_rrf_m204", coString);
     def->label = L("M204 (Accel)");
@@ -2972,8 +3021,7 @@ void PrintConfigDef::init_fff_params()
                      "Sets print and travel acceleration in mm/s\u00B2.\n"
                      "  P = Print acceleration (with extrusion)\n"
                      "  T = Travel acceleration (without extrusion)\n\n"
-                     "Example: M204 P500 T1000\n\n"
-                     "Leave blank to use defaults.");
+                     "Optional - leave blank to let the M201 per-axis limits govern.");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionString(""));
 
@@ -2987,8 +3035,7 @@ void PrintConfigDef::init_fff_params()
                      "  T = Unretract feedrate (mm/min)\n"
                      "  Z = Z-lift during retract (mm)\n"
                      "  R = Extra unretract length (mm)\n\n"
-                     "Example: M207 S1.0 F2700 T2700 Z0.2\n\n"
-                     "Leave blank if not using firmware retraction (G10/G11).");
+                     "Optional - leave blank if not using firmware retraction (G10/G11).");
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionString(""));
 
@@ -3132,10 +3179,23 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert;
     def->set_default_value(new ConfigOptionFloat(80));
 
+    // Legacy alias - kept for preset compatibility and pre/post-processing scripts
     def = this->add("max_volumetric_speed", coFloat);
-    def->label = L("Max volumetric speed");
-    def->tooltip = L("This experimental setting is used to set the maximum volumetric speed your "
-                     "extruder supports.");
+    def->label = L("Max volumetric flow");
+    def->tooltip = L("Print-level cap on volumetric flow. When greater than zero, it clamps each "
+                     "filament's Max volumetric flow if this value is lower, limiting auto speed "
+                     "accordingly. Set to 0 to rely solely on the filament's Max volumetric flow.");
+    def->sidetext = L("mm³/s");
+    def->min = 0;
+    def->mode = comExpert;
+    def->set_default_value(new ConfigOptionFloat(0));
+
+    // Alias for max_volumetric_speed with the correct name
+    def = this->add("max_volumetric_flow", coFloat);
+    def->label = L("Max volumetric flow");
+    def->tooltip = L("Print-level cap on volumetric flow. When greater than zero, it clamps each "
+                     "filament's Max volumetric flow if this value is lower, limiting auto speed "
+                     "accordingly. Set to 0 to rely solely on the filament's Max volumetric flow.");
     def->sidetext = L("mm³/s");
     def->min = 0;
     def->mode = comExpert;
@@ -3402,6 +3462,107 @@ void PrintConfigDef::init_fff_params()
     def->min = 0;
     def->max = 10000;
     def->set_default_value(new ConfigOptionInt(3));
+
+    def = this->add("serpentine_enabled", coBool);
+    def->label = L("Enable Serpentine");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Prints a region as a continuous serpentine extrusion: a single line that weaves back "
+                     "and forth, inward from the walls. Without a depth limit it fills the whole cross-section, "
+                     "replacing the region's perimeters and infill; with a depth limit it forms a band along "
+                     "the walls and the interior is filled with normal infill.\n\n"
+                     "Enabling this switches the perimeter generator to Athena and takes over the region's "
+                     "perimeters and most related wall settings.\n\n"
+                     "Best on simple, symmetric parts such as nuts, bolts, and knurled knobs; complex shapes "
+                     "may slice poorly.");
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("serpentine_extrusion_width", coFloatOrPercent);
+    def->label = L("Serpentine extrusion width");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Width of the serpentine extrusion. If expressed as percentage (for example 105%), "
+                     "it will be computed over layer height. Set to 0 to use the external perimeter "
+                     "extrusion width.");
+    def->sidetext = L("mm or %");
+    def->ratio_over = "layer_height";
+    def->min = 0;
+    def->set_default_value(new ConfigOptionFloatOrPercent(0, false));
+
+    def = this->add("serpentine_overlap", coFloatOrPercent);
+    def->label = L("Serpentine overlap");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("How deeply neighboring serpentine beads bond into each other. Percent values are "
+                     "computed over layer height, matching the Interlocking overlap semantics. Negative "
+                     "values spread the beads apart instead, leaving a uniform gap between them that "
+                     "lowers the effective density.\n\n"
+                     "Default: 10.73% (safe starting point)");
+    def->sidetext = L("mm or %");
+    def->ratio_over = "layer_height";
+    def->min = -500;
+    def->max = 100;
+    def->set_default_value(new ConfigOptionFloatOrPercent(10.73, true));
+
+    def = this->add("serpentine_max_bead", coPercent);
+    def->label = L("Serpentine maximum bead width");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Upper limit for bead widening, as a percent of the nozzle diameter. Where the "
+                     "pattern opens up at depth, beads grow up to this width to fill the gap.");
+    def->sidetext = L("%");
+    def->min = 100;
+    def->max = 250;
+    def->set_default_value(new ConfigOptionPercent(150));
+
+    def = this->add("serpentine_limit_depth", coBool);
+    def->label = L("Limit Serpentine depth");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Restrict the serpentine pattern to a wall of the depth set below instead of filling "
+                     "the whole region. The interior beyond that depth is filled normally (sparse infill, "
+                     "solid top and bottom layers), exactly like the leftover area behind ordinary "
+                     "perimeters. When disabled, the serpentine fills the entire region.");
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("serpentine_depth", coFloat);
+    def->label = L("Serpentine depth");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Maximum depth the serpentine wall reaches inward from the surface when \"Limit "
+                     "Serpentine depth\" is enabled. The interior beyond this depth is filled normally.\n\n"
+                     "The smallest pattern that can close is two extrusion widths, so any smaller value is "
+                     "raised to that minimum.");
+    def->sidetext = L("mm");
+    def->min = 0;
+    def->set_default_value(new ConfigOptionFloat(2.5));
+
+    def = this->add("serpentine_solid_surfaces", coBool);
+    def->label = L("Solid top/bottom surfaces");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Print the visible portions of top and bottom surfaces as ordinary solid infill, "
+                     "using the solid layer counts from Horizontal shells. The boundary keeps the "
+                     "serpentine zigzag at its shortest depth so the side pattern stays continuous, and "
+                     "covered interior areas continue as serpentine.");
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("serpentine_ridges", coEnum);
+    def->label = L("Serpentine ridges");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Controls how the external zigzag ridges stack from layer to layer.\n"
+                     "• Aligned: ridges stack vertically into straight columns.\n"
+                     "• Staggered: the pattern staggers half a tooth each layer, so every cap is bridged "
+                     "by the layers above and below (brickwork).\n"
+                     "• Random: the pattern lands at a random position on every layer.");
+    def->set_enum<SerpentineRidges>(std::initializer_list<std::pair<std::string_view, std::string_view>>{
+        {"aligned", L("Aligned")}, {"staggered", L("Staggered")}, {"random", L("Random")}});
+    def->set_default_value(new ConfigOptionEnum<SerpentineRidges>(srStaggered));
+
+    def = this->add("serpentine_aim", coEnum);
+    def->label = L("Serpentine aim");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("How depth-limited Serpentine teeth are aimed. Convergent points every "
+                     "tooth at the part center, giving a smooth radial fan (best for round parts "
+                     "like bolts and nuts). Perpendicular points each tooth square to the wall "
+                     "(best for curved or irregular parts). Only applies when depth limit is on.");
+    def->set_enum<SerpentineAimType>(
+        std::initializer_list<std::pair<std::string_view, std::string_view>>{{"convergent", L("Convergent")},
+                                                                             {"perpendicular", L("Perpendicular")}});
+    def->set_default_value(new ConfigOptionEnum<SerpentineAimType>(satConvergent));
 
     def = this->add("interlock_perimeters_enabled", coBool);
     def->label = L("Enable interlocking perimeters");
@@ -4926,6 +5087,15 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(3.0));
 
+    def = this->add("narrow_to_athena_top_bottom", coBool);
+    def->label = L("Narrow to Athena on top/bottom");
+    def->category = L("Infill");
+    def->tooltip = L("Also apply Narrow to Athena to top and bottom solid surfaces, not only internal solid. "
+                     "Thin areas of these visible surfaces convert to a smooth Athena bead instead of the "
+                     "configured pattern, while wider areas keep it. Only applies when 'Narrow to Athena' is enabled.");
+    def->mode = comAdvanced;
+    def->set_default_value(new ConfigOptionBool(false));
+
     def = this->add("travel_speed", coFloat);
     def->label = L("Travel");
     def->tooltip = L("Speed for travel moves (jumps between distant extrusion points).");
@@ -6396,9 +6566,10 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         // Legacy: no_brim replaced by painted (no painted points = no brim)
         value = "painted";
     }
-    else if (opt_key == "host_type" && value == "mainsail")
+    else if (opt_key == "host_type" && (value == "mainsail" || value == "klipper"))
     {
-        // the "mainsail" key (introduced in 2.6.0-alpha6) was renamed to "moonraker" (in 2.6.0-rc1).
+        // Klipper is controlled via the Moonraker API; the "mainsail" web UI likewise sits on Moonraker.
+        // Map both onto preFlight's "moonraker" host type (labeled "Klipper" in the UI).
         value = "moonraker";
     }
     else if (opt_key == "host_type" && value == "locallink")
@@ -6467,6 +6638,11 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
         // gcode_label_objects used to be a bool (the behavior was nothing or "octoprint"), it is
         // Legacy: converted to enum.
         value = value == "1" ? "octoprint" : "disabled";
+    }
+    else if (opt_key == "arc_fitting" && (value == "0" || value == "1"))
+    {
+        // External slicers store arc_fitting as a bool; preFlight uses an enum.
+        value = value == "1" ? "emit_center" : "disabled";
     }
     else if (opt_key == "narrow_solid_infill_concentric")
     {
@@ -6569,6 +6745,17 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
     {
         opt_key = "seam_type";
         value = (value == "1" || value == "true") ? "niptuck" : "regular";
+    }
+
+    // preFlight: external slicers (e.g. SuperSlicer) leave an *_extrusion_width field blank when it is driven
+    // by a sibling setting preFlight lacks (extrusion-spacing). An empty string cannot deserialize and would
+    // abort the whole bundle import, so normalize a blank/whitespace value to "0" (auto). Scoped to the
+    // extrusion-width family specifically (where 0 means "auto / derive from nozzle"); other blank numerics
+    // are left to fail loudly, since a blank elsewhere is corruption rather than an intentional "auto".
+    if (value.find_first_not_of(" \t") == std::string::npos && boost::ends_with(opt_key, "extrusion_width"))
+    {
+        if (const ConfigOptionDef *od = print_config_def.get(opt_key); od != nullptr && od->type == coFloatOrPercent)
+            value = "0";
     }
 
     if (PrintConfigDef_ignore.find(opt_key) != PrintConfigDef_ignore.end())
@@ -7521,6 +7708,13 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->tooltip = L("Sets logging sensitivity. 0:fatal, 1:error, 2:warning, 3:info, 4:debug, 5:trace\n"
                      "For example. loglevel=2 logs fatal, error and warning level messages.");
     def->min = 0;
+
+    def = this->add("debug", coString);
+    def->label = L("Debug output categories");
+    def->tooltip = L("Emit diagnostic output to stdout for the given comma-separated categories: "
+                     "fill, perimeters, interlock, serpentine, or all. Example: --debug serpentine,fill");
+    def->cli = "debug";
+    def->set_default_value(new ConfigOptionString());
 
 #ifdef SLIC3R_GUI
     def = this->add("opengl-aa", coBool);

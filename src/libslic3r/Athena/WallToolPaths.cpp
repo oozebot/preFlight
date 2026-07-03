@@ -18,7 +18,8 @@
 #include "libslic3r/Geometry.hpp"
 #include "utils/PolylineStitcher.hpp"
 #include "libslic3r/ClipperUtils.hpp"
-#include "libslic3r/Fill/FillBase.hpp" // FILL_DEBUG flag + dbg_fill_print()
+#include "libslic3r/DebugOutput.hpp" // debug_enabled / DBG_PERIMETERS
+#include "libslic3r/Fill/FillBase.hpp"
 #include "libslic3r/Athena/BeadingStrategy/BeadingStrategy.hpp"
 #include "libslic3r/Athena/BeadingStrategy/BeadingStrategyFactory.hpp"
 #include "libslic3r/Athena/utils/ExtrusionJunction.hpp"
@@ -1185,10 +1186,10 @@ const std::vector<VariableWidthLines> &WallToolPaths::getToolPaths()
 static void dbg_wtp_classify(double z, int layer_id, const std::vector<VariableWidthLines> &toolpaths,
                              size_t inset_count)
 {
-    if (!FILL_DEBUG)
+    if (!Slic3r::debug_enabled(Slic3r::DBG_PERIMETERS))
         return;
-    dbg_fill_print("z=%.3f [PERIM] WTP_CLASSIFY layer=%d inset_count=%zu toolpaths=%zu\n", z, layer_id, inset_count,
-                   toolpaths.size());
+    dbg_log(Slic3r::DBG_PERIMETERS, z, "PERIM", "WTP_CLASSIFY layer=%d inset_count=%zu toolpaths=%zu", layer_id,
+            inset_count, toolpaths.size());
     for (size_t inset_idx = 0; inset_idx < toolpaths.size(); ++inset_idx)
     {
         const VariableWidthLines &inset = toolpaths[inset_idx];
@@ -1226,16 +1227,17 @@ static void dbg_wtp_classify(double z, int layer_id, const std::vector<VariableW
                 ++mixed_lines;
         }
         const bool inset_mixed = (zero_junctions > 0 && nonzero_junctions > 0);
-        dbg_fill_print("z=%.3f [PERIM]   WTP_INSET idx=%zu lines=%zu zero_j=%zu nz_j=%zu mixed_lines=%zu "
-                       "inset_mixed=%d predicted_is_contour=%d\n",
-                       z, inset_idx, inset.size(), zero_junctions, nonzero_junctions, mixed_lines, inset_mixed ? 1 : 0,
-                       predicted_is_contour ? 1 : 0);
+        dbg_log(Slic3r::DBG_PERIMETERS, z, "PERIM",
+                "  WTP_INSET idx=%zu lines=%zu zero_j=%zu nz_j=%zu mixed_lines=%zu "
+                "inset_mixed=%d predicted_is_contour=%d",
+                inset_idx, inset.size(), zero_junctions, nonzero_junctions, mixed_lines, inset_mixed ? 1 : 0,
+                predicted_is_contour ? 1 : 0);
         for (size_t li = 0; li < inset.size(); ++li)
         {
             const ExtrusionLine &line = inset[li];
             if (line.junctions.empty())
             {
-                dbg_fill_print("z=%.3f [PERIM]     WTP_LINE  [%zu] EMPTY\n", z, li);
+                dbg_log(Slic3r::DBG_PERIMETERS, z, "PERIM", "    WTP_LINE  [%zu] EMPTY", li);
                 continue;
             }
             coord_t min_w = line.junctions.front().w, max_w = min_w;
@@ -1252,12 +1254,13 @@ static void dbg_wtp_classify(double z, int layer_id, const std::vector<VariableW
                 if (j.w == 0)
                     ++line_zero;
             }
-            dbg_fill_print("z=%.3f [PERIM]     WTP_LINE  [%zu] is_odd=%d is_closed=%d pts=%zu first_w=%.4fmm "
-                           "w=%.4f-%.4fmm zero_j=%zu bbox=(%.2f,%.2f)-(%.2f,%.2f)\n",
-                           z, li, (int) line.is_odd, (int) line.is_closed, line.junctions.size(),
-                           unscaled<double>(line.junctions.front().w), unscaled<double>(min_w), unscaled<double>(max_w),
-                           line_zero, unscaled<double>(pmin.x()), unscaled<double>(pmin.y()),
-                           unscaled<double>(pmax.x()), unscaled<double>(pmax.y()));
+            dbg_log(Slic3r::DBG_PERIMETERS, z, "PERIM",
+                    "    WTP_LINE  [%zu] is_odd=%d is_closed=%d pts=%zu first_w=%.4fmm "
+                    "w=%.4f-%.4fmm zero_j=%zu bbox=(%.2f,%.2f)-(%.2f,%.2f)",
+                    li, (int) line.is_odd, (int) line.is_closed, line.junctions.size(),
+                    unscaled<double>(line.junctions.front().w), unscaled<double>(min_w), unscaled<double>(max_w),
+                    line_zero, unscaled<double>(pmin.x()), unscaled<double>(pmin.y()), unscaled<double>(pmax.x()),
+                    unscaled<double>(pmax.y()));
         }
     }
 }
@@ -1418,10 +1421,10 @@ void WallToolPaths::separateOutInnerContour()
             actual_toolpaths.emplace_back(std::move(kept_lines));
     }
 
-    if (FILL_DEBUG && stripped_mixed_lines > 0)
+    if (Slic3r::debug_enabled(Slic3r::DBG_PERIMETERS) && stripped_mixed_lines > 0)
     {
-        dbg_fill_print("z=%.3f [PERIM] WTP_CLASSIFY layer=%d stripped_mixed_lines=%zu\n", debug_print_z, debug_layer_id,
-                       stripped_mixed_lines);
+        dbg_log(Slic3r::DBG_PERIMETERS, debug_print_z, "PERIM", "WTP_CLASSIFY layer=%d stripped_mixed_lines=%zu",
+                debug_layer_id, stripped_mixed_lines);
     }
 
     if (!actual_toolpaths.empty())

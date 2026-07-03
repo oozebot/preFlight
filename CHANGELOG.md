@@ -1,5 +1,76 @@
 # preFlight Changelog
 
+## v1.2.0
+
+### Serpentine
+
+Note - Serpentine is not suitable for all geometry and may produce poor or unexpected results on complex shapes. It works best on symmetric objects such as nuts and bolts
+
+- New perimeter generator mode that fills a region with a single continuous extrusion in place of separate perimeters and infill. The path weaves inward from the boundary in a repeating serpentine pattern
+  - Turn it on per region under Print Settings > Layers and perimeters > Serpentine. It runs on the Athena generator, so enabling it switches the generator to Athena (with a confirmation prompt)
+- Layer ridge stacking: Aligned, Staggered, or Random. Staggered (default) shifts the pattern half a period each layer so the turns overlap each other for a stronger bond between layers
+- Depth limit: form a serpentine wall to a set depth in mm and fill the interior with sparse infill and solid top/bottom layers
+- Aim: Convergent or Perpendicular, controlling how the depth-limited pattern points at the inner boundary (depth mode only)
+- Solid top and bottom layer option prints solid infill with a serpentine band so visible faces stay closed
+- Has its own feature type in the G-code preview, with overhanging spans split as "Serp. Overhang"
+- Prints at External perimeter speed, fan, and acceleration settings with its own manual fan controls under Filament > Cooling
+- Extrusion width, overlap (negative values lower density), and maximum bead width are all configurable
+
+### Preprocessing
+
+Important - do not keep your custom preprocessing scripts inside preFlight's resources folder. preFlight ships self-contained, so a script saved there does not carry over when you install a new version. Keep your custom scripts outside of the preFlight install folder to guarantee they survive upgrades.
+
+Previously installed Python packages (numpy, etc.) need to be reinstalled after this update, but will now survive future updates and will only need reinstalling when preFlight ships a new version of Python.
+
+- Installed packages are stored in your preFlight data folder, so upgrading preFlight no longer wipes them
+- The Python Console reliably launches preFlight's bundled Python and pip on Windows, macOS, and Linux, with pip pre-installed and HTTPS working out of the box
+- Only packages that provide a prebuilt wheel can be installed (the bundled Python has no compiler)
+
+### Interlocking
+- "Perimeters while Interlocking" perimeter count reduction fills suppressed regions with the full perimeter count while the buried core keeps its reduced walls and interlocking shells (#224)
+
+### Narrow-to-Athena
+- Narrow-to-Athena infill option now splits a surface by width: thin frames, necks, and spikes convert to a smooth Athena bead while the wider area keeps its solid pattern (#239)
+  - Added a separate opt-in for top and bottom surfaces (off by default); internal solid always splits when Narrow-to-Athena is on
+  - If the split fails to cover the surface, the region falls back to un-split so no gap is left
+
+### Speed & Time Estimation
+- Fixed badly inflated time estimates on Klipper and RepRapFirmware profiles, where a small part could read days instead of minutes. Klipper limits are built from the four fields it actually exposes rather than hidden legacy per-axis arrays, RepRapFirmware falls back to Duet firmware defaults, and a zero acceleration limit is read as "no limit" instead of freezing the move (#246)
+- Dynamic overhang speed interpolates smoothly between the configured bands instead of stepping between them, and rounds to a 2 mm/s grid to keep the G-code smaller
+- Print-level max volumetric flow (renamed from max_volumetric_speed, with the old name kept as an alias) moved into the Print Settings speed group and the sidebar, where it caps each filament's flow under auto speed
+- Renamed the dynamic overhang speed labels to "Speed at N% overhang"
+
+### Layer Height
+- Repeating-decimal layer heights (1/3, 1/6, 1/7, 1/9 mm) resolve to their exact fraction, so past the first layer every N layers add up to exactly 1 mm (3 at 0.3333 mm, 6 at 0.1667) instead of drifting up the object
+- Organic supports follow the object's layer grid instead of landing on their own Z at fractional layer heights
+- Added N-per-mm guidance and a value cheat sheet to the layer height tooltip
+
+### Config Import
+- SuperSlicer and other external config bundles that used to fail on import now load: blank extrusion widths fall back to auto, arc_fitting converts from a bool, and host_type "klipper" maps to "moonraker" (#162)
+- Importing a bundle from another slicer warns that its settings may not translate exactly
+
+### Menus & Right-Click
+- Added Export G-code / Slice Platter and view-navigation entries to the Prepare and Preview right-click menus
+- Fixed the object-list and preset context menus opening in the top-left corner instead of at the cursor
+- Fixed Recent Projects opening the wrong project after the list reordered (#233)
+- Fixed object-list setting changes leaving the action button on "Export G-code" and blocking reslices for the rest of the session (#230)
+- Stopped the top menus closing themselves on open under seamless window managers such as Qubes (#233)
+
+### Bug Fixes
+- Fixed Shift+drag box selection on the plate selecting nothing (#230)
+- Fixed the support blocker painting nothing on right-click, so supports were never actually blocked
+- Fixed Delete removing the object instead of restarting selection while the Measure gizmo is open (#236)
+- Fixed right-clicking a brim ear while hovering the object also opening the platter menu
+- Fixed a lower-density part of a multipart object losing its infill on layers it shares with a taller part (#235)
+- Fixed rendering issues with currency symbols outside the Latin-1 range (ruble, euro, won, rupee)
+- Fixed the Preprocessing tab labels being unreadable in light themes on Linux
+
+### Hardware
+- Added the Bluetooth SpaceMouse Wireless and SpaceMouse Pro Wireless to the 3Dconnexion device list on Linux and macOS (#244)
+
+### Developer
+- Added a runtime `--debug` flag (fill, perimeters, interlock, serpentine, or all) that replaces the old compile-time debug switches
+
 ## v1.1.0
 
 Note: You didn't read this wrong. With this release, we are jumping straight to v1.1.0 and skipping v1.0.1-stable with some significant changes.

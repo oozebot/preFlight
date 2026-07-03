@@ -74,6 +74,9 @@ SlicingParameters SlicingParameters::create_from_config(const PrintConfig &print
     assert(!print_config.first_layer_height.percent);
     coordf_t first_layer_height = (print_config.first_layer_height.value <= 0) ? object_config.layer_height.value
                                                                                : print_config.first_layer_height.value;
+    // preFlight: resolve repeating-decimal heights (1/3, 1/6, 1/7, 1/9) to their exact fraction so the
+    // layer grid lands on clean boundaries instead of accumulating float drift.
+    first_layer_height = exact_layer_height(first_layer_height);
     // If object_config.support_material_extruder == 0 resp. object_config.support_material_interface_extruder == 0,
     // print_config.nozzle_diameter.get_at(size_t(-1)) returns the 0th nozzle diameter,
     // which is consistent with the requirement that if support_material_extruder == 0 resp. support_material_interface_extruder == 0,
@@ -86,7 +89,7 @@ SlicingParameters SlicingParameters::create_from_config(const PrintConfig &print
     bool soluble_interface = object_config.support_material_contact_distance.value == stcgNoGap;
 
     SlicingParameters params;
-    params.layer_height = object_config.layer_height.value;
+    params.layer_height = exact_layer_height(object_config.layer_height.value);
     params.first_print_layer_height = first_layer_height;
     params.first_object_layer_height = first_layer_height;
     params.object_print_z_min = 0.;

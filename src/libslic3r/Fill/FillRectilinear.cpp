@@ -3840,16 +3840,18 @@ bool FillRectilinear::fill_surface_by_lines(const Surface *surface, const FillPa
     std::vector<SegmentedIntersectionLine> segs = slice_region_by_vertical_lines(poly_with_offset, n_vlines, x0,
                                                                                  line_spacing);
 
+    if (Slic3r::debug_enabled(Slic3r::DBG_FILL))
     {
         size_t n_segs_with_isect = 0;
         for (const auto &s : segs)
             if (!s.intersections.empty())
                 ++n_segs_with_isect;
-        dbg_fill_print("z=%.3f [FILL] LINES n_vlines=%zu segs_with_isect=%zu line_spacing=%d density=%.4f "
-                       "bbox_src=(%.2f,%.2f)-(%.2f,%.2f)\n",
-                       this->z, n_vlines, n_segs_with_isect, int(line_spacing), params.density,
-                       unscaled<double>(bounding_box_src.min.x()), unscaled<double>(bounding_box_src.min.y()),
-                       unscaled<double>(bounding_box_src.max.x()), unscaled<double>(bounding_box_src.max.y()));
+        dbg_log(Slic3r::DBG_FILL, this->z, "FILL",
+                "LINES n_vlines=%zu segs_with_isect=%zu line_spacing=%d density=%.4f "
+                "bbox_src=(%.2f,%.2f)-(%.2f,%.2f)",
+                n_vlines, n_segs_with_isect, int(line_spacing), params.density,
+                unscaled<double>(bounding_box_src.min.x()), unscaled<double>(bounding_box_src.min.y()),
+                unscaled<double>(bounding_box_src.max.x()), unscaled<double>(bounding_box_src.max.y()));
     }
 
     // Connect by horizontal / vertical links, classify the links based on link_max_length as too long.
@@ -4014,8 +4016,8 @@ bool FillRectilinear::fill_surface_by_lines(const Surface *surface, const FillPa
         double post_clip_length = 0;
         for (size_t i = n_polylines_out_initial; i < polylines_out.size(); ++i)
             post_clip_length += unscale<double>(polylines_out[i].length());
-        dbg_fill_print("z=%.3f [FILL] CLIP pre=%zu(%.1fmm) post=%zu(%.1fmm) lost=%.1fmm\n", this->z, pre_clip_count,
-                       pre_clip_length, post_clip_count, post_clip_length, pre_clip_length - post_clip_length);
+        dbg_log(Slic3r::DBG_FILL, this->z, "FILL", "CLIP pre=%zu(%.1fmm) post=%zu(%.1fmm) lost=%.1fmm", pre_clip_count,
+                pre_clip_length, post_clip_count, post_clip_length, pre_clip_length - post_clip_length);
     }
 
 #ifdef SLIC3R_DEBUG
@@ -4139,10 +4141,11 @@ bool FillRectilinear::fill_surface_by_multilines(const Surface *surface, FillPar
         make_fill_lines(ExPolygonWithOffset(poly_with_offset_base, -angle), rotate_vector.second.rotated(-angle), angle,
                         line_width + coord_t(SCALED_EPSILON), line_spacing, coord_t(scale_(sweep.pattern_shift)),
                         fill_lines);
-        dbg_fill_print("z=%.3f [FILL] MULTILINE sweep_angle=%.4f raw_lines=%zu spacing=%.4f density=%.6f "
-                       "line_spacing=%d refpt=(%d,%d)\n",
-                       this->z, double(angle), fill_lines.size() - before, this->spacing, params.density,
-                       int(line_spacing), rotate_vector.second.x(), rotate_vector.second.y());
+        dbg_log(Slic3r::DBG_FILL, this->z, "FILL",
+                "MULTILINE sweep_angle=%.4f raw_lines=%zu spacing=%.4f density=%.6f "
+                "line_spacing=%d refpt=(%d,%d)",
+                double(angle), fill_lines.size() - before, this->spacing, params.density, int(line_spacing),
+                rotate_vector.second.x(), rotate_vector.second.y());
     }
 
     size_t total_raw = fill_lines.size();
@@ -4154,15 +4157,15 @@ bool FillRectilinear::fill_surface_by_multilines(const Surface *surface, FillPar
                                                    coord_t(scale_(this->spacing) * 3 / params.density),
                                                    params.start_near ? &(*params.start_near) : nullptr);
         append(polylines_out, std::move(fill_lines));
-        dbg_fill_print("z=%.3f [FILL] MULTILINE_RESULT raw=%zu out=%zu (dont_connect)\n", this->z, total_raw,
-                       polylines_out.size() - before_out);
+        dbg_log(Slic3r::DBG_FILL, this->z, "FILL", "MULTILINE_RESULT raw=%zu out=%zu (dont_connect)", total_raw,
+                polylines_out.size() - before_out);
     }
     else
     {
         connect_infill(std::move(fill_lines), poly_with_offset_base.polygons_outer_flat(),
                        get_extents(surface->expolygon.contour), polylines_out, this->spacing, params);
-        dbg_fill_print("z=%.3f [FILL] MULTILINE_RESULT raw=%zu connected=%zu\n", this->z, total_raw,
-                       polylines_out.size() - before_out);
+        dbg_log(Slic3r::DBG_FILL, this->z, "FILL", "MULTILINE_RESULT raw=%zu connected=%zu", total_raw,
+                polylines_out.size() - before_out);
     }
 
     return true;

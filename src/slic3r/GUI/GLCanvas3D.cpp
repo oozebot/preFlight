@@ -6569,154 +6569,70 @@ void GLCanvas3D::_rectangular_selection_picking_pass()
 
     if (m_picking_enabled)
     {
-        const size_t width = std::max<size_t>(m_rectangle_selection.get_width(), 1);
-        const size_t height = std::max<size_t>(m_rectangle_selection.get_height(), 1);
+        // preFlight: detect which volumes fall inside the selection rectangle by projecting their
+        // geometry through the camera (CPU test), NOT by reading back rendered pixel colors. Object
+        // render colors change with theming, so they must never be the basis for hit detection.
+        std::vector<Vec3d> points;     // representative world-space points
+        std::vector<int> point_volume; // parallel to points: owning volume index
 
-        const OpenGLManager::EFramebufferType framebuffers_type = OpenGLManager::get_framebuffers_type();
-        bool use_framebuffer = framebuffers_type != OpenGLManager::EFramebufferType::Unknown;
-
-        GLuint render_fbo = 0;
-        GLuint render_tex = 0;
-        GLuint render_depth = 0;
-        if (use_framebuffer)
+        for (size_t i = 0; i < m_volumes.volumes.size(); ++i)
         {
-            // setup a framebuffer which covers only the selection rectangle
-            glsafe(::glGenFramebuffers(1, &render_fbo));
-            glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, render_fbo));
-            glsafe(::glGenTextures(1, &render_tex));
-            glsafe(::glBindTexture(GL_TEXTURE_2D, render_tex));
-            glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr));
-            glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
-            glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
-            glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, render_tex, 0));
-            glsafe(::glGenRenderbuffers(1, &render_depth));
-            glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, render_depth));
-#if SLIC3R_OPENGL_ES
-            glsafe(::glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT16, width, height));
-#else
-            glsafe(::glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT, width, height));
-#endif // SLIC3R_OPENGL_ES
-            glsafe(::glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, render_depth));
-            const GLenum drawBufs[] = {GL_COLOR_ATTACHMENT0};
-            glsafe(::glDrawBuffers(1, drawBufs));
-            if (::glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
-                use_framebuffer = false;
+            const GLVolume *volume = m_volumes.volumes[i];
+            if (volume == nullptr || !volume->is_active || volume->disabled ||
+                (volume->composite_id.volume_id < 0 && !m_render_sla_auxiliaries))
+                continue;
+
+            const TriangleMesh *hull = volume->convex_hull();
+            if (hull != nullptr && !hull->its.vertices.empty())
+            {
+                // Convex-hull vertices live in the volume's local space; bring them to world space.
+                const Transform3d world_matrix = volume->world_matrix();
+                for (const Vec3f &v : hull->its.vertices)
+                {
+                    points.emplace_back(world_matrix * v.cast<double>());
+                    point_volume.push_back((int) i);
+                }
+            }
+            else
+            {
+                // Fallback: the (already world-space) transformed convex-hull bounding box corners.
+                const BoundingBoxf3 &bb = volume->transformed_convex_hull_bounding_box();
+                for (int c = 0; c < 8; ++c)
+                {
+                    points.emplace_back((c & 1) ? bb.max.x() : bb.min.x(), (c & 2) ? bb.max.y() : bb.min.y(),
+                                        (c & 4) ? bb.max.z() : bb.min.z());
+                    point_volume.push_back((int) i);
+                }
+            }
         }
 
-        if (m_multisample_allowed)
-            // This flag is often ignored by NVIDIA drivers if rendering into a screen buffer.
-            glsafe(::glDisable(GL_MULTISAMPLE));
+        // A volume is hit if any of its representative points projects inside the rectangle.
+        const std::vector<unsigned int> inside = m_rectangle_selection.contains(points);
+        for (unsigned int idx : inside)
+            idxs.insert(point_volume[idx]);
 
-        glsafe(::glDisable(GL_BLEND));
-        glsafe(::glEnable(GL_DEPTH_TEST));
-
-        glsafe(::glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
-
-        const Camera &main_camera = get_camera();
-        Camera framebuffer_camera;
-        framebuffer_camera.set_type(main_camera.get_type());
-        const Camera *camera = &main_camera;
-        if (use_framebuffer)
+        // Also pick whatever sits directly under the rectangle's center and corners. This covers a
+        // small rectangle drawn entirely inside a large object's silhouette, where none of that
+        // object's hull vertices fall within the rectangle. The ray cast is depth-correct.
+        const ClippingPlane clipping_plane = m_gizmos.get_clipping_plane().inverted_normal();
+        const double l = m_rectangle_selection.get_left();
+        const double r = m_rectangle_selection.get_right();
+        const double t = m_rectangle_selection.get_top();
+        const double b = m_rectangle_selection.get_bottom();
+        const Vec2d samples[5] = {Vec2d(0.5 * (l + r), 0.5 * (t + b)), Vec2d(l, t), Vec2d(r, t), Vec2d(l, b),
+                                  Vec2d(r, b)};
+        for (const Vec2d &sample : samples)
         {
-            // setup a camera which covers only the selection rectangle
-            const std::array<int, 4> &viewport = camera->get_viewport();
-            const double near_left = camera->get_near_left();
-            const double near_bottom = camera->get_near_bottom();
-            const double near_width = camera->get_near_width();
-            const double near_height = camera->get_near_height();
-
-            const double ratio_x = near_width / double(viewport[2]);
-            const double ratio_y = near_height / double(viewport[3]);
-
-            const double rect_near_left = near_left + double(m_rectangle_selection.get_left()) * ratio_x;
-            const double rect_near_bottom = near_bottom +
-                                            (double(viewport[3]) - double(m_rectangle_selection.get_bottom())) *
-                                                ratio_y;
-            double rect_near_right = near_left + double(m_rectangle_selection.get_right()) * ratio_x;
-            double rect_near_top = near_bottom +
-                                   (double(viewport[3]) - double(m_rectangle_selection.get_top())) * ratio_y;
-
-            if (rect_near_left == rect_near_right)
-                rect_near_right = rect_near_left + ratio_x;
-            if (rect_near_bottom == rect_near_top)
-                rect_near_top = rect_near_bottom + ratio_y;
-
-            framebuffer_camera.look_at(camera->get_position(), camera->get_target(), camera->get_dir_up());
-            framebuffer_camera.apply_projection(rect_near_left, rect_near_right, rect_near_bottom, rect_near_top,
-                                                camera->get_near_z(), camera->get_far_z());
-            framebuffer_camera.set_viewport(0, 0, width, height);
-            framebuffer_camera.apply_viewport();
-            camera = &framebuffer_camera;
+            const SceneRaycaster::HitResult hit = m_scene_raycaster.hit(sample, get_camera(), &clipping_plane);
+            if (hit.is_valid() && hit.type == SceneRaycaster::EType::Volume && 0 <= hit.raycaster_id &&
+                hit.raycaster_id < (int) m_volumes.volumes.size())
+            {
+                const GLVolume *volume = m_volumes.volumes[hit.raycaster_id];
+                if (volume->is_active && !volume->disabled &&
+                    (volume->composite_id.volume_id >= 0 || m_render_sla_auxiliaries))
+                    idxs.insert(hit.raycaster_id);
+            }
         }
-
-        _render_volumes_for_picking(*camera);
-        _render_bed_for_picking(camera->get_view_matrix(), camera->get_projection_matrix(),
-                                !camera->is_looking_downward());
-
-        if (m_multisample_allowed)
-            glsafe(::glEnable(GL_MULTISAMPLE));
-
-        const size_t px_count = width * height;
-
-        const size_t left = use_framebuffer ? 0 : (size_t) m_rectangle_selection.get_left();
-        const size_t top = use_framebuffer
-                               ? 0
-                               : (size_t) get_canvas_size().get_height() - (size_t) m_rectangle_selection.get_top();
-#define USE_PARALLEL 1
-#if USE_PARALLEL
-        struct Pixel
-        {
-            std::array<GLubyte, 4> data;
-            // Only non-interpolated colors are valid, those have their lowest three bits zeroed.
-            bool valid() const { return picking_checksum_alpha_channel(data[0], data[1], data[2]) == data[3]; }
-            // we reserve color = (0,0,0) for occluders (as the printbed)
-            // volumes' id are shifted by 1
-            // see: _render_volumes_for_picking()
-            int id() const { return data[0] + (data[1] << 8) + (data[2] << 16) - 1; }
-        };
-
-        std::vector<Pixel> frame(px_count);
-        glsafe(::glReadPixels(left, top, width, height, GL_RGBA, GL_UNSIGNED_BYTE, (void *) frame.data()));
-
-        tbb::spin_mutex mutex;
-        tbb::parallel_for(tbb::blocked_range<size_t>(0, frame.size(), (size_t) width),
-                          [this, &frame, &idxs, &mutex](const tbb::blocked_range<size_t> &range)
-                          {
-                              for (size_t i = range.begin(); i < range.end(); ++i)
-                                  if (frame[i].valid())
-                                  {
-                                      int volume_id = frame[i].id();
-                                      if (0 <= volume_id && volume_id < (int) m_volumes.volumes.size())
-                                      {
-                                          mutex.lock();
-                                          idxs.insert(volume_id);
-                                          mutex.unlock();
-                                      }
-                                  }
-                          });
-#else
-        std::vector<GLubyte> frame(4 * px_count);
-        glsafe(::glReadPixels(left, top, width, height, GL_RGBA, GL_UNSIGNED_BYTE, (void *) frame.data()));
-
-        for (int i = 0; i < px_count; ++i)
-        {
-            int px_id = 4 * i;
-            int volume_id = frame[px_id] + (frame[px_id + 1] << 8) + (frame[px_id + 2] << 16);
-            if (0 <= volume_id && volume_id < (int) m_volumes.volumes.size())
-                idxs.insert(volume_id);
-        }
-#endif // USE_PARALLEL
-        if (camera != &main_camera)
-            main_camera.apply_viewport();
-
-        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, 0));
-        if (render_depth != 0)
-            glsafe(::glDeleteRenderbuffers(1, &render_depth));
-        if (render_fbo != 0)
-            glsafe(::glDeleteFramebuffers(1, &render_fbo));
-
-        if (render_tex != 0)
-            glsafe(::glDeleteTextures(1, &render_tex));
     }
 
     m_hover_volume_idxs.assign(idxs.begin(), idxs.end());
@@ -6806,17 +6722,6 @@ void GLCanvas3D::_render_bed(const Transform3d &view_matrix, const Transform3d &
 void GLCanvas3D::_render_bed_axes()
 {
     m_bed.render_axes();
-}
-
-void GLCanvas3D::_render_bed_for_picking(const Transform3d &view_matrix, const Transform3d &projection_matrix,
-                                         bool bottom)
-{
-    float scale_factor = 1.0;
-#if ENABLE_RETINA_GL
-    scale_factor = m_retina_helper->get_scale_factor();
-#endif // ENABLE_RETINA_GL
-
-    m_bed.render_for_picking(*this, view_matrix, projection_matrix, bottom, scale_factor);
 }
 
 void GLCanvas3D::_render_gcode()
@@ -7498,44 +7403,6 @@ void Slic3r::GUI::GLCanvas3D::_render_bed_selector()
 #endif
         ImGui::End();
     }
-}
-
-void GLCanvas3D::_render_volumes_for_picking(const Camera &camera) const
-{
-    GLShaderProgram *shader = get_shader("flat_clip");
-    if (shader == nullptr)
-        return;
-
-    // do not cull backfaces to show broken geometry, if any
-    glsafe(::glDisable(GL_CULL_FACE));
-
-    const Transform3d &view_matrix = camera.get_view_matrix();
-    for (size_t type = 0; type < 2; ++type)
-    {
-        GLVolumeWithIdAndZList to_render = volumes_to_render(m_volumes.volumes,
-                                                             (type == 0) ? GLVolumeCollection::ERenderType::Opaque
-                                                                         : GLVolumeCollection::ERenderType::Transparent,
-                                                             view_matrix);
-        for (const GLVolumeWithIdAndZ &volume : to_render)
-            if (!volume.first->disabled && (volume.first->composite_id.volume_id >= 0 || m_render_sla_auxiliaries))
-            {
-                // Object picking mode. Render the object with a color encoding the object index.
-                // we reserve color = (0,0,0) for occluders (as the printbed)
-                // so we shift volumes' id by 1 to get the proper color
-                const unsigned int id = 1 + volume.second.first;
-                volume.first->model.set_color(picking_decode(id));
-                shader->start_using();
-                shader->set_uniform("view_model_matrix", view_matrix * volume.first->world_matrix());
-                shader->set_uniform("projection_matrix", camera.get_projection_matrix());
-                shader->set_uniform("volume_world_matrix", volume.first->world_matrix());
-                shader->set_uniform("z_range", m_volumes.get_z_range());
-                shader->set_uniform("clipping_plane", m_volumes.get_clipping_plane());
-                volume.first->render();
-                shader->stop_using();
-            }
-    }
-
-    glsafe(::glEnable(GL_CULL_FACE));
 }
 
 void GLCanvas3D::_render_gizmos_overlay()

@@ -59,6 +59,10 @@ std::set<ImWchar> s_missing_chars;
 std::set<ImWchar> s_fixed_chars;
 bool s_font_cjk;
 
+// The legend/preview font shares the main atlas but is a distinct ImFont, so glyph recovery must
+// accept it too. Mirrors ImGuiWrapper::m_legend_font; set in init_font, cleared in destroy_font.
+ImFont *s_legend_font = nullptr;
+
 // This is a free function that ImGui calls when it renders
 // a fallback glyph for c.
 void imgui_rendered_fallback_glyph(ImWchar c)
@@ -66,10 +70,11 @@ void imgui_rendered_fallback_glyph(ImWchar c)
     if (c == 0)
         return;
 
-    if (ImGui::GetIO().Fonts->Fonts[0] == ImGui::GetFont())
+    ImFont *cur = ImGui::GetFont();
+    if (cur == ImGui::GetIO().Fonts->Fonts[0] || cur == s_legend_font)
     {
-        // Only do this when we are using the default ImGui font. Otherwise this would conflict with
-        // EmbossStyleManager's font handling and we would load glyphs needlessly.
+        // Only recover glyphs for the app's own fonts (main + legend/preview). Skipping other fonts
+        // avoids conflicting with EmbossStyleManager's font handling and loading glyphs needlessly.
         auto it = s_fixed_chars.find(c);
         if (it == s_fixed_chars.end())
         {
@@ -1353,6 +1358,7 @@ void ImGuiWrapper::init_font(bool compress)
         io.Fonts->AddFontFromFileTTF((Slic3r::resources_dir() + "/fonts/" + "NotoSansCJK-Regular.ttc").c_str(),
                                      m_legend_font_size, &config, ranges.Data);
     }
+    s_legend_font = m_legend_font; // let glyph recovery run when the legend font is active
 
     float font_scale = m_font_size / 15;
     int icon_sz = lround(16 * font_scale); // default size of icon is 16 px
@@ -1865,6 +1871,7 @@ void ImGuiWrapper::destroy_font()
         glsafe(::glDeleteTextures(1, &m_font_texture));
         m_font_texture = 0;
         m_legend_font = nullptr;
+        s_legend_font = nullptr;
 
         // We have destroyed current font, including all characters that we may have added dynamically.
         // Move move all characters that we already added into the list of missing chars again,

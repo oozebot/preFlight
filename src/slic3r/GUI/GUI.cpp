@@ -210,7 +210,8 @@ static void add_config_substitutions(const ConfigSubstitutions &conf_substitutio
 
 static wxString substitution_message(const wxString &changes)
 {
-    return _L("Most likely the configuration was produced by a newer version of preFlight or by some preFlight fork.") +
+    return _L("This configuration was likely produced by another slicer (such as PrusaSlicer or SuperSlicer) or by a "
+              "different version of preFlight.") +
            " " + _L("The following values were substituted:") + "\n" + changes + "\n\n" +
            _L("Review the substitutions and adjust them if needed.");
 }

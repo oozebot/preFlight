@@ -254,7 +254,16 @@ ObjectList::ObjectList(wxWindow *parent)
         this->Bind(wxEVT_MENU, [this](wxCommandEvent &evt) { this->copy(); }, wxID_COPY);
         this->Bind(wxEVT_MENU, [this](wxCommandEvent &evt) { this->paste(); }, wxID_PASTE);
         this->Bind(wxEVT_MENU, [this](wxCommandEvent &evt) { this->select_item_all_children(); }, wxID_SELECTALL);
-        this->Bind(wxEVT_MENU, [this](wxCommandEvent &evt) { this->remove(); }, wxID_DELETE);
+        this->Bind(
+            wxEVT_MENU,
+            [this](wxCommandEvent &evt)
+            {
+                // The Del accelerator fires here when the object list has focus. Let an active
+                // gizmo (e.g. Measure) consume Delete first so it is not deleting the object.
+                if (!wxGetApp().plater()->canvas3D()->get_gizmos_manager().process_delete_key())
+                    this->remove();
+            },
+            wxID_DELETE);
         this->Bind(wxEVT_MENU, [this](wxCommandEvent &evt) { this->undo(); }, wxID_UNDO);
         this->Bind(wxEVT_MENU, [this](wxCommandEvent &evt) { this->redo(); }, wxID_REDO);
         this->Bind(wxEVT_MENU, [this](wxCommandEvent &evt) { this->increase_instances(); }, wxID_ADD);
@@ -1257,7 +1266,9 @@ void ObjectList::show_context_menu(const bool evt_context_menu)
     }
 
     if (menu)
-        plater->PopupMenu(menu);
+        // Show at the cursor. Plater::PopupMenu() expects Plater-client coordinates (it converts
+        // back to screen internally); passing no position defaults to the top-left corner.
+        plater->PopupMenu(menu, plater->ScreenToClient(wxGetMousePosition()));
 }
 
 void ObjectList::extruder_editing()
@@ -1377,7 +1388,11 @@ void ObjectList::key_event(wxKeyEvent &event)
     if (event.GetKeyCode() == WXK_TAB)
         Navigate(event.ShiftDown() ? wxNavigationKeyEvent::IsBackward : wxNavigationKeyEvent::IsForward);
     else if (event.GetKeyCode() == WXK_DELETE || event.GetKeyCode() == WXK_BACK)
-        remove();
+    {
+        // Let an active gizmo (e.g. Measure) consume Delete first so it is not deleting the object.
+        if (!wxGetApp().plater()->canvas3D()->get_gizmos_manager().process_delete_key())
+            remove();
+    }
     else if (event.GetKeyCode() == WXK_F5)
         wxGetApp().plater()->reload_all_from_disk();
     else if (wxGetKeyState(wxKeyCode('A')) && wxGetKeyState(WXK_CONTROL /*WXK_SHIFT*/))

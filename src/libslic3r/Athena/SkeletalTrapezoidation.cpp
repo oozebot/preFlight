@@ -7,7 +7,8 @@
 #include "SkeletalTrapezoidation.hpp"
 
 #include <boost/log/trivial.hpp>
-#include "libslic3r/Fill/FillBase.hpp" // FILL_DEBUG flag + dbg_fill_print()
+#include "libslic3r/DebugOutput.hpp" // debug_enabled / DBG_PERIMETERS
+#include "libslic3r/Fill/FillBase.hpp"
 #include <boost/polygon/polygon.hpp>
 #include <queue>
 #include <algorithm>
@@ -598,7 +599,7 @@ void SkeletalTrapezoidation::generateToolpaths(std::vector<VariableWidthLines> &
 
     updateBeadCount();
 
-    if (FILL_DEBUG)
+    if (Slic3r::debug_enabled(Slic3r::DBG_PERIMETERS))
     {
         // Summarize bead count distribution after updateBeadCount
         std::map<coord_t, int> count_dist;
@@ -609,11 +610,18 @@ void SkeletalTrapezoidation::generateToolpaths(std::vector<VariableWidthLines> &
         for (const auto &edge : graph.edges)
             if (edge.data.isCentral() && edge.from->data.bead_count != edge.to->data.bead_count)
                 transition_edges++;
-        dbg_fill_print("z=%.3f [SKEL] PIPELINE_SUMMARY layer=%d after=updateBeadCount nodes_by_count=[",
-                       debug_print_z, debug_layer_id);
+        std::string by_count = "[";
+        char cb[32];
         for (auto &[count, n] : count_dist)
-            dbg_fill_print("%d:%d ", (int) count, n);
-        dbg_fill_print("] transition_edges=%d\n", transition_edges);
+        {
+            snprintf(cb, sizeof(cb), "%d:%d ", (int) count, n);
+            by_count += cb;
+        }
+        by_count += "]";
+        dbg_log(Slic3r::DBG_PERIMETERS, debug_print_z, "SKEL",
+                "PIPELINE_SUMMARY layer=%d after=updateBeadCount nodes_by_count=%s "
+                "transition_edges=%d",
+                debug_layer_id, by_count.c_str(), transition_edges);
     }
 
 #ifdef ATHENA_DEBUG
@@ -628,16 +636,17 @@ void SkeletalTrapezoidation::generateToolpaths(std::vector<VariableWidthLines> &
 
     generateTransitioningRibs();
 
-    if (FILL_DEBUG)
+    if (Slic3r::debug_enabled(Slic3r::DBG_PERIMETERS))
     {
         // Count transitions after rib generation
         int transition_ratio_nodes = 0;
         for (const auto &node : graph.nodes)
             if (node.data.transition_ratio != 0)
                 transition_ratio_nodes++;
-        dbg_fill_print("z=%.3f [SKEL] PIPELINE_SUMMARY layer=%d after=generateTransitioningRibs "
-                       "transition_ratio_nodes=%d\n",
-                       debug_print_z, debug_layer_id, transition_ratio_nodes);
+        dbg_log(Slic3r::DBG_PERIMETERS, debug_print_z, "SKEL",
+                "PIPELINE_SUMMARY layer=%d after=generateTransitioningRibs "
+                "transition_ratio_nodes=%d",
+                debug_layer_id, transition_ratio_nodes);
     }
 
 #ifdef ATHENA_DEBUG
@@ -793,7 +802,7 @@ void SkeletalTrapezoidation::updateBeadCount()
             coord_t bead_count = beading_strategy.getOptimalBeadCount(node.data.distance_to_boundary * 2);
             node.data.bead_count = bead_count;
 
-            if (FILL_DEBUG)
+            if (Slic3r::debug_enabled(Slic3r::DBG_PERIMETERS))
             {
                 coord_t thickness = node.data.distance_to_boundary * 2;
                 coord_t ext_sp = ext_perimeter_spacing;
@@ -806,13 +815,14 @@ void SkeletalTrapezoidation::updateBeadCount()
                 const char *thresh_type = (inner_naive % 2 == 1) ? "split" : "add";
                 double thresh_val = (inner_naive % 2 == 1) ? split_thresh : add_thresh;
                 coord_t min_line_w = coord_t(spacing * thresh_val);
-                dbg_fill_print("z=%.3f [SKEL] BEAD_COUNT local_max layer=%d thickness=%.4fmm "
-                               "ext_sp=%.4fmm inner=%.4fmm naive=%d remainder=%.4fmm "
-                               "min_line_w=%.4fmm (%s=%.4f) bead_count=%d pos=(%.4f,%.4f)\n",
-                               debug_print_z, debug_layer_id, unscaled<double>(thickness), unscaled<double>(ext_sp),
-                               unscaled<double>(inner_thickness), (int) inner_naive, unscaled<double>(inner_remainder),
-                               unscaled<double>(min_line_w), thresh_type, thresh_val, (int) bead_count,
-                               unscaled<double>(node.p.x()), unscaled<double>(node.p.y()));
+                dbg_log(Slic3r::DBG_PERIMETERS, debug_print_z, "SKEL",
+                        "BEAD_COUNT local_max layer=%d thickness=%.4fmm "
+                        "ext_sp=%.4fmm inner=%.4fmm naive=%d remainder=%.4fmm "
+                        "min_line_w=%.4fmm (%s=%.4f) bead_count=%d pos=(%.4f,%.4f)",
+                        debug_layer_id, unscaled<double>(thickness), unscaled<double>(ext_sp),
+                        unscaled<double>(inner_thickness), (int) inner_naive, unscaled<double>(inner_remainder),
+                        unscaled<double>(min_line_w), thresh_type, thresh_val, (int) bead_count,
+                        unscaled<double>(node.p.x()), unscaled<double>(node.p.y()));
             }
         }
     }
@@ -1002,17 +1012,17 @@ void SkeletalTrapezoidation::generateTransitionMids(ptr_vector_t<std::list<Trans
             }
             transitions->emplace_back(mid_pos, transition_lower_bead_count, mid_R);
 
-            if (FILL_DEBUG)
+            if (Slic3r::debug_enabled(Slic3r::DBG_PERIMETERS))
             {
-                dbg_fill_print("z=%.3f [SKEL] TRANSITION_MID layer=%d lower_count=%d thickness=%.4fmm "
-                               "start_R=%.4fmm end_R=%.4fmm mid_R=%.4fmm edge_size=%.4fmm mid_pos=%.4fmm "
-                               "from_count=%d to_count=%d from=(%.4f,%.4f) to=(%.4f,%.4f)\n",
-                               debug_print_z, debug_layer_id, transition_lower_bead_count,
-                               unscaled<double>(mid_R * 2), unscaled<double>(start_R), unscaled<double>(end_R),
-                               unscaled<double>(mid_R), unscaled<double>(edge_size), unscaled<double>(mid_pos),
-                               start_bead_count, end_bead_count, unscaled<double>(edge.from->p.x()),
-                               unscaled<double>(edge.from->p.y()), unscaled<double>(edge.to->p.x()),
-                               unscaled<double>(edge.to->p.y()));
+                dbg_log(Slic3r::DBG_PERIMETERS, debug_print_z, "SKEL",
+                        "TRANSITION_MID layer=%d lower_count=%d thickness=%.4fmm "
+                        "start_R=%.4fmm end_R=%.4fmm mid_R=%.4fmm edge_size=%.4fmm mid_pos=%.4fmm "
+                        "from_count=%d to_count=%d from=(%.4f,%.4f) to=(%.4f,%.4f)",
+                        debug_layer_id, transition_lower_bead_count, unscaled<double>(mid_R * 2),
+                        unscaled<double>(start_R), unscaled<double>(end_R), unscaled<double>(mid_R),
+                        unscaled<double>(edge_size), unscaled<double>(mid_pos), start_bead_count, end_bead_count,
+                        unscaled<double>(edge.from->p.x()), unscaled<double>(edge.from->p.y()),
+                        unscaled<double>(edge.to->p.x()), unscaled<double>(edge.to->p.y()));
             }
         }
         assert((edge.from->data.bead_count == edge.to->data.bead_count) || edge.data.hasTransitions());
@@ -1652,21 +1662,22 @@ void SkeletalTrapezoidation::applyBeadWidthAdjustments(Beading &beading)
     double split_middle_threshold = beading_strategy.getSplitMiddleThreshold();
     coord_t expand_gap_threshold = coord_t(nominal_spacing * add_middle_threshold);
 
-    if (FILL_DEBUG && beading.left_over != 0)
+    if (Slic3r::debug_enabled(Slic3r::DBG_PERIMETERS) && beading.left_over != 0)
     {
-        dbg_fill_print("z=%.3f [SKEL] ADJUST_BEGIN layer=%d beads=%zu thickness=%.4fmm left_over=%.4fmm "
-                       "nominal_w=%.4fmm nominal_s=%.4fmm add_thresh=%.4f split_thresh=%.4f widths=[",
-                       debug_print_z, debug_layer_id, beading.bead_widths.size(),
-                       unscaled<double>(beading.total_thickness), unscaled<double>(beading.left_over),
-                       unscaled<double>(nominal_width), unscaled<double>(nominal_spacing), add_middle_threshold,
-                       split_middle_threshold);
+        std::string widths = "[";
+        char wb[32];
         for (size_t i = 0; i < beading.bead_widths.size(); ++i)
         {
-            if (i > 0)
-                dbg_fill_print(",");
-            dbg_fill_print("%.4f", unscaled<double>(beading.bead_widths[i]));
+            snprintf(wb, sizeof(wb), "%s%.4f", i ? "," : "", unscaled<double>(beading.bead_widths[i]));
+            widths += wb;
         }
-        dbg_fill_print("]\n");
+        widths += "]";
+        dbg_log(Slic3r::DBG_PERIMETERS, debug_print_z, "SKEL",
+                "ADJUST_BEGIN layer=%d beads=%zu thickness=%.4fmm left_over=%.4fmm "
+                "nominal_w=%.4fmm nominal_s=%.4fmm add_thresh=%.4f split_thresh=%.4f widths=%s",
+                debug_layer_id, beading.bead_widths.size(), unscaled<double>(beading.total_thickness),
+                unscaled<double>(beading.left_over), unscaled<double>(nominal_width), unscaled<double>(nominal_spacing),
+                add_middle_threshold, split_middle_threshold, widths.c_str());
     }
 
     // EVEN case: Adjust two innermost beads (expand for gap OR contract for overfill)
@@ -1738,12 +1749,13 @@ void SkeletalTrapezoidation::applyBeadWidthAdjustments(Beading &beading)
         coord_t min_safe_width = nominal_width / 3;
         if (new_width < min_safe_width)
         {
-            if (FILL_DEBUG)
+            if (Slic3r::debug_enabled(Slic3r::DBG_PERIMETERS))
             {
-                dbg_fill_print("z=%.3f [SKEL] ADJUST_EVEN_REJECT layer=%d new_width=%.4fmm < min_safe=%.4fmm "
-                               "left_over=%.4fmm ABANDONED\n",
-                               debug_print_z, debug_layer_id, unscaled<double>(new_width),
-                               unscaled<double>(min_safe_width), unscaled<double>(beading.left_over));
+                dbg_log(Slic3r::DBG_PERIMETERS, debug_print_z, "SKEL",
+                        "ADJUST_EVEN_REJECT layer=%d new_width=%.4fmm < min_safe=%.4fmm "
+                        "left_over=%.4fmm ABANDONED",
+                        debug_layer_id, unscaled<double>(new_width), unscaled<double>(min_safe_width),
+                        unscaled<double>(beading.left_over));
             }
             beading.left_over = 0;
             return;
@@ -1751,13 +1763,14 @@ void SkeletalTrapezoidation::applyBeadWidthAdjustments(Beading &beading)
 
         if (mid_idx > 0 && mid_idx < beading.bead_widths.size() && new_width > 0)
         {
-            if (FILL_DEBUG)
+            if (Slic3r::debug_enabled(Slic3r::DBG_PERIMETERS))
             {
-                dbg_fill_print("z=%.3f [SKEL] ADJUST_EVEN layer=%d %s mid_beads[%zu,%zu] %.4fmm -> %.4fmm "
-                               "left_over=%.4fmm\n",
-                               debug_print_z, debug_layer_id, is_expand ? "EXPAND" : "CONTRACT", mid_idx - 1, mid_idx,
-                               unscaled<double>(current_width), unscaled<double>(new_width),
-                               unscaled<double>(beading.left_over));
+                dbg_log(Slic3r::DBG_PERIMETERS, debug_print_z, "SKEL",
+                        "ADJUST_EVEN layer=%d %s mid_beads[%zu,%zu] %.4fmm -> %.4fmm "
+                        "left_over=%.4fmm",
+                        debug_layer_id, is_expand ? "EXPAND" : "CONTRACT", mid_idx - 1, mid_idx,
+                        unscaled<double>(current_width), unscaled<double>(new_width),
+                        unscaled<double>(beading.left_over));
             }
 
             // Apply width changes
@@ -1890,12 +1903,13 @@ void SkeletalTrapezoidation::applyBeadWidthAdjustments(Beading &beading)
             new_center_width = current_center_width - width_reduction;
         }
 
-        if (FILL_DEBUG)
+        if (Slic3r::debug_enabled(Slic3r::DBG_PERIMETERS))
         {
-            dbg_fill_print("z=%.3f [SKEL] ADJUST_ODD layer=%d center_idx=%zu current=%.4fmm new=%.4fmm "
-                           "left_over=%.4fmm adj_factor=%.4f\n",
-                           debug_print_z, debug_layer_id, center_idx, unscaled<double>(current_center_width),
-                           unscaled<double>(new_center_width), unscaled<double>(beading.left_over), adjustment_factor);
+            dbg_log(Slic3r::DBG_PERIMETERS, debug_print_z, "SKEL",
+                    "ADJUST_ODD layer=%d center_idx=%zu current=%.4fmm new=%.4fmm "
+                    "left_over=%.4fmm adj_factor=%.4f",
+                    debug_layer_id, center_idx, unscaled<double>(current_center_width),
+                    unscaled<double>(new_center_width), unscaled<double>(beading.left_over), adjustment_factor);
         }
 
         // Decide whether to keep one wide bead or split into two beads based on deviation from nominal
@@ -1968,15 +1982,16 @@ void SkeletalTrapezoidation::applyBeadWidthAdjustments(Beading &beading)
                                                                          : (split_threshold - split_width);
             coord_t two_bead_deviation = per_bead_deviation * 2;
 
-            if (FILL_DEBUG)
+            if (Slic3r::debug_enabled(Slic3r::DBG_PERIMETERS))
             {
-                dbg_fill_print("z=%.3f [SKEL] SPLIT_EVAL layer=%d center_w=%.4fmm split_w=%.4fmm "
-                               "split_thresh=%.4fmm 1bead_dev=%.4fmm 2bead_dev=%.4fmm "
-                               "min_split_w=%.4fmm split_viable=%d force_split=%d\n",
-                               debug_print_z, debug_layer_id, unscaled<double>(new_center_width),
-                               unscaled<double>(split_width), unscaled<double>(split_threshold),
-                               unscaled<double>(one_bead_deviation), unscaled<double>(two_bead_deviation),
-                               unscaled<double>(min_split_width), (int) split_viable, (int) force_split);
+                dbg_log(Slic3r::DBG_PERIMETERS, debug_print_z, "SKEL",
+                        "SPLIT_EVAL layer=%d center_w=%.4fmm split_w=%.4fmm "
+                        "split_thresh=%.4fmm 1bead_dev=%.4fmm 2bead_dev=%.4fmm "
+                        "min_split_w=%.4fmm split_viable=%d force_split=%d",
+                        debug_layer_id, unscaled<double>(new_center_width), unscaled<double>(split_width),
+                        unscaled<double>(split_threshold), unscaled<double>(one_bead_deviation),
+                        unscaled<double>(two_bead_deviation), unscaled<double>(min_split_width), (int) split_viable,
+                        (int) force_split);
             }
 
             if (split_viable && (force_split || two_bead_deviation < one_bead_deviation * 2))
@@ -2014,20 +2029,22 @@ void SkeletalTrapezoidation::applyBeadWidthAdjustments(Beading &beading)
 
                 beading.left_over = 0;
 
-                if (FILL_DEBUG)
+                if (Slic3r::debug_enabled(Slic3r::DBG_PERIMETERS))
                 {
-                    dbg_fill_print("z=%.3f [SKEL] SPLIT_OK layer=%d center_bead -> 2 beads @ %.4fmm "
-                                   "pos=(%.4f,%.4f)\n",
-                                   debug_print_z, debug_layer_id, unscaled<double>(split_width),
-                                   unscaled<double>(new_left_pos), unscaled<double>(new_right_pos));
+                    dbg_log(Slic3r::DBG_PERIMETERS, debug_print_z, "SKEL",
+                            "SPLIT_OK layer=%d center_bead -> 2 beads @ %.4fmm "
+                            "pos=(%.4f,%.4f)",
+                            debug_layer_id, unscaled<double>(split_width), unscaled<double>(new_left_pos),
+                            unscaled<double>(new_right_pos));
                 }
             }
-            else if (FILL_DEBUG)
+            else if (Slic3r::debug_enabled(Slic3r::DBG_PERIMETERS))
             {
-                dbg_fill_print("z=%.3f [SKEL] SPLIT_REJECTED layer=%d split_viable=%d force_split=%d "
-                               "2bead_dev=%.4fmm >= 1bead_dev*2=%.4fmm\n",
-                               debug_print_z, debug_layer_id, (int) split_viable, (int) force_split,
-                               unscaled<double>(two_bead_deviation), unscaled<double>(one_bead_deviation * 2));
+                dbg_log(Slic3r::DBG_PERIMETERS, debug_print_z, "SKEL",
+                        "SPLIT_REJECTED layer=%d split_viable=%d force_split=%d "
+                        "2bead_dev=%.4fmm >= 1bead_dev*2=%.4fmm",
+                        debug_layer_id, (int) split_viable, (int) force_split, unscaled<double>(two_bead_deviation),
+                        unscaled<double>(one_bead_deviation * 2));
             }
         }
 
@@ -2048,12 +2065,13 @@ void SkeletalTrapezoidation::applyBeadWidthAdjustments(Beading &beading)
 
             if (new_center_width < min_safe_width)
             {
-                if (FILL_DEBUG)
+                if (Slic3r::debug_enabled(Slic3r::DBG_PERIMETERS))
                 {
-                    dbg_fill_print("z=%.3f [SKEL] ADJUST_ODD_REJECT layer=%d new_center=%.4fmm < "
-                                   "min_safe=%.4fmm left_over=%.4fmm ABANDONED\n",
-                                   debug_print_z, debug_layer_id, unscaled<double>(new_center_width),
-                                   unscaled<double>(min_safe_width), unscaled<double>(beading.left_over));
+                    dbg_log(Slic3r::DBG_PERIMETERS, debug_print_z, "SKEL",
+                            "ADJUST_ODD_REJECT layer=%d new_center=%.4fmm < "
+                            "min_safe=%.4fmm left_over=%.4fmm ABANDONED",
+                            debug_layer_id, unscaled<double>(new_center_width), unscaled<double>(min_safe_width),
+                            unscaled<double>(beading.left_over));
                 }
                 beading.left_over = 0; // CRITICAL: Clear to prevent caching issues
                 return;                // Skip this adjustment - would cause Flow::spacing() to fail
@@ -2061,12 +2079,13 @@ void SkeletalTrapezoidation::applyBeadWidthAdjustments(Beading &beading)
 
             if (new_center_width > 0)
             {
-                if (FILL_DEBUG)
+                if (Slic3r::debug_enabled(Slic3r::DBG_PERIMETERS))
                 {
-                    dbg_fill_print("z=%.3f [SKEL] ADJUST_ODD_OK layer=%d center[%zu] %.4fmm -> %.4fmm "
-                                   "left_over=%.4fmm\n",
-                                   debug_print_z, debug_layer_id, center_idx, unscaled<double>(current_center_width),
-                                   unscaled<double>(new_center_width), unscaled<double>(beading.left_over));
+                    dbg_log(Slic3r::DBG_PERIMETERS, debug_print_z, "SKEL",
+                            "ADJUST_ODD_OK layer=%d center[%zu] %.4fmm -> %.4fmm "
+                            "left_over=%.4fmm",
+                            debug_layer_id, center_idx, unscaled<double>(current_center_width),
+                            unscaled<double>(new_center_width), unscaled<double>(beading.left_over));
                 }
 
                 // When adjusting the center bead, we also need to adjust its toolpath_location
@@ -2537,17 +2556,17 @@ void SkeletalTrapezoidation::generateJunctions(ptr_vector_t<BeadingPropagation> 
                 snapped = true;
             }
 
-            if (FILL_DEBUG && beading->preserve_innermost_position)
+            if (Slic3r::debug_enabled(Slic3r::DBG_PERIMETERS) && beading->preserve_innermost_position)
             {
-                dbg_fill_print("z=%.3f [SKEL] JUNCTION_IL layer=%d idx=%zu bead_R=%.4fmm start_R=%.4fmm "
-                               "end_R=%.4fmm delta_R=%.4fmm snapped=%d pos=(%.4f,%.4f) w=%.4fmm "
-                               "total_t=%.4fmm beads=%zu\n",
-                               debug_print_z, debug_layer_id, junction_idx, unscaled<double>(bead_R),
-                               unscaled<double>(start_R), unscaled<double>(end_R),
-                               unscaled<double>(end_R - start_R), (int) snapped,
-                               unscaled<double>(junction.x()), unscaled<double>(junction.y()),
-                               unscaled<double>(beading->bead_widths[junction_idx]),
-                               unscaled<double>(beading->total_thickness), beading->bead_widths.size());
+                dbg_log(Slic3r::DBG_PERIMETERS, debug_print_z, "SKEL",
+                        "JUNCTION_IL layer=%d idx=%zu bead_R=%.4fmm start_R=%.4fmm "
+                        "end_R=%.4fmm delta_R=%.4fmm snapped=%d pos=(%.4f,%.4f) w=%.4fmm "
+                        "total_t=%.4fmm beads=%zu",
+                        debug_layer_id, junction_idx, unscaled<double>(bead_R), unscaled<double>(start_R),
+                        unscaled<double>(end_R), unscaled<double>(end_R - start_R), (int) snapped,
+                        unscaled<double>(junction.x()), unscaled<double>(junction.y()),
+                        unscaled<double>(beading->bead_widths[junction_idx]),
+                        unscaled<double>(beading->total_thickness), beading->bead_widths.size());
             }
 
             coord_t w = beading->bead_widths[junction_idx];

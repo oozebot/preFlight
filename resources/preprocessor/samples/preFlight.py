@@ -255,6 +255,7 @@ class Settings:
     fan_below_layer_time: str  # semicolon-separated ints
     fan_spinup_bridge_infill: str  # semicolon-separated bools
     fan_spinup_overhang_perimeter: str  # semicolon-separated bools
+    fan_spinup_serpentine_overhang: str  # semicolon-separated bools
     fan_spinup_time: str  # semicolon-separated ints
     filament_abrasive: str  # semicolon-separated bools
     filament_colour: str  # semicolon-separated
@@ -384,6 +385,8 @@ class Settings:
     manual_fan_speed_ironing: str  # semicolon-separated ints
     manual_fan_speed_overhang_perimeter: str  # semicolon-separated ints
     manual_fan_speed_perimeter: str  # semicolon-separated ints
+    manual_fan_speed_serpentine: str  # semicolon-separated ints
+    manual_fan_speed_serpentine_overhang: str  # semicolon-separated ints
     manual_fan_speed_skirt: str  # semicolon-separated ints
     manual_fan_speed_solid_infill: str  # semicolon-separated ints
     manual_fan_speed_support_interface: str  # semicolon-separated ints
@@ -396,6 +399,7 @@ class Settings:
     max_print_speed: str  # float
     max_volumetric_extrusion_rate_slope_negative: str  # float
     max_volumetric_extrusion_rate_slope_positive: str  # float
+    max_volumetric_flow: str  # float
     max_volumetric_speed: str  # float
     merge_top_solid_infills: str  # bool (0/1)
     min_bead_width: str  # float or percentage
@@ -409,6 +413,7 @@ class Settings:
     multimaterial_purging: str  # float
     narrow_to_athena: str  # bool (0/1)
     narrow_to_athena_threshold: str  # float
+    narrow_to_athena_top_bottom: str  # bool (0/1)
     notes: str
     nozzle_diameter: str  # semicolon-separated floats
     nozzle_high_flow: str  # semicolon-separated bools
@@ -477,6 +482,13 @@ class Settings:
     seam_notch_width: str  # float
     seam_preferred_direction: str  # float
     seam_preferred_direction_jitter: str  # float
+    serpentine_depth: str  # float
+    serpentine_enabled: str  # bool (0/1)
+    serpentine_extrusion_width: str  # float or percentage
+    serpentine_limit_depth: str  # bool (0/1)
+    serpentine_max_bead: str  # percentage
+    serpentine_overlap: str  # float or percentage
+    serpentine_solid_surfaces: str  # bool (0/1)
     silent_mode: str  # bool (0/1)
     single_extruder_multi_material: str  # bool (0/1)
     single_extruder_multi_material_priming: str  # bool (0/1)

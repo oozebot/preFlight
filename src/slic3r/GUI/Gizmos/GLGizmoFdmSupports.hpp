@@ -30,7 +30,7 @@ protected:
     wxString handle_snapshot_action_name(bool control_down, Button button_down) const override;
 
     TriangleStateType get_left_button_state_type() const override;
-    TriangleStateType get_right_button_state_type() const override { return TriangleStateType::NONE; }
+    TriangleStateType get_right_button_state_type() const override { return TriangleStateType::BLOCKER; }
     ColorRGBA get_cursor_sphere_left_button_color() const override;
 
     std::string get_gizmo_entering_text() const override { return _u8L("Entering Paint-on supports"); }

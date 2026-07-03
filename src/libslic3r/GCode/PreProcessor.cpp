@@ -6,6 +6,7 @@
 #include "GCodeProcessor.hpp"
 #include "GCodeObject.hpp"
 #include "libslic3r/Print.hpp"
+#include "libslic3r/Utils.hpp"
 #include "libslic3r_version.h"
 
 #include <pybind11/pybind11.h>
@@ -443,7 +444,9 @@ class _SettingsWrapper:
         .value("SupportMaterial", GCodeExtrusionRole::SupportMaterial)
         .value("SupportMaterialInterface", GCodeExtrusionRole::SupportMaterialInterface)
         .value("WipeTower", GCodeExtrusionRole::WipeTower)
-        .value("Custom", GCodeExtrusionRole::Custom);
+        .value("Custom", GCodeExtrusionRole::Custom)
+        .value("Serpentine", GCodeExtrusionRole::Serpentine)
+        .value("SerpentineOverhang", GCodeExtrusionRole::SerpentineOverhang);
 
     // CustomGCode::Type enum
     py::enum_<CustomGCode::Type>(m, "CustomEventType")
@@ -1175,6 +1178,11 @@ static void ensure_python_initialized()
                            PyConfig_InitPythonConfig(&config);
                            config.install_signal_handlers = 0;
                            config.module_search_paths_set = 1;
+#ifndef _WIN32
+                           // Ignore a user's system-Python env vars (PYTHONHOME/PYTHONPATH); Windows is
+                           // already isolated by the embeddable ._pth.
+                           config.use_environment = 0;
+#endif
 
                            PyStatus status;
                            bool config_ok = true;
@@ -1265,6 +1273,42 @@ static void ensure_python_initialized()
 
                        py::module_::import("preFlight").attr("exe_dir") = exe_dir.string();
 
+                       // User packages install outside the app (data_dir/python-packages/<pyver>) so they
+                       // survive upgrades. Refuse a group/other-writable dir - it would be a code-injection
+                       // path into this process. Actual sys.path wiring happens per-slice below.
+                       {
+                           namespace fs = boost::filesystem;
+                           std::string pkg_dir = user_python_packages_dir();
+                           bool pkg_dir_ok = false;
+                           try
+                           {
+                               fs::create_directories(pkg_dir);
+#ifndef _WIN32
+                               // Own the dir tightly (0700). User-private-group distros (umask 002)
+                               // create it group-writable - not an exposure there, but normalize so it
+                               // cannot become a code-injection path, then reject only a genuine others-write.
+                               boost::system::error_code perm_ec;
+                               fs::permissions(pkg_dir, fs::owner_all, perm_ec);
+                               fs::perms p = fs::status(pkg_dir).permissions();
+                               if ((p & fs::others_write) != fs::no_perms)
+                                   BOOST_LOG_TRIVIAL(error)
+                                       << "Pre-processor: package dir writable by others, not added to path: "
+                                       << pkg_dir;
+                               else
+                                   pkg_dir_ok = true;
+#else
+                               pkg_dir_ok = true;
+#endif
+                           }
+                           catch (const std::exception &e)
+                           {
+                               BOOST_LOG_TRIVIAL(error)
+                                   << "Pre-processor: could not prepare package dir " << pkg_dir << ": " << e.what();
+                           }
+                           py::module_::import("preFlight").attr("user_packages_dir") = pkg_dir_ok ? pkg_dir
+                                                                                                   : std::string();
+                       }
+
                        py::exec(R"(
 import sys, os, preFlight
 
@@ -1326,6 +1370,20 @@ PreProcessorResult run_pre_processor_scripts(GCodeProcessorResult &result, GCode
 
         // Background slicing runs on a worker thread that does not own the GIL.
         py::gil_scoped_acquire gil;
+
+        // Add user-installed packages (data_dir/python-packages/<pyver>) to sys.path each slice so
+        // packages installed via the Python Console appear without an app restart. addsitedir appends
+        // after stdlib (no shadowing) and processes .pth files; it is idempotent across slices.
+        try
+        {
+            py::object pkg_dir = py::module_::import("preFlight").attr("user_packages_dir");
+            if (!pkg_dir.cast<std::string>().empty())
+                py::module_::import("site").attr("addsitedir")(pkg_dir);
+        }
+        catch (const std::exception &e)
+        {
+            BOOST_LOG_TRIVIAL(warning) << "Pre-processor: addsitedir failed: " << e.what();
+        }
 
         // signal.signal() and PyErr_SetInterrupt() only work on the interpreter's
         // main thread. Slicing runs on a background worker, so detect that and skip
@@ -1632,6 +1690,18 @@ ExportScriptResult run_export_script(const std::string &script_path, const std::
 
         // Background slicing runs on a worker thread that does not own the GIL.
         py::gil_scoped_acquire gil;
+
+        // Export scripts see the same user-installed packages as preprocessing (see addsitedir note above).
+        try
+        {
+            py::object pkg_dir = py::module_::import("preFlight").attr("user_packages_dir");
+            if (!pkg_dir.cast<std::string>().empty())
+                py::module_::import("site").attr("addsitedir")(pkg_dir);
+        }
+        catch (const std::exception &e)
+        {
+            BOOST_LOG_TRIVIAL(warning) << "Export: addsitedir failed: " << e.what();
+        }
 
         std::string script_name = fs::path(script_path).filename().string();
         std::string script_dir = fs::path(script_path).parent_path().string();

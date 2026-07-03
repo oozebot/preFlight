@@ -230,6 +230,8 @@ static void delete_buffers(unsigned int &id)
 // Color array must match GCodeExtrusionRole enum order exactly (ExtrusionRole.hpp:122-144)
 static const std::array<Color, size_t(EGCodeExtrusionRole::COUNT)> DEFAULT_EXTRUSION_ROLES_COLORS = {{
     {230, 179, 179}, // None
+    {0, 255, 65},    // Serpentine (Matrix accent green #00FF41)
+    {0, 102, 26},    // SerpentineOverhang (deep green, clearly darker than Serpentine)
     {255, 230, 77},  // Perimeter (yellow)
     {255, 125, 56},  // ExternalPerimeter (orange)
     {31, 31, 255},   // OverhangPerimeter (blue)

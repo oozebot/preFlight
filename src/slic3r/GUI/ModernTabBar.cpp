@@ -994,7 +994,7 @@ void ModernTabBar::AddSliceButton(std::function<void()> slice_callback, std::fun
                                                        m_connection_state == PrinterConnectionChecker::State::Online;
                                  if (printer_online)
                                  {
-                                     wxMenuItem *send_item = menu.Append(ID_SEND_TO_PRINTER, _L("Send to Printer"));
+                                     wxMenuItem *send_item = menu.Append(ID_SEND_TO_PRINTER, _L("Send to printer"));
                                      set_menu_item_bitmap(send_item, "export_gcode");
                                  }
 

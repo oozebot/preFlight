@@ -202,6 +202,54 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig *config, con
         is_msg_dlg_already_exist = false;
     }
 
+    // preFlight: layer height must stay below the nozzle diameter. A typo such as "25"
+    // instead of "0.25" otherwise reaches the flow math, where width - height*0.2146 goes
+    // negative and throws FlowErrorNegativeSpacing deep inside slicing/preview. Clamp here.
+    const DynamicPrintConfig &printer_config = wxGetApp().preset_bundle->printers.get_selected_preset().config;
+    double max_nozzle_diam = 0.4;
+    if (auto *nozzle_opt = printer_config.option<ConfigOptionFloats>("nozzle_diameter");
+        nozzle_opt && !nozzle_opt->values.empty())
+    {
+        max_nozzle_diam = nozzle_opt->values.front();
+        for (double d : nozzle_opt->values)
+            if (d > max_nozzle_diam)
+                max_nozzle_diam = d;
+    }
+    const double safe_layer_height = 0.5 * max_nozzle_diam;
+
+    if (config->opt_float("layer_height") > max_nozzle_diam)
+    {
+        const wxString msg_text =
+            wxString::Format(_L("Layer height must be smaller than the nozzle diameter (%.2f mm).\n\nThe layer "
+                                "height will be reset to %.2f."),
+                             max_nozzle_diam, safe_layer_height);
+        MessageDialog dialog(m_msg_dlg_parent, msg_text, _L("Layer height"), wxICON_WARNING | wxOK);
+        DynamicPrintConfig new_conf = *config;
+        is_msg_dlg_already_exist = true;
+        dialog.ShowModal();
+        new_conf.set_key_value("layer_height", new ConfigOptionFloat(safe_layer_height));
+        apply(config, &new_conf);
+        is_msg_dlg_already_exist = false;
+    }
+
+    // Only an absolute first layer height can blow up the flow math; a percentage is relative
+    // to the (now clamped) layer height and is bounded with it.
+    if (auto *flh_opt = config->option<ConfigOptionFloatOrPercent>("first_layer_height");
+        flh_opt && !flh_opt->percent && flh_opt->value > max_nozzle_diam)
+    {
+        const wxString msg_text =
+            wxString::Format(_L("First layer height must be smaller than the nozzle diameter (%.2f mm).\n\nThe "
+                                "first layer height will be reset to %.2f."),
+                             max_nozzle_diam, safe_layer_height);
+        MessageDialog dialog(m_msg_dlg_parent, msg_text, _L("First layer height"), wxICON_WARNING | wxOK);
+        DynamicPrintConfig new_conf = *config;
+        is_msg_dlg_already_exist = true;
+        dialog.ShowModal();
+        new_conf.set_key_value("first_layer_height", new ConfigOptionFloatOrPercent(safe_layer_height, false));
+        apply(config, &new_conf);
+        is_msg_dlg_already_exist = false;
+    }
+
     // Helper lambda to clamp overlap values and warn user (uses WarningDialog style)
     auto clamp_overlap = [&](const std::string &opt_key, const std::string &ref_width_key, double min_percent,
                              double max_percent, const std::string &label, const std::string &ref_width_label)
@@ -784,6 +832,7 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config)
 
     bool has_narrow_to_athena = config->opt_bool("narrow_to_athena");
     toggle_field("narrow_to_athena_threshold", has_narrow_to_athena);
+    toggle_field("narrow_to_athena_top_bottom", has_narrow_to_athena);
 
     const bool has_ensure_vertical_shell_thickness = config->opt_enum<EnsureVerticalShellThickness>(
                                                          "ensure_vertical_shell_thickness") !=
@@ -822,6 +871,25 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config)
     toggle_field("fuzzy_skin_persistence", have_persistence);
 
     // fuzzy_skin_point_placement applies to all fuzzy skin modes, so always visible
+
+    // Serpentine requires the Athena generator (its integration point lives
+    // in process_athena), but enabling Serpentine switches the generator to
+    // Athena automatically, so the checkbox stays reachable from any generator;
+    // only spiral vase grays it out. Serpentine and interlocking may both be
+    // enabled: interlocking runs inside the core in depth mode and is ignored
+    // in full mode, so neither grays out the other.
+    bool serpentine_athena = config->opt_enum<PerimeterGeneratorType>("perimeter_generator") ==
+                             PerimeterGeneratorType::Athena;
+    toggle_field("serpentine_enabled", !has_spiral_vase);
+    bool serpentine_enabled = !has_spiral_vase && serpentine_athena && config->opt_bool("serpentine_enabled");
+    toggle_field("serpentine_extrusion_width", serpentine_enabled);
+    toggle_field("serpentine_overlap", serpentine_enabled);
+    toggle_field("serpentine_max_bead", serpentine_enabled);
+    toggle_field("serpentine_limit_depth", serpentine_enabled);
+    toggle_field("serpentine_depth", serpentine_enabled && config->opt_bool("serpentine_limit_depth"));
+    toggle_field("serpentine_solid_surfaces", serpentine_enabled);
+    toggle_field("serpentine_ridges", serpentine_enabled);
+    toggle_field("serpentine_aim", serpentine_enabled && config->opt_bool("serpentine_limit_depth"));
 
     toggle_field("interlock_perimeters_enabled", !has_spiral_vase);
     bool interlock_enabled = config->opt_bool("interlock_perimeters_enabled");

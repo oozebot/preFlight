@@ -104,17 +104,16 @@ void LayerRegion::remove_narrow_fill_surfaces()
                                       ExPolygons opened = opening_ex(ExPolygons{s.expolygon}, min_half_w);
                                       if (opened.empty())
                                       {
-                                          if (FILL_DEBUG)
+                                          if (Slic3r::debug_enabled(Slic3r::DBG_FILL))
                                           {
                                               double a = std::abs(s.expolygon.area()) * 1e-12;
                                               BoundingBox bb = get_extents(s.expolygon);
-                                              dbg_fill_print("z=%.3f [SLIVER] REMOVED type=%d area=%8.6fmm2 "
-                                                             "pts=%zu bbox=(%.2f,%.2f)-(%.2f,%.2f)\n",
-                                                             z, (int) s.surface_type, a,
-                                                             s.expolygon.contour.points.size(),
-                                                             unscaled<double>(bb.min.x()), unscaled<double>(bb.min.y()),
-                                                             unscaled<double>(bb.max.x()),
-                                                             unscaled<double>(bb.max.y()));
+                                              dbg_log(Slic3r::DBG_FILL, z, "SLIVER",
+                                                      "REMOVED type=%d area=%8.6fmm2 "
+                                                      "pts=%zu bbox=(%.2f,%.2f)-(%.2f,%.2f)",
+                                                      (int) s.surface_type, a, s.expolygon.contour.points.size(),
+                                                      unscaled<double>(bb.min.x()), unscaled<double>(bb.min.y()),
+                                                      unscaled<double>(bb.max.x()), unscaled<double>(bb.max.y()));
                                           }
                                           removed++;
                                           return true;
@@ -122,9 +121,9 @@ void LayerRegion::remove_narrow_fill_surfaces()
                                       return false;
                                   }),
                    surfaces.end());
-    if (FILL_DEBUG && removed > 0)
-        dbg_fill_print("z=%.3f [SLIVER] TOTAL removed=%d remaining=%zu min_width=%.4fmm\n", z, removed, surfaces.size(),
-                       unscaled<double>(min_half_w) * 2.0);
+    if (Slic3r::debug_enabled(Slic3r::DBG_FILL) && removed > 0)
+        dbg_log(Slic3r::DBG_FILL, z, "SLIVER", "TOTAL removed=%d remaining=%zu min_width=%.4fmm", removed,
+                surfaces.size(), unscaled<double>(min_half_w) * 2.0);
 }
 
 // Produce perimeter extrusions, gap fill extrusions and fill polygons for input slices.
@@ -196,8 +195,11 @@ void LayerRegion::make_perimeters(
         fill_expolygons_ranges.emplace_back(ExtrusionRange{fill_expolygons_begin, uint32_t(fill_expolygons.size())});
     }
 
-    // Calculate and store the number of interlocking shells for this layer region
-    const int num_interlocking_shells = region_config.interlock_perimeters_enabled.value
+    // Calculate and store the number of interlocking shells for this layer region.
+    // Serpentine replaces the perimeter structure entirely, so no interlocking
+    // shells exist even if interlocking is also ticked.
+    const int num_interlocking_shells = region_config.interlock_perimeters_enabled.value &&
+                                                !region_config.serpentine_enabled.value
                                             ? region_config.interlock_perimeter_count.value
                                             : 0;
     this->set_num_interlocking_shells(num_interlocking_shells);

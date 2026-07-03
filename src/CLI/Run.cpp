@@ -4,14 +4,70 @@
 ///|/
 #include "../preFlight.hpp"
 #include "CLI.hpp"
+#include "libslic3r/DebugOutput.hpp"
+
+#include <cctype>
+#include <cstdio>
+#include <string>
 
 namespace Slic3r::CLI
 {
+
+// Parse --debug <comma-list|all> into the global debug mask. Unknown category
+// names are a hard error so a forgotten category (which would otherwise swallow
+// the next argument, e.g. --debug model.3mf) fails loudly instead of silently.
+static bool apply_debug_flags(const Data &cli)
+{
+    if (!cli.misc_config.has("debug"))
+        return true;
+
+    const std::string spec = cli.misc_config.opt_string("debug");
+    uint32_t mask = 0;
+    size_t pos = 0;
+    while (pos <= spec.size())
+    {
+        size_t comma = spec.find(',', pos);
+        if (comma == std::string::npos)
+            comma = spec.size();
+        size_t b = pos, e = comma;
+        while (b < e && std::isspace((unsigned char) spec[b]))
+            ++b;
+        while (e > b && std::isspace((unsigned char) spec[e - 1]))
+            --e;
+        if (e > b)
+        {
+            std::string token = spec.substr(b, e - b);
+            uint32_t bit = debug_category_from_name(token);
+            if (bit == 0)
+            {
+                std::fprintf(stderr,
+                             "Unknown --debug category '%s'. Valid: fill, perimeters, interlock, serpentine, all.\n",
+                             token.c_str());
+                return false;
+            }
+            mask |= bit;
+        }
+        pos = comma + 1;
+    }
+
+    if (mask == 0)
+    {
+        std::fprintf(stderr, "--debug requires at least one category: fill, perimeters, interlock, serpentine, all.\n");
+        return false;
+    }
+
+    g_debug_mask = mask;
+    g_dbg_flusher.start(); // flush stdout on a cadence so redirected output lands live
+    return true;
+}
 
 int run(int argc, char **argv)
 {
     Data cli;
     if (!setup(cli, argc, argv))
+        return 1;
+
+    if (!apply_debug_flags(cli))
         return 1;
 
     if (process_profiles_sharing(cli))

@@ -77,6 +77,9 @@ const std::string &custom_gcodes_dir();
 void set_data_dir(const std::string &path);
 // Return a full path to the GUI resource files.
 const std::string &data_dir();
+// Per-user, version-scoped directory for preprocessing-script Python packages
+// (data_dir/python-packages/<major.minor>); lives outside the install so it survives upgrades.
+std::string user_python_packages_dir();
 
 // Format an output path for debugging purposes.
 // Writes out the output path prefix to the console for the first time the function is called,

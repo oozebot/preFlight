@@ -242,28 +242,7 @@ float Flow::rounded_rectangle_extrusion_spacing(float width, float height)
 {
     auto out = width - height * float(1. - 0.25 * PI);
     if (out <= 0.f)
-    {
-        // Print error details to console
-        printf("\n=======================================================\n");
-        printf("[FLOW] *** FATAL ERROR IN rounded_rectangle_extrusion_spacing() ***\n");
-        printf("[FLOW] About to throw FlowErrorNegativeSpacing exception!\n");
-        printf("[FLOW] \n");
-        printf("[FLOW]   Input width:  %.6fmm\n", width);
-        printf("[FLOW]   Input height: %.6fmm\n", height);
-        printf("[FLOW]   Calculated spacing: %.6fmm (NEGATIVE!)\n", out);
-        printf("[FLOW] \n");
-        printf("[FLOW]   Formula: spacing = width - height × 0.2146\n");
-        printf("[FLOW]            spacing = %.6f - %.6f × 0.2146\n", width, height);
-        printf("[FLOW]            spacing = %.6f - %.6f\n", width, height * 0.2146f);
-        printf("[FLOW]            spacing = %.6f (INVALID)\n", out);
-        printf("[FLOW] \n");
-        printf("[FLOW]   Minimum safe width = height × 0.2146 = %.6fmm\n", height * 0.2146f);
-        printf("[FLOW]   Your width: %.6fmm (TOO SMALL by %.6fmm)\n", width, (height * 0.2146f) - width);
-        printf("=======================================================\n\n");
-        fflush(stdout);
-
         throw FlowErrorNegativeSpacing();
-    }
     return out;
 }
 

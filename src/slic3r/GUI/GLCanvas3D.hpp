@@ -1506,7 +1506,6 @@ private:
     void _render_background();
     void _render_bed(const Transform3d &view_matrix, const Transform3d &projection_matrix, bool bottom);
     void _render_bed_axes();
-    void _render_bed_for_picking(const Transform3d &view_matrix, const Transform3d &projection_matrix, bool bottom);
     void _render_objects(GLVolumeCollection::ERenderType type);
     void _render_gcode();
     void _render_gcode_cog() { m_gcode_viewer.render_cog(); }
@@ -1518,7 +1517,6 @@ private:
     void _check_and_update_toolbar_icon_scale();
     void _render_overlays();
     void _render_bed_selector();
-    void _render_volumes_for_picking(const Camera &camera) const;
     void _render_current_gizmo() const { m_gizmos.render_current_gizmo(); }
     void _render_gizmos_overlay();
     void _render_main_toolbar();

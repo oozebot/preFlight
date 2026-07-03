@@ -159,14 +159,6 @@ struct SequentialView
     public:
         void init(std::optional<std::unique_ptr<GLModel>> &model_opt, bool is_ht90);
 
-        BoundingBoxf3 get_bounding_box() const
-        {
-            auto bb = m_model.get_bounding_box();
-            if (m_is_ht90)
-                bb.max.z() += scale_(400);
-            return bb;
-        }
-
         void set_world_position(const Vec3f &position) { m_world_position = position; }
         void set_world_offset(const Vec3f &offset) { m_world_offset = offset; }
         void set_z_offset(float z_offset) { m_z_offset = z_offset; }
@@ -538,8 +530,9 @@ const BoundingBoxf3 &get_max_bounding_box() const
         if (m_paths_bounding_box.defined)
         {
             max_bounding_box.merge(m_paths_bounding_box);
-            max_bounding_box.merge(m_paths_bounding_box.max +
-                                   m_sequential_view.marker.get_bounding_box().size().z() * Vec3d::UnitZ());
+            // Reserve tool-marker headroom above the paths from the stable build height so the
+            // preview frustum stays fixed when the marker model changes.
+            max_bounding_box.merge(m_paths_bounding_box.max + static_cast<double>(m_max_print_height) * Vec3d::UnitZ());
         }
     }
     return m_max_bounding_box;

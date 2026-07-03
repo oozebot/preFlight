@@ -1122,18 +1122,24 @@ void GCodeProcessor::apply_config(const PrintConfig &config)
         }
         if (m_flavor == gcfRepRapFirmware || m_flavor == gcfRapid)
         {
+            // Seed RRF firmware defaults so blank/cleared/imported fields never bind to the hidden
+            // (UI-inaccessible) Marlin per-axis arrays.
+            apply_rrf_default_limits();
+
             // RRF does not support setting min feedrates. Set them to zero.
             m_time_processor.machine_limits.machine_min_travel_rate.values.assign(
                 m_time_processor.machine_limits.machine_min_travel_rate.size(), 0.);
             m_time_processor.machine_limits.machine_min_extruding_rate.values.assign(
                 m_time_processor.machine_limits.machine_min_extruding_rate.size(), 0.);
-            // RepRapFirmware does not have a separate retraction acceleration concept.
-            // It uses the E-axis maximum acceleration for all E moves including retractions.
+
+            // Override machine limits with user-entered RRF M-codes if provided.
+            parse_rrf_limits_from_config(config);
+
+            // RepRapFirmware does not have a separate retraction acceleration concept. It uses the
+            // E-axis maximum acceleration for all E moves including retractions. Mirror the final
+            // E acceleration (firmware default or user M201) into the retracting slot.
             m_time_processor.machine_limits.machine_max_acceleration_retracting =
                 m_time_processor.machine_limits.machine_max_acceleration_e;
-
-            // Override machine limits with user-entered RRF M-codes if provided
-            parse_rrf_limits_from_config(config);
         }
     }
 
@@ -1467,7 +1473,7 @@ void GCodeProcessor::apply_config(const DynamicPrintConfig &config)
         if (machine_max_jerk_y != nullptr)
             m_time_processor.machine_limits.machine_max_jerk_y.values = machine_max_jerk_y->values;
 
-        const ConfigOptionFloats *machine_max_jerk_z = config.option<ConfigOptionFloats>("machine_max_jerkz");
+        const ConfigOptionFloats *machine_max_jerk_z = config.option<ConfigOptionFloats>("machine_max_jerk_z");
         if (machine_max_jerk_z != nullptr)
             m_time_processor.machine_limits.machine_max_jerk_z.values = machine_max_jerk_z->values;
 
@@ -1530,7 +1536,8 @@ void GCodeProcessor::apply_config(const DynamicPrintConfig &config)
             m_time_processor.machine_limits.machine_max_junction_deviation.values =
                 machine_max_junction_deviation->values;
 
-        // Klipper: override with native config values if present
+        // Klipper: drive the estimate ONLY from the four accessible Klipper values, replacing every
+        // hidden Marlin per-axis limit (see apply_klipper_isotropic_limits).
         if (m_flavor == gcfKlipper)
         {
             const ConfigOptionFloat *klipper_max_velocity = config.option<ConfigOptionFloat>(
@@ -1541,40 +1548,16 @@ void GCodeProcessor::apply_config(const DynamicPrintConfig &config)
             const ConfigOptionFloat *klipper_mcr = config.option<ConfigOptionFloat>(
                 "machine_klipper_minimum_cruise_ratio");
 
-            if (klipper_max_velocity != nullptr && klipper_max_velocity->value > 0)
-            {
-                float vel = static_cast<float>(klipper_max_velocity->value);
-                for (size_t i = 0; i < m_time_processor.machine_limits.machine_max_feedrate_x.size(); ++i)
-                {
-                    set_option_value(m_time_processor.machine_limits.machine_max_feedrate_x, i, vel);
-                    set_option_value(m_time_processor.machine_limits.machine_max_feedrate_y, i, vel);
-                }
-            }
-            if (klipper_max_accel != nullptr && klipper_max_accel->value > 0)
-            {
-                float accel = static_cast<float>(klipper_max_accel->value);
-                for (size_t i = 0; i < m_time_processor.machine_limits.machine_max_acceleration_x.size(); ++i)
-                {
-                    set_option_value(m_time_processor.machine_limits.machine_max_acceleration_x, i, accel);
-                    set_option_value(m_time_processor.machine_limits.machine_max_acceleration_y, i, accel);
-                    set_option_value(m_time_processor.machine_limits.machine_max_acceleration_extruding, i, accel);
-                    set_option_value(m_time_processor.machine_limits.machine_max_acceleration_retracting, i, accel);
-                    set_option_value(m_time_processor.machine_limits.machine_max_acceleration_travel, i, accel);
-                }
-            }
-            if (klipper_scv != nullptr && klipper_scv->value > 0)
-            {
+            float vel = (klipper_max_velocity != nullptr) ? static_cast<float>(klipper_max_velocity->value) : 0.0f;
+            float accel = (klipper_max_accel != nullptr) ? static_cast<float>(klipper_max_accel->value) : 0.0f;
+            // Adopt scv literally (incl. 0 = no cornering limit) so the slice and the viewer agree;
+            // the helper applies the default fallback only for a negative/unset value.
+            if (klipper_scv != nullptr)
                 m_klipper_scv = static_cast<float>(klipper_scv->value);
-                float accel = get_option_value(m_time_processor.machine_limits.machine_max_acceleration_extruding, 0);
-                if (accel > 0.0f)
-                {
-                    float jd = (m_klipper_scv * m_klipper_scv) / (2.0f * accel);
-                    for (size_t i = 0; i < m_time_processor.machine_limits.machine_max_junction_deviation.size(); ++i)
-                        set_option_value(m_time_processor.machine_limits.machine_max_junction_deviation, i, jd);
-                }
-            }
             if (klipper_mcr != nullptr)
                 m_klipper_minimum_cruise_ratio = std::clamp(static_cast<float>(klipper_mcr->value), 0.0f, 0.99f);
+
+            apply_klipper_isotropic_limits(vel, accel, m_klipper_scv);
         }
     }
 
@@ -1699,6 +1682,41 @@ void GCodeProcessor::parse_rrf_mcode_field(const std::string &mcode_line)
                       });
 }
 
+void GCodeProcessor::apply_rrf_default_limits()
+{
+    // RepRapFirmware uses its own compiled-in defaults when config.g sets no M201/M203/M566. The RRF
+    // M-code fields are preFlight-unique (empty on an imported profile) and the Marlin per-axis grid
+    // is hidden under RRF, so without this a migrated/cleared/malformed profile would bind to whatever
+    // inaccessible values the source slicer left in the arrays. Seed the firmware defaults here, BEFORE
+    // parse_rrf_limits_from_config overlays whatever M-codes the user actually supplied.
+    // Values from RepRapFirmware src/Config/Configuration.h, in preFlight's internal mm/s(^2) units.
+    MachineEnvelopeConfig &ml = m_time_processor.machine_limits;
+    for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i)
+    {
+        // M203 maximum feedrate - Default{Axis,Z,E}MaxFeedrate
+        set_option_value(ml.machine_max_feedrate_x, i, 100.0f);
+        set_option_value(ml.machine_max_feedrate_y, i, 100.0f);
+        set_option_value(ml.machine_max_feedrate_z, i, 20.0f);
+        set_option_value(ml.machine_max_feedrate_e, i, 100.0f);
+        // M201 maximum acceleration - Default{Axis,Z,E}Acceleration
+        set_option_value(ml.machine_max_acceleration_x, i, 1000.0f);
+        set_option_value(ml.machine_max_acceleration_y, i, 1000.0f);
+        set_option_value(ml.machine_max_acceleration_z, i, 200.0f);
+        set_option_value(ml.machine_max_acceleration_e, i, 500.0f);
+        // M204 print/travel acceleration default is intentionally huge (DefaultPrinting/TravelAcceleration)
+        // so the per-axis M201 caps govern. M204 is optional and has no UI default.
+        set_option_value(ml.machine_max_acceleration_extruding, i, 50000.0f);
+        set_option_value(ml.machine_max_acceleration_travel, i, 50000.0f);
+        set_acceleration(static_cast<PrintEstimatedStatistics::ETimeMode>(i), 50000.0f);
+        set_travel_acceleration(static_cast<PrintEstimatedStatistics::ETimeMode>(i), 50000.0f);
+        // M566 jerk / instantaneous speed change - Default{Axis,Z,E}InstantDv
+        set_option_value(ml.machine_max_jerk_x, i, 15.0f);
+        set_option_value(ml.machine_max_jerk_y, i, 15.0f);
+        set_option_value(ml.machine_max_jerk_z, i, 10.0f);
+        set_option_value(ml.machine_max_jerk_e, i, 5.0f);
+    }
+}
+
 void GCodeProcessor::parse_rrf_limits_from_config(const PrintConfig &config)
 {
     // Parse individual M-code fields from config
@@ -1714,6 +1732,67 @@ void GCodeProcessor::parse_rrf_limits_from_config(const PrintConfig &config)
         parse_rrf_mcode_field(config.machine_rrf_m207.value);
 }
 
+void GCodeProcessor::apply_klipper_isotropic_limits(float max_velocity, float max_accel, float scv)
+{
+    MachineEnvelopeConfig &ml = m_time_processor.machine_limits;
+
+    // Klipper's [printer] section is isotropic: one max_velocity, one max_accel, one
+    // square_corner_velocity. The Marlin per-axis arrays (machine_max_acceleration_{x,y,z,e},
+    // machine_max_feedrate_*, machine_max_jerk_*, machine_max_junction_deviation, min rates) are
+    // hidden from the UI when the flavor is Klipper, so whatever a preset/import happens to carry
+    // there is never seen or editable by the user - and the time estimator reads ONLY these arrays.
+    // We therefore overwrite EVERY axis of EVERY family UNCONDITIONALLY: there must be no path where
+    // an imported value (a stray 0 that zeroes block acceleration, or a tiny "1" that collapses it
+    // just as badly) is left in place because a Klipper field happened to be blank. If a Klipper
+    // field is <= 0, fall back to its own published default rather than to the imported array.
+    if (max_velocity <= 0.0f)
+        max_velocity = 300.0f; // machine_klipper_max_velocity default
+    if (max_accel <= 0.0f)
+        max_accel = 3000.0f; // machine_klipper_max_accel default
+    if (scv < 0.0f)
+        scv = 5.0f; // machine_klipper_square_corner_velocity default
+
+    // scv == 0 is a legitimate Klipper value meaning "no cornering limit" -> junction deviation 0.
+    const float jd = (scv > 0.0f) ? (scv * scv) / (2.0f * max_accel) : 0.0f;
+
+    for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i)
+    {
+        set_option_value(ml.machine_max_acceleration_x, i, max_accel);
+        set_option_value(ml.machine_max_acceleration_y, i, max_accel);
+        set_option_value(ml.machine_max_acceleration_z, i, max_accel);
+        set_option_value(ml.machine_max_acceleration_e, i, max_accel);
+        set_option_value(ml.machine_max_acceleration_extruding, i, max_accel);
+        set_option_value(ml.machine_max_acceleration_retracting, i, max_accel);
+        set_option_value(ml.machine_max_acceleration_travel, i, max_accel);
+        // Raise the ceiling too: set_acceleration()/set_travel_acceleration() clamp against
+        // machines[i].max_acceleration, so without this a mid-print SET_VELOCITY_LIMIT/M204 that
+        // *increases* accel would be silently clamped back down to the initial value.
+        m_time_processor.machines[i].max_acceleration = max_accel;
+        m_time_processor.machines[i].max_travel_acceleration = max_accel;
+        set_acceleration(static_cast<PrintEstimatedStatistics::ETimeMode>(i), max_accel);
+        set_travel_acceleration(static_cast<PrintEstimatedStatistics::ETimeMode>(i), max_accel);
+
+        set_option_value(ml.machine_max_feedrate_x, i, max_velocity);
+        set_option_value(ml.machine_max_feedrate_y, i, max_velocity);
+        set_option_value(ml.machine_max_feedrate_z, i, max_velocity);
+        set_option_value(ml.machine_max_feedrate_e, i, max_velocity);
+
+        // Klipper has no per-axis jerk; cornering is modeled via square_corner_velocity -> junction
+        // deviation. Neutralize jerk (set to max_velocity) so the safe_feedrate jerk clamp can never
+        // pin a move below its nominal speed.
+        set_option_value(ml.machine_max_jerk_x, i, max_velocity);
+        set_option_value(ml.machine_max_jerk_y, i, max_velocity);
+        set_option_value(ml.machine_max_jerk_z, i, max_velocity);
+        set_option_value(ml.machine_max_jerk_e, i, max_velocity);
+
+        set_option_value(ml.machine_max_junction_deviation, i, jd);
+    }
+
+    // Klipper has no minimum feedrates.
+    ml.machine_min_travel_rate.values.assign(ml.machine_min_travel_rate.size(), 0.);
+    ml.machine_min_extruding_rate.values.assign(ml.machine_min_extruding_rate.size(), 0.);
+}
+
 void GCodeProcessor::parse_klipper_limits_from_config(const PrintConfig &config)
 {
     float max_velocity = static_cast<float>(config.machine_klipper_max_velocity.value);
@@ -1724,36 +1803,7 @@ void GCodeProcessor::parse_klipper_limits_from_config(const PrintConfig &config)
     m_klipper_scv = scv;
     m_klipper_minimum_cruise_ratio = std::clamp(mcr, 0.0f, 0.99f);
 
-    for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i)
-    {
-        if (max_velocity > 0.0f)
-        {
-            set_option_value(m_time_processor.machine_limits.machine_max_feedrate_x, i, max_velocity);
-            set_option_value(m_time_processor.machine_limits.machine_max_feedrate_y, i, max_velocity);
-        }
-        if (max_accel > 0.0f)
-        {
-            set_option_value(m_time_processor.machine_limits.machine_max_acceleration_x, i, max_accel);
-            set_option_value(m_time_processor.machine_limits.machine_max_acceleration_y, i, max_accel);
-            set_option_value(m_time_processor.machine_limits.machine_max_acceleration_extruding, i, max_accel);
-            set_option_value(m_time_processor.machine_limits.machine_max_acceleration_retracting, i, max_accel);
-            set_option_value(m_time_processor.machine_limits.machine_max_acceleration_travel, i, max_accel);
-            set_acceleration(static_cast<PrintEstimatedStatistics::ETimeMode>(i), max_accel);
-            set_travel_acceleration(static_cast<PrintEstimatedStatistics::ETimeMode>(i), max_accel);
-        }
-        // Convert SCV to junction deviation: jd = scv^2 / (2 * accel)
-        if (scv > 0.0f && max_accel > 0.0f)
-        {
-            float jd = (scv * scv) / (2.0f * max_accel);
-            set_option_value(m_time_processor.machine_limits.machine_max_junction_deviation, i, jd);
-        }
-    }
-
-    // Klipper doesn't use min feedrates or per-axis jerk
-    m_time_processor.machine_limits.machine_min_travel_rate.values.assign(
-        m_time_processor.machine_limits.machine_min_travel_rate.size(), 0.);
-    m_time_processor.machine_limits.machine_min_extruding_rate.values.assign(
-        m_time_processor.machine_limits.machine_min_extruding_rate.size(), 0.);
+    apply_klipper_isotropic_limits(max_velocity, max_accel, scv);
 }
 
 void GCodeProcessor::process_SET_VELOCITY_LIMIT(const std::string &line)
@@ -1792,35 +1842,15 @@ void GCodeProcessor::process_SET_VELOCITY_LIMIT(const std::string &line)
     if (has_mcr)
         m_klipper_minimum_cruise_ratio = std::clamp(mcr, 0.0f, 0.99f);
 
-    for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i)
-    {
-        if (has_velocity && velocity > 0.0f)
-        {
-            set_option_value(m_time_processor.machine_limits.machine_max_feedrate_x, i, velocity);
-            set_option_value(m_time_processor.machine_limits.machine_max_feedrate_y, i, velocity);
-        }
-        if (has_accel && accel > 0.0f)
-        {
-            set_option_value(m_time_processor.machine_limits.machine_max_acceleration_x, i, accel);
-            set_option_value(m_time_processor.machine_limits.machine_max_acceleration_y, i, accel);
-            set_option_value(m_time_processor.machine_limits.machine_max_acceleration_extruding, i, accel);
-            set_option_value(m_time_processor.machine_limits.machine_max_acceleration_retracting, i, accel);
-            set_option_value(m_time_processor.machine_limits.machine_max_acceleration_travel, i, accel);
-            set_acceleration(static_cast<PrintEstimatedStatistics::ETimeMode>(i), accel);
-            set_travel_acceleration(static_cast<PrintEstimatedStatistics::ETimeMode>(i), accel);
-        }
-        // Recalculate junction deviation whenever SCV or accel changes
-        if (has_scv || has_accel)
-        {
-            float current_accel = get_option_value(m_time_processor.machine_limits.machine_max_acceleration_extruding,
-                                                   i);
-            if (m_klipper_scv > 0.0f && current_accel > 0.0f)
-            {
-                float jd = (m_klipper_scv * m_klipper_scv) / (2.0f * current_accel);
-                set_option_value(m_time_processor.machine_limits.machine_max_junction_deviation, i, jd);
-            }
-        }
-    }
+    // SET_VELOCITY_LIMIT is incremental: keep the current isotropic limits for any field the command
+    // omits, then re-apply across all axes so z/e/jerk/junction-deviation stay consistent.
+    float eff_velocity = (has_velocity && velocity > 0.0f)
+                             ? velocity
+                             : get_option_value(m_time_processor.machine_limits.machine_max_feedrate_x, 0);
+    float eff_accel = (has_accel && accel > 0.0f)
+                          ? accel
+                          : get_option_value(m_time_processor.machine_limits.machine_max_acceleration_extruding, 0);
+    apply_klipper_isotropic_limits(eff_velocity, eff_accel, m_klipper_scv);
 }
 
 void GCodeProcessor::process_M207(const GCodeReader::GCodeLine &line)
@@ -4987,7 +5017,9 @@ void GCodeProcessor::process_G1(const std::array<std::optional<double>, 4> &axes
             const float axis_max_acceleration =
                 get_axis_max_acceleration(static_cast<PrintEstimatedStatistics::ETimeMode>(i), static_cast<Axis>(a));
             const float scale = std::abs(delta_pos[a]) * inv_distance;
-            if (acceleration * scale > axis_max_acceleration)
+            // axis_max == 0 means "no limit for this axis", not "clamp the move to zero acceleration".
+            // A stray 0 (e.g. an unset per-axis limit) must never zero the whole move's acceleration.
+            if (axis_max_acceleration > 0.0f && acceleration * scale > axis_max_acceleration)
                 acceleration = axis_max_acceleration / scale;
         }
 
@@ -6076,6 +6108,11 @@ void GCodeProcessor::process_M203(const GCodeReader::GCodeLine &line)
 void GCodeProcessor::process_M204(const GCodeReader::GCodeLine &line)
 {
     float value;
+    // Klipper treats M204 (S or P) as a global accel change, like SET_VELOCITY_LIMIT ACCEL=. Capture
+    // the raw value so an *increase* is not pre-clamped by the read-back below.
+    float klipper_accel = -1.0f;
+    if (float v; line.has_value('S', v) || line.has_value('P', v))
+        klipper_accel = v;
     for (size_t i = 0; i < static_cast<size_t>(PrintEstimatedStatistics::ETimeMode::Count); ++i)
     {
         if (static_cast<PrintEstimatedStatistics::ETimeMode>(i) == PrintEstimatedStatistics::ETimeMode::Normal ||
@@ -6102,28 +6139,16 @@ void GCodeProcessor::process_M204(const GCodeReader::GCodeLine &line)
                     // Interpret the T value as the travel acceleration in the new Marlin format.
                     set_travel_acceleration(static_cast<PrintEstimatedStatistics::ETimeMode>(i), value);
             }
-
-            // Klipper treats M204 as equivalent to SET_VELOCITY_LIMIT ACCEL=
-            // It updates the global max_accel limit and recalculates junction deviation.
-            if (m_flavor == gcfKlipper)
-            {
-                float accel = get_acceleration(static_cast<PrintEstimatedStatistics::ETimeMode>(i));
-                if (accel > 0.0f)
-                {
-                    set_option_value(m_time_processor.machine_limits.machine_max_acceleration_x, i, accel);
-                    set_option_value(m_time_processor.machine_limits.machine_max_acceleration_y, i, accel);
-                    set_option_value(m_time_processor.machine_limits.machine_max_acceleration_extruding, i, accel);
-                    set_option_value(m_time_processor.machine_limits.machine_max_acceleration_retracting, i, accel);
-                    set_option_value(m_time_processor.machine_limits.machine_max_acceleration_travel, i, accel);
-
-                    if (m_klipper_scv > 0.0f)
-                    {
-                        float jd = (m_klipper_scv * m_klipper_scv) / (2.0f * accel);
-                        set_option_value(m_time_processor.machine_limits.machine_max_junction_deviation, i, jd);
-                    }
-                }
-            }
         }
+    }
+
+    // Klipper: M204 is a global accel change (like SET_VELOCITY_LIMIT ACCEL=). Re-apply the full
+    // isotropic limit set (all axes incl. z/e + junction deviation) through the shared helper so a
+    // mid-print M204 never leaves a partial, axis-mixed acceleration state.
+    if (m_flavor == gcfKlipper && klipper_accel > 0.0f)
+    {
+        float vel = get_option_value(m_time_processor.machine_limits.machine_max_feedrate_x, 0);
+        apply_klipper_isotropic_limits(vel, klipper_accel, m_klipper_scv);
     }
 }
 

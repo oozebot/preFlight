@@ -479,7 +479,6 @@ ModelObject &ModelObject::assign_copy(const ModelObject &rhs)
     this->sla_points_status = rhs.sla_points_status;
     this->sla_drain_holes = rhs.sla_drain_holes;
     this->brim_points = rhs.brim_points;
-    this->brim_points_status = rhs.brim_points_status;
     this->layer_config_ranges = rhs.layer_config_ranges;
     this->layer_height_profile = rhs.layer_height_profile;
     this->printable = rhs.printable;
@@ -521,7 +520,6 @@ ModelObject &ModelObject::assign_copy(ModelObject &&rhs)
     this->sla_points_status = std::move(rhs.sla_points_status);
     this->sla_drain_holes = std::move(rhs.sla_drain_holes);
     this->brim_points = std::move(rhs.brim_points);
-    this->brim_points_status = std::move(rhs.brim_points_status);
     this->layer_config_ranges = std::move(rhs.layer_config_ranges);
     this->layer_height_profile = std::move(rhs.layer_height_profile);
     this->printable = std::move(rhs.printable);

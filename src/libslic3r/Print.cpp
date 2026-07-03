@@ -147,6 +147,7 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
                                                           "min_print_speed",
                                                           "max_print_speed",
                                                           "max_volumetric_speed",
+                                                          "max_volumetric_flow",
                                                           "max_volumetric_extrusion_rate_slope_positive",
                                                           "max_volumetric_extrusion_rate_slope_negative",
                                                           "notes",

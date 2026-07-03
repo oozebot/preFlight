@@ -1543,16 +1543,18 @@ void Filler::_fill_surface_single(const FillParams &params, unsigned int thickne
                 if (line.a.x() != std::numeric_limits<coord_t>::max())
                     lines.emplace_back(line);
         }
-        dbg_fill_print("z=%.3f [FILL] ADAPTIVE octree_lines=%zu (dir0=%zu dir1=%zu dir2=%zu)\n", this->z, lines.size(),
-                       contexts[0].output_lines.size() +
-                           std::count_if(contexts[0].temp_lines.begin(), contexts[0].temp_lines.end(),
-                                         [](const Line &l) { return l.a.x() != std::numeric_limits<coord_t>::max(); }),
-                       contexts[1].output_lines.size() +
-                           std::count_if(contexts[1].temp_lines.begin(), contexts[1].temp_lines.end(),
-                                         [](const Line &l) { return l.a.x() != std::numeric_limits<coord_t>::max(); }),
-                       contexts[2].output_lines.size() +
-                           std::count_if(contexts[2].temp_lines.begin(), contexts[2].temp_lines.end(),
-                                         [](const Line &l) { return l.a.x() != std::numeric_limits<coord_t>::max(); }));
+        if (Slic3r::debug_enabled(Slic3r::DBG_FILL))
+            dbg_log(Slic3r::DBG_FILL, this->z, "FILL", "ADAPTIVE octree_lines=%zu (dir0=%zu dir1=%zu dir2=%zu)",
+                    lines.size(),
+                    contexts[0].output_lines.size() +
+                        std::count_if(contexts[0].temp_lines.begin(), contexts[0].temp_lines.end(),
+                                      [](const Line &l) { return l.a.x() != std::numeric_limits<coord_t>::max(); }),
+                    contexts[1].output_lines.size() +
+                        std::count_if(contexts[1].temp_lines.begin(), contexts[1].temp_lines.end(),
+                                      [](const Line &l) { return l.a.x() != std::numeric_limits<coord_t>::max(); }),
+                    contexts[2].output_lines.size() +
+                        std::count_if(contexts[2].temp_lines.begin(), contexts[2].temp_lines.end(),
+                                      [](const Line &l) { return l.a.x() != std::numeric_limits<coord_t>::max(); }));
         // Convert lines to polylines.
         all_polylines.reserve(lines.size());
         std::transform(lines.begin(), lines.end(), std::back_inserter(all_polylines),
@@ -1560,7 +1562,7 @@ void Filler::_fill_surface_single(const FillParams &params, unsigned int thickne
         // Crop all polylines
         size_t pre_crop = all_polylines.size();
         all_polylines = intersection_pl(std::move(all_polylines), expolygon);
-        dbg_fill_print("z=%.3f [FILL] ADAPTIVE crop pre=%zu post=%zu\n", this->z, pre_crop, all_polylines.size());
+        dbg_log(Slic3r::DBG_FILL, this->z, "FILL", "ADAPTIVE crop pre=%zu post=%zu", pre_crop, all_polylines.size());
 #endif
     }
 
@@ -1590,8 +1592,8 @@ void Filler::_fill_surface_single(const FillParams &params, unsigned int thickne
                                              ? connect_lines_using_hooks(std::move(all_polylines), expolygon,
                                                                          this->spacing, hook_length, hook_length_max)
                                              : std::move(all_polylines);
-    dbg_fill_print("z=%.3f [FILL] ADAPTIVE hooks pre=%zu post=%zu\n", this->z, pre_hooks,
-                   all_polylines_with_hooks.size());
+    dbg_log(Slic3r::DBG_FILL, this->z, "FILL", "ADAPTIVE hooks pre=%zu post=%zu", pre_hooks,
+            all_polylines_with_hooks.size());
 
 #ifdef ADAPTIVE_CUBIC_INFILL_DEBUG_OUTPUT
     {
@@ -1616,8 +1618,8 @@ void Filler::_fill_surface_single(const FillParams &params, unsigned int thickne
         double post_len = 0;
         for (size_t i = pre_connect_out; i < polylines_out.size(); ++i)
             post_len += unscale<double>(polylines_out[i].length());
-        dbg_fill_print("z=%.3f [FILL] ADAPTIVE chain pre_len=%.1fmm post=%zu(%.1fmm) lost=%.1fmm\n", this->z,
-                       pre_connect_len, polylines_out.size() - pre_connect_out, post_len, pre_connect_len - post_len);
+        dbg_log(Slic3r::DBG_FILL, this->z, "FILL", "ADAPTIVE chain pre_len=%.1fmm post=%zu(%.1fmm) lost=%.1fmm",
+                pre_connect_len, polylines_out.size() - pre_connect_out, post_len, pre_connect_len - post_len);
     }
     else
     {
@@ -1625,8 +1627,8 @@ void Filler::_fill_surface_single(const FillParams &params, unsigned int thickne
         double post_len = 0;
         for (size_t i = pre_connect_out; i < polylines_out.size(); ++i)
             post_len += unscale<double>(polylines_out[i].length());
-        dbg_fill_print("z=%.3f [FILL] ADAPTIVE connect pre_len=%.1fmm post=%zu(%.1fmm) lost=%.1fmm\n", this->z,
-                       pre_connect_len, polylines_out.size() - pre_connect_out, post_len, pre_connect_len - post_len);
+        dbg_log(Slic3r::DBG_FILL, this->z, "FILL", "ADAPTIVE connect pre_len=%.1fmm post=%zu(%.1fmm) lost=%.1fmm",
+                pre_connect_len, polylines_out.size() - pre_connect_out, post_len, pre_connect_len - post_len);
     }
 
 #ifdef ADAPTIVE_CUBIC_INFILL_DEBUG_OUTPUT

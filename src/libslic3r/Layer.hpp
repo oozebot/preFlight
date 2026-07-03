@@ -129,7 +129,8 @@ public:
     // based on this->fill_expolygons_composite() flag.
     ExPolygonRange fill_expolygons;
     // Index of LayerRegion with LayerRegion::fill_expolygons() if not fill_expolygons_composite().
-    uint32_t fill_region_id;
+    // Defaults to the composite sentinel so a fill-less island is never read as a stray region id.
+    uint32_t fill_region_id = fill_region_composite_id;
     bool fill_expolygons_composite() const { return this->fill_region_id == fill_region_composite_id; }
     // Centroid of this island used for path planning.
     //    Point                 centroid;

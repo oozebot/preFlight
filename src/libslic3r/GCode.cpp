@@ -964,6 +964,7 @@ static std::string update_print_stats_and_format_filament_stats(
 } // namespace DoExport
 
 static double effective_max_print_speed(const FullPrintConfig &config, int extruder_id);
+static double effective_max_volumetric_flow(const FullPrintConfig &config, int extruder_id);
 
 #if 0
 // Sort the PrintObjects by their increasing Z, likely useful for avoiding colisions on Deltas during sequential prints.
@@ -4539,12 +4540,11 @@ static void apply_seam_notch(std::vector<GCode::ExtrusionOrder::Perimeter> &peri
         return Point(0, 0);
     };
 
-    // Collect external perimeters, regular inner perimeters (index 1), and
-    // outermost interlocking perimeters (index 0) as a fallback for Nip/Tuck
-    // when interlocking reduces regular perimeters to 1.
+    // Collect external perimeters and their regular inner perimeters (index 1). Interlocking shells are
+    // never notched: the only case with no regular inner is PWI single-wall, which is bypassed before
+    // apply_seam_notch runs (see extrude_perimeters).
     std::vector<Perimeter *> ext_perims;
     std::vector<Perimeter *> inner_perims;
-    std::vector<Perimeter *> il_outer_perims;
 
     for (auto &p : perimeters)
     {
@@ -4559,25 +4559,17 @@ static void apply_seam_notch(std::vector<GCode::ExtrusionOrder::Perimeter> &peri
         {
             ext_perims.push_back(&p);
         }
-        else if (loop->role().is_perimeter() && !loop->paths.empty())
+        else if (loop->role().is_perimeter() && !loop->role().has(ExtrusionRoleModifier::Interlocking) &&
+                 !loop->paths.empty())
         {
-            const bool is_interlocking = loop->role().has(ExtrusionRoleModifier::Interlocking);
             auto pi = loop->paths.front().attributes().perimeter_index;
-            if (is_interlocking)
-            {
-                if (pi.has_value() && *pi == 0)
-                    il_outer_perims.push_back(&p);
-            }
-            else if (pi.has_value() && *pi == 1)
-            {
+            if (pi.has_value() && *pi == 1)
                 inner_perims.push_back(&p);
-            }
         }
     }
 
-    // Match each external perimeter with its closest inner perimeter.
-    // Falls back to outermost interlocking shell when no regular inner exists.
-    const auto &candidates = inner_perims.empty() ? il_outer_perims : inner_perims;
+    // Match each external perimeter with its closest regular inner perimeter.
+    const auto &candidates = inner_perims;
 
     struct ExtInnerPair
     {
@@ -4816,9 +4808,16 @@ std::string GCodeGenerator::extrude_perimeters(const PrintRegion &region,
         m_config.apply(region.config());
     }
 
-    // preFlight: Apply seam notch if a non-Regular seam type is selected, we have multiple perimeters, and not in spiral vase mode
+    // preFlight: nip/tuck needs >=2 regular walls so the external has an adjacent inner to notch. Two configs
+    // leave a single regular wall and so bypass it: perimeters==1 (the perimeters.value > 1 check below) and
+    // PWI reducing the regular walls to one (interlock_perimeters_enabled && interlock_regular_perimeters==1).
+    const bool pwi_single_wall = m_config.interlock_perimeters_enabled.value &&
+                                 m_config.interlock_regular_perimeters.value == 1;
+
+    // preFlight: Apply seam notch if a non-Regular seam type is selected, we have multiple perimeters, not in
+    // spiral vase mode, and not a PWI single-wall region.
     if (m_config.seam_type.value != sntRegular && m_config.perimeters.value > 1 && !m_config.spiral_vase &&
-        !perimeters.empty())
+        !perimeters.empty() && !pwi_single_wall)
     {
         apply_seam_notch(perimeters, m_config, m_layer_index);
     }
@@ -4841,7 +4840,7 @@ std::string GCodeGenerator::extrude_perimeters(const PrintRegion &region,
             if (m_config.auto_speed.value)
             {
                 int ext_id = m_writer.extruder()->id();
-                double vol = m_config.filament_max_volumetric_flow.get_at(ext_id);
+                double vol = effective_max_volumetric_flow(m_config, ext_id);
                 double mm3 = perimeter.smooth_path.front().path_attributes.mm3_per_mm;
                 double max_speed = effective_max_print_speed(m_config, ext_id);
                 base_speed = (vol > 0) ? std::min(vol / mm3, max_speed) : max_speed;
@@ -5069,17 +5068,26 @@ static double effective_max_print_speed(const FullPrintConfig &config, int extru
     return (filament_max > 0) ? filament_max : config.max_print_speed.value;
 }
 
+// Effective volumetric flow cap (mm3/s): the print-profile Max volumetric flow clamps the
+// filament's Max volumetric flow when set lower. A value of 0 means "disabled" and the filament
+// limit stands alone. (max_volumetric_speed is the legacy alias kept in sync for scripting.)
+static double effective_max_volumetric_flow(const FullPrintConfig &config, int extruder_id)
+{
+    const double filament_flow = config.filament_max_volumetric_flow.get_at(extruder_id);
+    const double print_cap = config.max_volumetric_flow.value;
+    if (print_cap > 0)
+        return (filament_flow > 0) ? std::min(filament_flow, print_cap) : print_cap;
+    return filament_flow;
+}
+
 double cap_speed(double speed, const FullPrintConfig &config, int extruder_id, const ExtrusionAttributes &path_attr,
                  bool auto_calculated = false)
 {
-    // Print-level volumetric cap (removed from UI but still honored from presets)
-    const double general_volumetric_cap{config.max_volumetric_speed.value};
-    if (general_volumetric_cap > 0)
-        speed = std::min(speed, general_volumetric_cap / path_attr.mm3_per_mm);
-    // Filament volumetric flow cap
-    const double filament_volumetric_cap{config.filament_max_volumetric_flow.get_at(extruder_id)};
-    if (filament_volumetric_cap > 0)
-        speed = std::min(speed, filament_volumetric_cap / path_attr.mm3_per_mm);
+    // Volumetric flow cap: filament Max volumetric flow, clamped by the hidden print-level
+    // Max volumetric speed when it is set lower.
+    const double volumetric_cap{effective_max_volumetric_flow(config, extruder_id)};
+    if (volumetric_cap > 0)
+        speed = std::min(speed, volumetric_cap / path_attr.mm3_per_mm);
     // Max print speed ceiling for auto-calculated speeds (checkbox or individual speed=0).
     if (auto_calculated)
         speed = std::min(speed, effective_max_print_speed(config, extruder_id));
@@ -5596,6 +5604,12 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
         {
             speed = m_config.get_abs_value("external_perimeter_speed");
         }
+        else if (path_attr.role.is_serpentine() && !path_attr.role.is_bridge())
+        {
+            // Serpentine reuses external-perimeter speed; overhanging serpentine
+            // carries Bridge and falls through to the bridge branch below.
+            speed = m_config.get_abs_value("external_perimeter_speed");
+        }
         else if (path_attr.role.is_bridge())
         {
             assert(path_attr.role.is_perimeter() || path_attr.role == ExtrusionRole::BridgeInfill);
@@ -5647,7 +5661,7 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
     if (auto_calculated)
     {
         int ext_id = m_writer.extruder()->id();
-        double vol = m_config.filament_max_volumetric_flow.get_at(ext_id);
+        double vol = effective_max_volumetric_flow(m_config, ext_id);
         double max_speed = effective_max_print_speed(m_config, ext_id);
         if (vol > 0)
         {
@@ -5685,7 +5699,7 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
         if (overhang_auto)
         {
             int ext_id = m_writer.extruder()->id();
-            double vol = m_config.filament_max_volumetric_flow.get_at(ext_id);
+            double vol = effective_max_volumetric_flow(m_config, ext_id);
             if (vol > 0)
                 external_perimeter_reference_speed = std::min(vol / path_attr.mm3_per_mm,
                                                               effective_max_print_speed(m_config, ext_id));
@@ -5702,6 +5716,11 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
     {
         if (path_attr.role != ExtrusionRole::InterlockingPerimeter)
         {
+            // Dynamic overhang speed is already quantized to a fixed grid upstream (calculate_overhang_speed).
+            // The cap_speed() volumetric limit below, and the per-layer CoolingBuffer rescaling further
+            // downstream, intentionally take it back off that grid - that is why the final G-code F values are
+            // not all grid-aligned. Do NOT re-quantize after those stages: rounding a volumetric-capped speed
+            // back up would exceed max_volumetric_speed and defeat the flow safety limit.
             speed = dynamic_print_and_fan_speeds.print_speed;
         }
     }
@@ -5862,7 +5881,8 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
         dynamic_print_and_fan_speeds.fan_speed < 0)
     {
         GCodeExtrusionRole gcode_role = extrusion_role_to_gcode_extrusion_role(path_attr.role);
-        if (gcode_role == GCodeExtrusionRole::OverhangPerimeter)
+        // Serpentine overhang is treated as an overhang perimeter for auto cooling.
+        if (gcode_role == GCodeExtrusionRole::OverhangPerimeter || gcode_role == GCodeExtrusionRole::SerpentineOverhang)
         {
             int overhang_fan_speed = EXTRUDER_CONFIG(manual_fan_speed_overhang_perimeter);
             gcode += ";_SET_FAN_SPEED" + std::to_string(overhang_fan_speed) + "\n";
@@ -5888,6 +5908,12 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
             break;
         case GCodeExtrusionRole::InterlockingPerimeter:
             manual_fan_speed = EXTRUDER_CONFIG(manual_fan_speed_interlocking_perimeter);
+            break;
+        case GCodeExtrusionRole::Serpentine:
+            manual_fan_speed = EXTRUDER_CONFIG(manual_fan_speed_serpentine);
+            break;
+        case GCodeExtrusionRole::SerpentineOverhang:
+            manual_fan_speed = EXTRUDER_CONFIG(manual_fan_speed_serpentine_overhang);
             break;
         case GCodeExtrusionRole::InternalInfill:
             manual_fan_speed = EXTRUDER_CONFIG(manual_fan_speed_internal_infill);

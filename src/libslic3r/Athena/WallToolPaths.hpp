@@ -115,7 +115,7 @@ public:
      */
     static bool removeEmptyToolPaths(std::vector<VariableWidthLines> &toolpaths);
 
-    // Set the print_z used in FILL_DEBUG log lines so WTP output aligns with
+    // Set the print_z used in debug log lines so WTP output aligns with
     // [PERIM] / [FILL] entries from the same layer.
     void set_debug_print_z(double z) { debug_print_z = z; }
 
@@ -174,7 +174,7 @@ private:
     coord_t spacing_override_internal;  //<! Spacing override for internal perimeters (0 = not set)
     coord_t spacing_override_innermost; //<! Spacing override for innermost perimeter (0 = use spacing_override_internal)
     int debug_layer_id;                 //<! Layer ID for debug output (-1 = unknown)
-    double debug_print_z{0.0};          //<! Print z used in FILL_DEBUG log lines (set via set_debug_print_z)
+    double debug_print_z{0.0};          //<! Print z used in debug log lines (set via set_debug_print_z)
     coord_t thin_wall_snap_precision;   //<! Snap grid for thin wall width rounding (nanometers)
     bool m_thin_contour_regeneration_attempted{false}; //<! Prevents infinite regeneration loops
     size_t m_original_inset_count{0};                  //<! Original inset_count before thin-contour regeneration

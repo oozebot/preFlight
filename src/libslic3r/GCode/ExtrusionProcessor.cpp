@@ -5,6 +5,7 @@
 #include "ExtrusionProcessor.hpp"
 
 #include <cassert>
+#include <cmath>
 #include <iterator>
 #include <map>
 #include <optional>
@@ -109,7 +110,11 @@ ExtrusionPaths calculate_and_split_overhanging_extrusions(
         result.back().polyline.append(Point::new_scale(extended_points[i].position));
         result.back().overhang_attributes_mutable()->end_distance_from_prev_layer = extended_points[i].distance;
 
-        // Moderate tolerance to reduce excessive path splitting while preserving real overhang transitions
+        // Moderate tolerance to reduce excessive path splitting while preserving real overhang transitions.
+        // NOTE: start_distance is seeded from the max-collapsed segment distance, so each sub-path runs at
+        // its most-overhanging point's speed. That is fine while this tolerance is small (the per-sub-path
+        // distance spread is bounded by it). If this is ever coarsened, seed start_distance from the true
+        // endpoint (extended_points[sequence_start_index].distance) to match per-point interpolation.
         if (std::abs(calculated_distances[sequence_start_index].first - calculated_distances[i].first) <
                 0.01 * path.attributes().width &&
             std::abs(calculated_distances[sequence_start_index].second - calculated_distances[i].second) < 0.001)
@@ -223,6 +228,9 @@ static std::map<float, float> calc_print_speed_sections(const ExtrusionAttribute
         ConfigOptionFloatOrPercent print_speed;
     };
 
+    const float speed_base = external_perimeter_reference_speed > 0 ? external_perimeter_reference_speed
+                                                                    : default_speed;
+
     std::vector<OverhangWithSpeed> overhangs_with_speeds = {{100, ConfigOptionFloatOrPercent{default_speed, false}}};
     if (config.enable_dynamic_overhang_speeds)
     {
@@ -231,22 +239,38 @@ static std::map<float, float> calc_print_speed_sections(const ExtrusionAttribute
                                  {50, config.overhang_speed_2},
                                  {75, config.overhang_speed_3},
                                  {100, ConfigOptionFloatOrPercent{default_speed, false}}};
+
+        // Enabled but every band left at 0: treat as unconfigured and fall back to the default
+        // bands (percent of perimeter speed) instead of applying no slowdown at all.
+        // Defaults mirror PrintConfig.cpp overhang_speed_0..3 set_default_value() - keep them in sync.
+        if (config.overhang_speed_0.get_abs_value(speed_base) < EPSILON &&
+            config.overhang_speed_1.get_abs_value(speed_base) < EPSILON &&
+            config.overhang_speed_2.get_abs_value(speed_base) < EPSILON &&
+            config.overhang_speed_3.get_abs_value(speed_base) < EPSILON)
+        {
+            overhangs_with_speeds = {{0, ConfigOptionFloatOrPercent{40, true}},
+                                     {25, ConfigOptionFloatOrPercent{55, true}},
+                                     {50, ConfigOptionFloatOrPercent{70, true}},
+                                     {75, ConfigOptionFloatOrPercent{85, true}},
+                                     {100, ConfigOptionFloatOrPercent{default_speed, false}}};
+        }
     }
 
-    const float speed_base = external_perimeter_reference_speed > 0 ? external_perimeter_reference_speed
-                                                                    : default_speed;
     std::map<float, float> speed_sections;
     for (OverhangWithSpeed &overhangs_with_speed : overhangs_with_speeds)
     {
         const float distance = attributes.width * (1.f - (float(overhangs_with_speed.percent) / 100.f));
-        float speed = float(overhangs_with_speed.print_speed.get_abs_value(speed_base));
+        const float speed = float(overhangs_with_speed.print_speed.get_abs_value(speed_base));
 
-        if (speed < EPSILON)
+        // Drop an individual zero band so interpolation bridges from the configured neighbours
+        // rather than substituting the base speed (which would make worse overhangs print faster).
+        // The fully-supported 100% anchor is always kept so the table is never empty.
+        if (speed < EPSILON && overhangs_with_speed.percent != 100)
         {
-            speed = speed_base;
+            continue;
         }
 
-        speed_sections[distance] = speed;
+        speed_sections[distance] = (speed < EPSILON) ? speed_base : speed;
     }
 
     return speed_sections;
@@ -288,9 +312,37 @@ OverhangSpeeds calculate_overhang_speed(const ExtrusionAttributes &attributes, c
 {
     assert(attributes.overhang_attributes.has_value());
 
-    // Snap to nearest configured speed bucket instead of interpolating. Each of the
-    // configured overlap thresholds (0/25/50/75/100%) controls the range closest to it,
-    // producing exactly 5 discrete speed levels with clean transitions.
+    // Print speed is linearly interpolated between the configured overhang bands, then quantized to
+    // a coarse grid so consecutive segments on a gentle gradient collapse to one speed (fewer
+    // F-changes / smaller G-code) while staying within half a step of the true curve. The result is
+    // already on the grid - consume it directly, do not apply further arithmetic. Fan speed stays
+    // snapped to discrete bands to avoid emitting a new M106 on every segment.
+    static constexpr float OVERHANG_SPEED_QUANTUM = 2.f; // mm/s; quality vs G-code-size knob, safe range 1-5
+    auto interpolate_speed = [](const std::map<float, float> &values, float distance)
+    {
+        assert(!values.empty()); // always holds: the 100% (fully-supported) anchor is never dropped
+        float speed;
+        auto upper = values.lower_bound(distance);
+        if (upper == values.end())
+        {
+            speed = values.rbegin()->second; // beyond full overhang: clamp to the most-overhang band
+        }
+        else if (upper == values.begin())
+        {
+            speed = upper->second; // fully supported: clamp to base speed
+        }
+        else
+        {
+            auto lower = std::prev(upper);
+            const float span = upper->first - lower->first;
+            const float t = (span > 0.f) ? (distance - lower->first) / span : 1.f;
+            speed = (1.f - t) * lower->second + t * upper->second;
+        }
+        // Quantize to the grid, but never round a positive speed down to 0 (that would emit an F0 move).
+        const float quantized = std::round(speed / OVERHANG_SPEED_QUANTUM) * OVERHANG_SPEED_QUANTUM;
+        return (speed > 0.f) ? std::max(quantized, OVERHANG_SPEED_QUANTUM) : quantized;
+    };
+
     auto snap_to_nearest_speed = [](const std::map<float, float> &values, float distance)
     {
         auto upper_dist = values.lower_bound(distance);
@@ -314,10 +366,11 @@ OverhangSpeeds calculate_overhang_speed(const ExtrusionAttributes &attributes, c
     const std::map<float, float> fan_speed_sections = calc_fan_speed_sections(attributes, config, extruder_id);
 
     const float extrusion_speed =
-        std::min(snap_to_nearest_speed(speed_sections, attributes.overhang_attributes->start_distance_from_prev_layer),
-                 snap_to_nearest_speed(speed_sections, attributes.overhang_attributes->end_distance_from_prev_layer));
-    const float curled_base_speed = snap_to_nearest_speed(
-        speed_sections, attributes.width * attributes.overhang_attributes->proximity_to_curled_lines);
+        std::min(interpolate_speed(speed_sections, attributes.overhang_attributes->start_distance_from_prev_layer),
+                 interpolate_speed(speed_sections, attributes.overhang_attributes->end_distance_from_prev_layer));
+    const float curled_base_speed = interpolate_speed(speed_sections,
+                                                      attributes.width *
+                                                          attributes.overhang_attributes->proximity_to_curled_lines);
 
     const float fan_speed = std::min(
         snap_to_nearest_speed(fan_speed_sections, attributes.overhang_attributes->start_distance_from_prev_layer),

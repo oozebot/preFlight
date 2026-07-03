@@ -216,6 +216,9 @@ public:
     bool save_project_as(const wxString &filename = wxString());
 
     void add_to_recent_projects(const wxString &filename);
+    // Re-snapshot the themed File menu so its Recent Projects submenu matches the wxFileHistory
+    // (the CustomMenuBar caches the menu and does not observe the history reordering itself).
+    void refresh_recent_projects_menu();
     void technology_changed();
 
     void on_account_login(const std::string &token);

@@ -1409,6 +1409,43 @@ void Tab::on_value_change(const std::string &opt_key, const boost::any &value)
         }
     }
 
+    // Serpentine override warning: confirm on enable, revert if declined
+    if (opt_key == "serpentine_enabled" && m_config->has(opt_key) && m_config->opt_bool(opt_key))
+    {
+        MessageDialog dlg(nullptr,
+                          _L("Serpentine prints each region as a single continuous extrusion in place of "
+                             "perimeters and infill, overriding most other print settings (perimeters, fill "
+                             "density, fill pattern and related options). With a depth limit set, the "
+                             "serpentine is confined to a band along the walls and the interior is filled "
+                             "with normal infill.\n\n"
+                             "Enable Serpentine?"),
+                          _L("Serpentine"), wxICON_WARNING | wxYES | wxNO);
+        if (dlg.ShowModal() != wxID_YES)
+        {
+            m_config->set_key_value(opt_key, new ConfigOptionBool(false));
+            reload_config();
+            return;
+        }
+        // Serpentine's integration lives in the Athena generator; switch to it
+        // automatically so the user need not select it first.
+        if (m_config->opt_enum<PerimeterGeneratorType>("perimeter_generator") != PerimeterGeneratorType::Athena)
+        {
+            m_config->set_key_value("perimeter_generator",
+                                    new ConfigOptionEnum<PerimeterGeneratorType>(PerimeterGeneratorType::Athena));
+            reload_config();
+        }
+    }
+
+    // Serpentine cannot run without Athena: switching the perimeter generator
+    // away from Athena turns Serpentine off.
+    if (opt_key == "perimeter_generator" && m_config->has("serpentine_enabled") &&
+        m_config->opt_bool("serpentine_enabled") &&
+        m_config->opt_enum<PerimeterGeneratorType>("perimeter_generator") != PerimeterGeneratorType::Athena)
+    {
+        m_config->set_key_value("serpentine_enabled", new ConfigOptionBool(false));
+        reload_config();
+    }
+
     // Update preprocessing scripts panel enabled state
     if (m_preprocessing_panel && !m_preprocessing_enable_key.empty() && opt_key == m_preprocessing_enable_key)
     {
@@ -1898,6 +1935,32 @@ void TabPrint::build()
     };
     optgroup->append_line(line);
 
+    optgroup = page->new_optgroup_for_sidebar(L("Serpentine"));
+    optgroup->append_single_option_line("serpentine_enabled", category_path + "serpentine");
+    optgroup->append_single_option_line("serpentine_extrusion_width", category_path + "serpentine-width");
+    optgroup->append_single_option_line("serpentine_overlap", category_path + "serpentine-overlap");
+    optgroup->append_single_option_line("serpentine_max_bead", category_path + "serpentine-max-bead");
+    optgroup->append_single_option_line("serpentine_limit_depth", category_path + "serpentine-limit-depth");
+    optgroup->append_single_option_line("serpentine_depth", category_path + "serpentine-depth");
+    optgroup->append_single_option_line("serpentine_solid_surfaces", category_path + "serpentine-solid-surfaces");
+    optgroup->append_single_option_line("serpentine_ridges", category_path + "serpentine-ridges");
+    optgroup->append_single_option_line("serpentine_aim", category_path + "serpentine-aim");
+    line = Line{"", ""};
+    line.full_width = 1;
+    line.widget = [this](wxWindow *parent)
+    {
+        ogStaticText *stat_text;
+        wxSizer *sizer = description_line_widget(parent, &stat_text);
+        stat_text->SetText(_L("Serpentine prints each region as one continuous line that replaces perimeters "
+                              "and infill. While enabled, perimeter counts, fill density, fill pattern and "
+                              "most related settings are ignored for the region.\n"
+                              "Serpentine is not suitable for all geometry and may produce poor results on "
+                              "complex shapes. It works best on simple, symmetric parts such as nuts, bolts, "
+                              "and knurled knobs."));
+        return sizer;
+    };
+    optgroup->append_line(line);
+
     optgroup = page->new_optgroup_for_sidebar(L("Interlocking perimeters"));
     optgroup->append_single_option_line("interlock_perimeters_enabled", category_path + "interlock-perimeters");
     optgroup->append_single_option_line("interlock_perimeter_count", category_path + "interlock-count");
@@ -2022,6 +2085,7 @@ void TabPrint::build()
     optgroup->append_single_option_line("automatic_infill_combination_max_layer_height");
     optgroup->append_single_option_line("infill_every_layers", category_path + "combine-infill-every-x-layers");
     optgroup->append_single_option_line("narrow_to_athena", category_path + "narrow-to-athena");
+    optgroup->append_single_option_line("narrow_to_athena_top_bottom", category_path + "narrow-to-athena-top-bottom");
     optgroup->append_single_option_line("narrow_to_athena_threshold", category_path + "narrow-to-athena-threshold");
 
     optgroup = page->new_optgroup_for_sidebar(L("Advanced"));
@@ -2114,6 +2178,7 @@ void TabPrint::build()
     page = add_options_page(L("Speed"), "time");
     optgroup = page->new_optgroup_for_sidebar(L("Speed for print moves"));
     optgroup->append_single_option_line("auto_speed");
+    optgroup->append_single_option_line("max_volumetric_flow");
     optgroup->append_single_option_line("max_print_speed");
 
     {
@@ -2132,6 +2197,20 @@ void TabPrint::build()
         };
         optgroup->append_line(line);
     }
+
+    optgroup->on_change = [this](t_config_option_key opt_key, boost::any value)
+    {
+        if (opt_key == "max_volumetric_flow")
+        {
+            // Keep legacy alias in sync for pre/post-processing scripts
+            auto *flow = m_config->option<ConfigOptionFloat>("max_volumetric_flow");
+            auto *speed = m_config->option<ConfigOptionFloat>("max_volumetric_speed");
+            if (flow && speed)
+                speed->value = flow->value;
+        }
+        update_dirty();
+        on_value_change(opt_key, value);
+    };
 
     optgroup = page->new_optgroup_for_sidebar(L("Print move speeds"));
     optgroup->append_single_option_line("perimeter_speed");
@@ -3232,6 +3311,8 @@ void TabFilament::build()
     optgroup->append_single_option_line("manual_fan_speed_overhang_perimeter", category_path + "manual-fan-controls");
     optgroup->append_single_option_line("manual_fan_speed_interlocking_perimeter",
                                         category_path + "manual-fan-controls");
+    optgroup->append_single_option_line("manual_fan_speed_serpentine", category_path + "manual-fan-controls");
+    optgroup->append_single_option_line("manual_fan_speed_serpentine_overhang", category_path + "manual-fan-controls");
     optgroup->append_single_option_line("manual_fan_speed_internal_infill", category_path + "manual-fan-controls");
     optgroup->append_single_option_line("manual_fan_speed_solid_infill", category_path + "manual-fan-controls");
     optgroup->append_single_option_line("bridge_fan_speed", category_path + "manual-fan-controls");
@@ -3251,6 +3332,7 @@ void TabFilament::build()
     optgroup = page->new_optgroup_for_sidebar(L("Fan spin-up"), 25);
     optgroup->append_single_option_line("fan_spinup_bridge_infill", category_path + "fan-spinup");
     optgroup->append_single_option_line("fan_spinup_overhang_perimeter", category_path + "fan-spinup");
+    optgroup->append_single_option_line("fan_spinup_serpentine_overhang", category_path + "fan-spinup");
 
     optgroup = page->new_optgroup_for_sidebar(L("Cooling thresholds"), 25);
     optgroup->append_single_option_line("fan_below_layer_time", category_path + "cooling-thresholds");
@@ -3449,7 +3531,8 @@ void TabFilament::toggle_options()
             toggle_option(el, fan_always_on && !manual_fan_enabled);
         for (auto el :
              {"manual_fan_speed_perimeter", "manual_fan_speed_external_perimeter",
-              "manual_fan_speed_interlocking_perimeter", "manual_fan_speed_internal_infill",
+              "manual_fan_speed_interlocking_perimeter", "manual_fan_speed_serpentine",
+              "manual_fan_speed_serpentine_overhang", "manual_fan_speed_internal_infill",
               "manual_fan_speed_solid_infill", "manual_fan_speed_top_solid_infill", "manual_fan_speed_ironing",
               "manual_fan_speed_skirt", "manual_fan_speed_support_material", "manual_fan_speed_support_interface"})
             toggle_option(el, manual_fan_enabled);

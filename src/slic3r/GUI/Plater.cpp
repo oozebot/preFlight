@@ -618,6 +618,14 @@ struct Plater::priv
 
     void on_object_select(SimpleEvent &);
     void on_right_click(RBtnEvent &);
+    // preFlight: add the "Export G-code" entry (direct save, or a destination submenu mirroring
+    // the slice-button dropdown) to a right-click menu. No-op unless there is sliced G-code.
+    // `prepend` inserts at the top of the menu instead of appending.
+    void add_export_gcode_entry(const std::shared_ptr<CustomMenu> &menu, bool prepend);
+    // preFlight: prepend the editor right-click's top action above the factory items — "Export
+    // G-code" once sliced, otherwise "Slice Platter" when the platter can be sliced.
+    // `factory_has_items` controls whether a divider is inserted below the action.
+    void prepend_slice_or_export_entry(const std::shared_ptr<CustomMenu> &menu, bool factory_has_items);
     void on_update_geometry(Vec3dsEvent<2> &);
     void on_3dcanvas_mouse_dragging_started(SimpleEvent &);
     void on_3dcanvas_mouse_dragging_finished(SimpleEvent &);
@@ -1305,6 +1313,62 @@ void Plater::priv::init()
             // issues with the Cocoa event loop (mouse freeze after dismiss).
             {
                 wxMenu nativeMenu;
+
+                // preFlight: navigation + export shortcuts, shown above a divider. Editor only —
+                // the standalone G-code viewer has no Prepare tab or slice pipeline.
+                ModernTabBar *tabbar = (wxGetApp().is_editor() && wxGetApp().mainframe)
+                                           ? wxGetApp().mainframe->m_modern_tabbar
+                                           : nullptr;
+                int prepareId = wxID_NONE;
+                int exportId = wxID_NONE; // direct save-to-disk, when it is the sole destination
+                int saveId = wxID_NONE;
+                int sendId = wxID_NONE;
+                int scriptId = wxID_NONE;
+                wxMenu *exportSub = nullptr;
+                if (tabbar != nullptr)
+                {
+                    prepareId = wxNewId();
+                    wxMenuItem *prepareItem = nativeMenu.Append(prepareId, _L("Prepare"));
+                    prepareItem->SetBitmap(*get_bmp_bundle("switch_presets"));
+
+                    if (tabbar->HasSlicedObject())
+                    {
+                        const bool can_send = tabbar->CanSendToPrinter();
+                        const bool can_script = tabbar->CanExportToScript();
+                        if (!can_send && !can_script)
+                        {
+                            // Save to disk is the only destination — invoke it directly.
+                            exportId = wxNewId();
+                            wxMenuItem *exportItem = nativeMenu.Append(exportId, _L("Export G-code"));
+                            exportItem->SetBitmap(*get_bmp_bundle("export_gcode"));
+                        }
+                        else
+                        {
+                            // Multiple destinations — mirror the slice-button dropdown as a submenu.
+                            exportSub = new wxMenu();
+                            saveId = wxNewId();
+                            wxMenuItem *saveItem = exportSub->Append(saveId, _L("Save locally"));
+                            saveItem->SetBitmap(*get_bmp_bundle("save"));
+                            if (can_send)
+                            {
+                                sendId = wxNewId();
+                                wxMenuItem *sendItem = exportSub->Append(sendId, _L("Send to printer"));
+                                sendItem->SetBitmap(*get_bmp_bundle("export_gcode"));
+                            }
+                            if (can_script)
+                            {
+                                scriptId = wxNewId();
+                                wxMenuItem *scriptItem = exportSub->Append(scriptId, _L("Export to Script"));
+                                scriptItem->SetBitmap(*get_bmp_bundle("cog"));
+                            }
+                            wxMenuItem *exportParent = nativeMenu.AppendSubMenu(exportSub, _L("Export G-code"));
+                            exportParent->SetBitmap(*get_bmp_bundle("export_gcode"));
+                        }
+                    }
+
+                    nativeMenu.AppendSeparator();
+                }
+
                 int clipId = wxNewId();
                 int notesId = wxNewId();
 
@@ -1316,21 +1380,43 @@ void Plater::priv::init()
                 wxMenuItem *notesItem = nativeMenu.Append(notesId, _L("Notes"));
                 notesItem->SetBitmap(*get_bmp_bundle("note"));
 
-                nativeMenu.Bind(wxEVT_MENU,
-                                [this, clipId, notesId, clicked_object_id](wxCommandEvent &cmd)
-                                {
-                                    if (cmd.GetId() == clipId && clicked_object_id >= 0)
-                                    {
-                                        GLCanvas3D *cnv = preview->get_canvas3d();
-                                        if (cnv != nullptr)
-                                            cnv->get_gcode_viewer().get_preview_clip_controller().activate(
-                                                clicked_object_id);
-                                    }
-                                    else if (cmd.GetId() == notesId)
-                                    {
-                                        this->notes_dialog.show(-1);
-                                    }
-                                });
+                // Single handler covers the top menu and its export submenu. It does not call
+                // Skip(), so whichever menu receives the command first consumes it (no double-fire).
+                auto on_menu = [this, prepareId, exportId, saveId, sendId, scriptId, clipId, notesId,
+                                clicked_object_id](wxCommandEvent &cmd)
+                {
+                    const int id = cmd.GetId();
+                    if (id == prepareId && prepareId != wxID_NONE)
+                    {
+                        if (wxGetApp().mainframe && wxGetApp().mainframe->m_modern_tabbar)
+                            wxGetApp().mainframe->m_modern_tabbar->SelectTab(ModernTabBar::TAB_PREPARE);
+                    }
+                    else if (id != wxID_NONE && (id == exportId || id == saveId))
+                    {
+                        q->export_gcode(false);
+                    }
+                    else if (id == sendId && sendId != wxID_NONE)
+                    {
+                        q->send_gcode();
+                    }
+                    else if (id == scriptId && scriptId != wxID_NONE)
+                    {
+                        q->export_to_script();
+                    }
+                    else if (id == clipId && clicked_object_id >= 0)
+                    {
+                        GLCanvas3D *cnv = preview->get_canvas3d();
+                        if (cnv != nullptr)
+                            cnv->get_gcode_viewer().get_preview_clip_controller().activate(clicked_object_id);
+                    }
+                    else if (id == notesId)
+                    {
+                        this->notes_dialog.show(-1);
+                    }
+                };
+                nativeMenu.Bind(wxEVT_MENU, on_menu);
+                if (exportSub != nullptr)
+                    exportSub->Bind(wxEVT_MENU, on_menu);
 
                 Vec2d mouse_position = evt.data.first;
                 wxPoint position(static_cast<int>(mouse_position.x()), static_cast<int>(mouse_position.y()));
@@ -1341,6 +1427,28 @@ void Plater::priv::init()
             // avoid use-after-free when FromWxMenu captures a raw
             // wxMenu* that gets destroyed on dismiss.
             auto customMenu = std::shared_ptr<CustomMenu>(new CustomMenu());
+
+            // preFlight: navigation + export shortcuts, shown above a divider. Editor only —
+            // the standalone G-code viewer has no Prepare tab or slice pipeline.
+            ModernTabBar *tabbar = (wxGetApp().is_editor() && wxGetApp().mainframe)
+                                       ? wxGetApp().mainframe->m_modern_tabbar
+                                       : nullptr;
+            if (tabbar != nullptr)
+            {
+                int prepareId = wxNewId();
+                customMenu->Append(prepareId, _L("Prepare"), *get_bmp_bundle("switch_presets"));
+                customMenu->SetCallback(prepareId,
+                                        []()
+                                        {
+                                            if (wxGetApp().mainframe && wxGetApp().mainframe->m_modern_tabbar)
+                                                wxGetApp().mainframe->m_modern_tabbar->SelectTab(
+                                                    ModernTabBar::TAB_PREPARE);
+                                        });
+
+                add_export_gcode_entry(customMenu, /*prepend=*/false);
+
+                customMenu->AppendSeparator();
+            }
 
             // Add Clipping Plane option if an object was clicked
             if (clicked_object_id >= 0)
@@ -4737,6 +4845,92 @@ void Plater::priv::on_object_select(SimpleEvent &evt)
     selection_changed();
 }
 
+void Plater::priv::add_export_gcode_entry(const std::shared_ptr<CustomMenu> &menu, bool prepend)
+{
+    ModernTabBar *tabbar = (wxGetApp().is_editor() && wxGetApp().mainframe) ? wxGetApp().mainframe->m_modern_tabbar
+                                                                            : nullptr;
+    if (menu == nullptr || tabbar == nullptr || !tabbar->HasSlicedObject())
+        return;
+
+    const bool can_send = tabbar->CanSendToPrinter();
+    const bool can_script = tabbar->CanExportToScript();
+    if (!can_send && !can_script)
+    {
+        // Save to disk is the only destination — invoke it directly.
+        int exportId = wxNewId();
+        if (prepend)
+            menu->Prepend(exportId, _L("Export G-code"), *get_bmp_bundle("export_gcode"));
+        else
+            menu->Append(exportId, _L("Export G-code"), *get_bmp_bundle("export_gcode"));
+        menu->SetCallback(exportId, [this]() { q->export_gcode(false); });
+    }
+    else
+    {
+        // Multiple destinations — mirror the slice-button dropdown as a submenu.
+        auto exportSub = std::shared_ptr<CustomMenu>(new CustomMenu());
+        int saveId = wxNewId();
+        exportSub->Append(saveId, _L("Save locally"), *get_bmp_bundle("save"));
+        exportSub->SetCallback(saveId, [this]() { q->export_gcode(false); });
+        if (can_send)
+        {
+            int sendId = wxNewId();
+            exportSub->Append(sendId, _L("Send to printer"), *get_bmp_bundle("export_gcode"));
+            exportSub->SetCallback(sendId, [this]() { q->send_gcode(); });
+        }
+        if (can_script)
+        {
+            int scriptId = wxNewId();
+            exportSub->Append(scriptId, _L("Export to Script"), *get_bmp_bundle("cog"));
+            exportSub->SetCallback(scriptId, [this]() { q->export_to_script(); });
+        }
+        if (prepend)
+            menu->PrependSubMenu(exportSub, _L("Export G-code"), *get_bmp_bundle("export_gcode"));
+        else
+            menu->AppendSubMenu(exportSub, _L("Export G-code"), *get_bmp_bundle("export_gcode"));
+    }
+}
+
+void Plater::priv::prepend_slice_or_export_entry(const std::shared_ptr<CustomMenu> &menu, bool factory_has_items)
+{
+    ModernTabBar *tabbar = (wxGetApp().is_editor() && wxGetApp().mainframe) ? wxGetApp().mainframe->m_modern_tabbar
+                                                                            : nullptr;
+    if (menu == nullptr || tabbar == nullptr)
+        return;
+
+    const bool sliced = tabbar->HasSlicedObject();
+    if (!sliced && !tabbar->IsSliceButtonEnabled())
+        return; // nothing to export and nothing to slice (e.g. empty platter)
+
+    // Divider first so the action lands on top; only when there are factory items below it.
+    if (factory_has_items)
+        menu->PrependSeparator();
+
+    if (sliced)
+    {
+        // Export G-code, then the Preview nav item on top (mirrors the Prepare item in Preview).
+        add_export_gcode_entry(menu, /*prepend=*/true);
+        int previewId = wxNewId();
+        menu->Prepend(previewId, _L("Preview"), *get_bmp_bundle("switch_presets"));
+        menu->SetCallback(previewId,
+                          []()
+                          {
+                              if (wxGetApp().mainframe && wxGetApp().mainframe->m_modern_tabbar)
+                                  wxGetApp().mainframe->m_modern_tabbar->SelectTab(ModernTabBar::TAB_PREVIEW);
+                          });
+    }
+    else
+    {
+        int sliceId = wxNewId();
+        menu->Prepend(sliceId, _L("Slice Platter"), *get_bmp_bundle("re_slice"));
+        menu->SetCallback(sliceId,
+                          []()
+                          {
+                              if (wxGetApp().mainframe && wxGetApp().mainframe->m_modern_tabbar)
+                                  wxGetApp().mainframe->m_modern_tabbar->TriggerSlice();
+                          });
+    }
+}
+
 void Plater::priv::on_right_click(RBtnEvent &evt)
 {
     int obj_idx = get_selected_object_idx();
@@ -4800,6 +4994,9 @@ void Plater::priv::on_right_click(RBtnEvent &evt)
         auto customMenu = CustomMenu::FromWxMenu(menu, canvas.get_wxglcanvas());
         if (customMenu)
         {
+            // preFlight: top action above a divider — Export G-code once sliced, else Slice Platter.
+            prepend_slice_or_export_entry(customMenu, menu->GetMenuItemCount() > 0);
+
             // Capture Plater pointer for dismiss callback (safer than capturing canvas reference)
             Plater *plater = q;
             customMenu->SetDismissCallback(
@@ -6982,6 +7179,13 @@ bool Plater::delete_object_from_model(size_t obj_idx)
 void Plater::remove_selected()
 {
     if (p->get_selection().is_empty())
+        return;
+
+    // When a gizmo that uses the Delete key is active (e.g. Measure restarts its selection), the
+    // Delete key belongs to the gizmo, not to object deletion. The Edit menu's "Del" accelerator
+    // reaches object deletion here without passing through the canvas key handler, so give the
+    // active gizmo a chance to consume it first.
+    if (canvas3D()->get_gizmos_manager().process_delete_key())
         return;
 
     Plater::TakeSnapshot snapshot(this, _L("Delete Selected Objects"));
@@ -9584,17 +9788,20 @@ bool Plater::PopupMenu(wxMenu *menu, const wxPoint &pos)
         return out;
     }
 
-    // Use shared_ptr to keep SuppressBackgroundProcessingUpdate alive until menu closes
-    auto sbpu = std::make_shared<SuppressBackgroundProcessingUpdate>();
+    // preFlight: do NOT hold a SuppressBackgroundProcessingUpdate here. CustomMenu is
+    // non-blocking (ShowAt returns immediately), so the global background-processing gate
+    // could only be released by the dismiss callback - and if that callback does not fire,
+    // the gate leaks "true" and silently blocks ALL slice invalidation (object and global).
+    // The menu does not need to suspend background processing; only error-message
+    // postponement is needed, which m_tracking_popup_menu handles below.
 
     // When tracking a pop-up menu, postpone error messages from the slicing result
     m_tracking_popup_menu = true;
 
     // Set dismiss callback to clean up when menu closes
     customMenu->SetDismissCallback(
-        [this, sbpu]()
+        [this]()
         {
-            // sbpu will be released when this callback is destroyed
             m_tracking_popup_menu = false;
             if (!m_tracking_popup_menu_error_message.empty())
             {

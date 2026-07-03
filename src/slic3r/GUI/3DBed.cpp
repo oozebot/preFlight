@@ -289,12 +289,6 @@ void Bed3D::render(GLCanvas3D &canvas, const Transform3d &view_matrix, const Tra
     }
 }
 
-void Bed3D::render_for_picking(GLCanvas3D &canvas, const Transform3d &view_matrix, const Transform3d &projection_matrix,
-                               bool bottom, float scale_factor)
-{
-    render_internal(canvas, view_matrix, projection_matrix, bottom, scale_factor, false, true, false);
-}
-
 void Bed3D::render_internal(GLCanvas3D &canvas, const Transform3d &view_matrix, const Transform3d &projection_matrix,
                             bool bottom, float scale_factor, bool show_texture, bool picking, bool active)
 {

@@ -30,6 +30,7 @@
 #include <cstdio>
 
 #include "libslic3r/libslic3r.h"
+#include "libslic3r/DebugOutput.hpp"
 #include "libslic3r/BoundingBox.hpp"
 #include "libslic3r/Exception.hpp"
 #include "libslic3r/Utils.hpp"
@@ -239,20 +240,7 @@ Polylines chain_polylines_by_region(Polylines &&polylines, coord_t region_thresh
 
 } // namespace Slic3r
 
-// ===================== FILL DEBUG =====================
-// Set to true to enable fill pipeline debug output to stdout.
-// Used across Fill.cpp, FillRectilinear.cpp, and other fill sources.
-static constexpr bool FILL_DEBUG = false;
-
-inline void dbg_fill_print(const char *fmt, ...)
-{
-    if (!FILL_DEBUG)
-        return;
-    va_list args;
-    va_start(args, fmt);
-    vprintf(fmt, args);
-    va_end(args);
-    fflush(stdout);
-}
+// Runtime category-gated debug output (Slic3r::dbg_log) lives in DebugOutput.hpp,
+// included above.
 
 #endif // slic3r_FillBase_hpp_

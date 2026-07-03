@@ -99,6 +99,11 @@ public:
     // Get a menu by index
     std::shared_ptr<CustomMenu> GetMenu(size_t index) const;
 
+    // Re-snapshot the themed menu at index from its source wxMenu. The cached CustomMenu does
+    // not observe runtime changes to the wxMenu (e.g. wxFileHistory reordering Recent Projects),
+    // so callers must invoke this after such a change. No-op while that menu is open.
+    void RefreshMenu(size_t index, wxMenu *sourceMenu);
+
     // Get number of menus
     size_t GetMenuCount() const { return m_items.size(); }
 

@@ -326,6 +326,29 @@ std::shared_ptr<CustomMenu> CustomMenuBar::GetMenu(size_t index) const
     return nullptr;
 }
 
+void CustomMenuBar::RefreshMenu(size_t index, wxMenu *sourceMenu)
+{
+    if (index >= m_items.size() || sourceMenu == nullptr)
+        return;
+
+    // Defer the swap. A refresh can be triggered synchronously from inside the outgoing menu's
+    // own item activation (e.g. clicking File > Recent Projects loads a project, which refreshes
+    // this menu). The lone owner of the cached menu is CustomMenuBarItem::m_menu, so replacing it
+    // while the menu is still on the activation stack would free it mid-use. CallAfter runs the
+    // swap once activation has fully unwound and the old (now idle) menu can be destroyed safely.
+    CallAfter(
+        [this, index, sourceMenu]()
+        {
+            if (index >= m_items.size())
+                return;
+            // Do not swap a menu out from under an open popup; the next refresh will catch it.
+            auto current = m_items[index]->GetMenu();
+            if (current && current->IsShown())
+                return;
+            m_items[index]->SetMenu(CustomMenu::FromWxMenu(sourceMenu, m_eventHandler));
+        });
+}
+
 void CustomMenuBar::EnableTop(size_t pos, bool enable)
 {
     if (pos < m_items.size())

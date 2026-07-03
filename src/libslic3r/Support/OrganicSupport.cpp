@@ -1761,6 +1761,22 @@ void organic_draw_branches(PrintObject &print_object, TreeModelVolumes &volumes,
                 {
                     SupportGeneratorLayer *base_layer = intermediate_layers[layer_idx] = &layer_allocate(
                         layer_storage, SupporLayerType::Base, print_object.slicing_parameters(), config, layer_idx);
+                    // preFlight: Pin the full-height body layer onto the object's own layer so it sits
+                    // exactly on the object grid (print_z, bottom_z chained to the layer below, and the
+                    // resulting height for flow), instead of the layer_z formula that can leave a sub-layer
+                    // residual against the object's snapped grid (e.g. 85.658 vs 85.667 at 0.3333mm). This
+                    // mirrors the grid/snug path. Only the body is pinned; top/bottom contacts and the
+                    // reduced-height gap interface layers keep their layer_z-based Z, so the air gap stays.
+                    if (const size_t num_raft = config.raft_layers.size();
+                        layer_idx >= num_raft && (layer_idx - num_raft) < print_object.layers().size())
+                    {
+                        const size_t obj_idx = layer_idx - num_raft;
+                        const Layer *object_layer = print_object.layers()[obj_idx];
+                        base_layer->print_z = object_layer->print_z;
+                        base_layer->bottom_z = (obj_idx > 0) ? print_object.layers()[obj_idx - 1]->print_z
+                                                             : object_layer->print_z - object_layer->height;
+                        base_layer->height = base_layer->print_z - base_layer->bottom_z;
+                    }
                     base_layer->polygons = union_(base_layer_polygons);
                 }
                 // This allows generate_support_toolpaths to apply width reduction to organic tips

@@ -135,6 +135,14 @@ Slic3r::GCodeExtrusionRole convert(EGCodeExtrusionRole role)
     {
         return Slic3r::GCodeExtrusionRole::Custom;
     }
+    case EGCodeExtrusionRole::Serpentine:
+    {
+        return Slic3r::GCodeExtrusionRole::Serpentine;
+    }
+    case EGCodeExtrusionRole::SerpentineOverhang:
+    {
+        return Slic3r::GCodeExtrusionRole::SerpentineOverhang;
+    }
     default:
     {
         return Slic3r::GCodeExtrusionRole::None;
@@ -209,6 +217,14 @@ EGCodeExtrusionRole convert(Slic3r::GCodeExtrusionRole role)
     case Slic3r::GCodeExtrusionRole::Custom:
     {
         return EGCodeExtrusionRole::Custom;
+    }
+    case Slic3r::GCodeExtrusionRole::Serpentine:
+    {
+        return EGCodeExtrusionRole::Serpentine;
+    }
+    case Slic3r::GCodeExtrusionRole::SerpentineOverhang:
+    {
+        return EGCodeExtrusionRole::SerpentineOverhang;
     }
     default:
     {

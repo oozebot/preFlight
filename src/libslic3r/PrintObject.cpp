@@ -969,7 +969,11 @@ bool PrintObject::invalidate_state_by_config_options(const ConfigOptionResolver 
                  opt_key == "extra_perimeters_on_overhangs" || opt_key == "first_layer_extrusion_width" ||
                  opt_key == "perimeter_extrusion_width" || opt_key == "infill_overlap" ||
                  opt_key == "external_perimeters_first" || opt_key == "arc_fitting" ||
-                 opt_key == "top_one_perimeter_type" || opt_key == "only_one_perimeter_first_layer")
+                 opt_key == "top_one_perimeter_type" || opt_key == "only_one_perimeter_first_layer" ||
+                 opt_key == "serpentine_enabled" || opt_key == "serpentine_extrusion_width" ||
+                 opt_key == "serpentine_overlap" || opt_key == "serpentine_max_bead" ||
+                 opt_key == "serpentine_solid_surfaces" || opt_key == "serpentine_ridges" ||
+                 opt_key == "serpentine_aim" || opt_key == "serpentine_limit_depth" || opt_key == "serpentine_depth")
         {
             // The fuzzy skin segmentation depth depends on the perimeter count, so changing perimeters
             // requires re-running the segmentation in posSlice, not just posPerimeters.
@@ -1034,14 +1038,36 @@ bool PrintObject::invalidate_state_by_config_options(const ConfigOptionResolver 
                 // Otherwise, holes in the bottom layers could be filled, as is reported in GH #5528.
                 steps.emplace_back(posSlice);
             }
+            // Serpentine probes the solid-layer range at perimeter time.
+            if (this->shared_regions() != nullptr)
+                for (size_t region_id = 0; region_id < this->num_printing_regions(); ++region_id)
+                    if (this->printing_region(region_id).config().serpentine_enabled &&
+                        this->printing_region(region_id).config().serpentine_solid_surfaces)
+                    {
+                        steps.emplace_back(posPerimeters);
+                        break;
+                    }
+        }
+        else if (opt_key == "top_solid_layers")
+        {
+            steps.emplace_back(posPrepareInfill);
+            // Serpentine probes the solid-layer range at perimeter time.
+            if (this->shared_regions() != nullptr)
+                for (size_t region_id = 0; region_id < this->num_printing_regions(); ++region_id)
+                    if (this->printing_region(region_id).config().serpentine_enabled &&
+                        this->printing_region(region_id).config().serpentine_solid_surfaces)
+                    {
+                        steps.emplace_back(posPerimeters);
+                        break;
+                    }
         }
         else if (opt_key == "interface_shells" || opt_key == "infill_only_where_needed" ||
                  opt_key == "infill_every_layers" || opt_key == "automatic_infill_combination" ||
                  opt_key == "automatic_infill_combination_max_layer_height" || opt_key == "solid_infill_every_layers" ||
                  opt_key == "ensure_vertical_shell_thickness" || opt_key == "bottom_solid_min_thickness" ||
-                 opt_key == "top_solid_layers" || opt_key == "top_solid_min_thickness" ||
-                 opt_key == "solid_infill_below_area" || opt_key == "infill_extruder" ||
-                 opt_key == "solid_infill_extruder" || opt_key == "infill_extrusion_width" || opt_key == "bridge_angle")
+                 opt_key == "top_solid_min_thickness" || opt_key == "solid_infill_below_area" ||
+                 opt_key == "infill_extruder" || opt_key == "solid_infill_extruder" ||
+                 opt_key == "infill_extrusion_width" || opt_key == "bridge_angle")
         {
             steps.emplace_back(posPrepareInfill);
         }

@@ -72,6 +72,7 @@ set(SLIC3R_SOURCES
     CSGMesh/VoxelizeCSGMesh.hpp
     CSGMesh/TriangleMeshAdapter.hpp
     CSGMesh/CSGMeshCopy.hpp
+    DebugOutput.hpp
     EdgeGrid.cpp
     EdgeGrid.hpp
     ElephantFootCompensation.cpp
@@ -340,6 +341,8 @@ set(SLIC3R_SOURCES
     QuadricEdgeCollapse.cpp
     QuadricEdgeCollapse.hpp
     Semver.cpp
+    Serpentine.cpp
+    Serpentine.hpp
     ShortEdgeCollapse.cpp
     ShortEdgeCollapse.hpp
     ShortestPath.cpp
@@ -662,6 +665,8 @@ endif()
 if (SLIC3R_PYTHON_PREPROCESSOR)
     target_link_libraries(libslic3r PRIVATE pybind11::embed)
     target_compile_definitions(libslic3r PUBLIC SLIC3R_PYTHON_PREPROCESSOR)
+    # Version-scoped user package dir must match the bundled runtime ABI (data_dir/python-packages/<X.Y>).
+    target_compile_definitions(libslic3r PUBLIC SLIC3R_PYTHON_VERSION_TAG="${Python3_VERSION_MAJOR}.${Python3_VERSION_MINOR}")
 
     # Auto-generate preFlight.py type stubs for IDE autocomplete in user scripts
     set(_pp_config "${CMAKE_CURRENT_SOURCE_DIR}/PrintConfig.hpp")

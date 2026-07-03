@@ -86,8 +86,6 @@ public:
     void render(GLCanvas3D &canvas, const Transform3d &view_matrix, const Transform3d &projection_matrix, bool bottom,
                 float scale_factor, bool show_texture);
     void render_axes();
-    void render_for_picking(GLCanvas3D &canvas, const Transform3d &view_matrix, const Transform3d &projection_matrix,
-                            bool bottom, float scale_factor);
 
 private:
     // Calculate an extended bounding box from axes and current model for visualization purposes.

@@ -62,6 +62,22 @@ public:
     void UpdateSliceButtonVisibility();  // Updates visibility based on current tab
     void EnableSliceButton(bool enable); // Enable/disable based on platter contents
     bool IsPrinterConnected() const;     // Check if physical printer with print_host is configured
+
+    // preFlight: report which export destinations the slice-button dropdown currently offers,
+    // so the preview right-click menu can mirror them.
+    bool CanSendToPrinter() const
+    {
+        return IsPrinterConnected() && m_connection_state == PrinterConnectionChecker::State::Online;
+    }
+    bool CanExportToScript() const { return m_show_export_script; }
+    bool HasSlicedObject() const { return m_has_sliced_object; }
+    bool IsSliceButtonEnabled() const { return m_slice_button_enabled; }
+    // Run the slice-button's slice action (used by the editor right-click "Slice Platter" item).
+    void TriggerSlice()
+    {
+        if (m_slice_callback)
+            m_slice_callback();
+    }
     void SetSendToPrinterCallback(std::function<void()> callback);  // Set callback for Send to Printer
     void SetExportToScriptCallback(std::function<void()> callback); // Set callback for Export to Script
     void RefreshPrinterConnectionState(); // Re-evaluate printer connection and update dropdown

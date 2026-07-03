@@ -243,6 +243,11 @@ public:
     bool on_char(const KeyInput &key);
     bool on_key(const KeyInput &key);
 
+    // Offer the Delete key to the active gizmo (e.g. Measure restarts its selection, Cut/BrimEars
+    // remove the selected connector/ear). Returns true if the gizmo consumed it, so callers reached
+    // by Delete from outside the canvas (object list, Edit menu) can skip deleting the object.
+    bool process_delete_key();
+
     void update_after_undo_redo(const UndoRedo::Snapshot &snapshot);
 
     int get_selectable_icons_cnt() const { return get_selectable_idxs().size(); }
