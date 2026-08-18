@@ -47,6 +47,7 @@
 #include "libslic3r/Line.hpp"
 #include "libslic3r/MultiMaterialSegmentation.hpp"
 #include "libslic3r/PrintConfig.hpp"
+#include "libslic3r/DebugOutput.hpp"
 #include "libslic3r/Slicing.hpp"
 #include "libslic3r/Support/SupportLayer.hpp"
 #include "libslic3r/Support/SupportParameters.hpp"
@@ -364,7 +365,7 @@ void PrintObjectSupportMaterial::generate(PrintObject &object)
     // The layers may or may not be synchronized with the object layers, depending on the configuration.
     // For example, a single nozzle multi material printing will need to generate a waste tower, which in turn
     // wastes less material, if there are as little tool changes as possible.
-    SupportGeneratorLayersPtr intermediate_layers = this->raft_and_intermediate_support_layers(object, bottom_contacts,
+    SupportGeneratorLayersPtr intermediate_layers = this->raft_and_intermediate_support_layers(bottom_contacts,
                                                                                                top_contacts,
                                                                                                layer_storage);
     pf_support.stage("  snug: raft_and_intermediate_layers");
@@ -2814,8 +2815,8 @@ void PrintObjectSupportMaterial::trim_top_contacts_by_bottom_contacts(const Prin
 }
 
 SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_support_layers(
-    const PrintObject &object, const SupportGeneratorLayersPtr &bottom_contacts,
-    const SupportGeneratorLayersPtr &top_contacts, SupportGeneratorLayerStorage &layer_storage) const
+    const SupportGeneratorLayersPtr &bottom_contacts, const SupportGeneratorLayersPtr &top_contacts,
+    SupportGeneratorLayerStorage &layer_storage) const
 {
     SupportGeneratorLayersPtr intermediate_layers;
 
@@ -2864,14 +2865,24 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_supp
     }
 #endif
 
-    // Threshold for snapping support layers to nearest object layers.
-    const coordf_t SUPPORT_LAYER_SNAP_THRESHOLD = m_slicing_params.layer_height / 10.;
+    // The fixed grid every support body layer lands on, whole-millimetre snapping included. The
+    // object's layers leave this grid under a variable layer height profile; supports hold it
+    // and print exactly as they would with the profile switched off. At a fixed layer height
+    // this is the object's own layer stack, so nothing moves. Contacts and interfaces keep
+    // anchoring to the real object surfaces above and below.
+    const std::vector<coordf_t> grid_zs = generate_support_layer_zs(m_slicing_params);
+    const auto grid_bottom_z = [this, &grid_zs](const size_t idx)
+    {
+        return idx > 0 ? grid_zs[idx - 1] : m_slicing_params.object_print_z_min;
+    };
+    size_t dbg_stacks_anchored = 0, dbg_stacks_on_grid = 0;
+    coordf_t dbg_max_anchor = 0.;
 
     // Generate intermediate layers.
     // The first intermediate layer is the same as the 1st layer if there is no raft,
     // or the bottom of the first intermediate layer is aligned with the bottom of the raft contact layer.
     // Intermediate layers are always printed with a normal etrusion flow (non-bridging).
-    size_t idx_layer_object = 0;
+    size_t idx_grid = 0;
     size_t idx_extreme_first = 0;
     if (!extremes.empty() && std::abs(extremes.front()->extreme_z() - m_slicing_params.raft_interface_top_z) < EPSILON)
     {
@@ -2933,12 +2944,11 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_supp
         assert(dist >= m_support_params.support_layer_height_min - EPSILON);
         if (synchronize)
         {
-            // Emit support layers synchronized with the object layers.
-            // Find the first object layer, which has its print_z in this support Z range.
-            while (idx_layer_object < object.layers().size() &&
-                   object.layers()[idx_layer_object]->print_z < extr1z + EPSILON)
-                ++idx_layer_object;
-            if (idx_layer_object == 0 && extr1z == m_slicing_params.raft_interface_top_z)
+            // Emit support layers on the fixed grid.
+            // Find the first grid layer, which has its print_z in this support Z range.
+            while (idx_grid < grid_zs.size() && grid_zs[idx_grid] < extr1z + EPSILON)
+                ++idx_grid;
+            if (idx_grid == 0 && extr1z == m_slicing_params.raft_interface_top_z)
             {
                 // Insert one base support layer below the object.
                 SupportGeneratorLayer &layer_new = layer_storage.allocate_unguarded(SupporLayerType::Intermediate);
@@ -2947,16 +2957,13 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_supp
                 layer_new.height = layer_new.print_z - layer_new.bottom_z;
                 intermediate_layers.push_back(&layer_new);
             }
-            // Emit all intermediate support layers synchronized with object layers up to extr2z.
-            for (; idx_layer_object < object.layers().size() &&
-                   object.layers()[idx_layer_object]->print_z < extr2z + EPSILON;
-                 ++idx_layer_object)
+            // Emit all intermediate support layers on the grid up to extr2z.
+            for (; idx_grid < grid_zs.size() && grid_zs[idx_grid] < extr2z + EPSILON; ++idx_grid)
             {
                 SupportGeneratorLayer &layer_new = layer_storage.allocate_unguarded(SupporLayerType::Intermediate);
-                layer_new.print_z = object.layers()[idx_layer_object]->print_z;
-                layer_new.height = object.layers()[idx_layer_object]->height;
-                layer_new.bottom_z = (idx_layer_object > 0) ? object.layers()[idx_layer_object - 1]->print_z
-                                                            : (layer_new.print_z - layer_new.height);
+                layer_new.print_z = grid_zs[idx_grid];
+                layer_new.bottom_z = grid_bottom_z(idx_grid);
+                layer_new.height = layer_new.print_z - layer_new.bottom_z;
                 assert(intermediate_layers.empty() ||
                        intermediate_layers.back()->print_z < layer_new.print_z + EPSILON);
                 intermediate_layers.push_back(&layer_new);
@@ -2997,25 +3004,67 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_supp
                 intermediate_layers.push_back(&layer_new);
             }
 
-            // Find object layers in range for syncing sparse layers
-            while (idx_layer_object < object.layers().size() &&
-                   object.layers()[idx_layer_object]->print_z < extr1z + EPSILON)
-                ++idx_layer_object;
+            // A z within this distance of a grid line counts as on it: wide enough to absorb the
+            // whole-millimetre snap arithmetic noise, far below any real profile variation. The
+            // anchor deadzone and the sync boundary slack must share this value, or a surface
+            // snapped to the slot above leaves the grid-frame contact just under a grid line and
+            // the slot accounting flips.
+            constexpr coordf_t grid_snap_tol = 0.002;
 
-            // Collect ALL object layer Z heights from extr1z to top_contact_print_z
-            std::vector<std::pair<coordf_t, coordf_t>> sync_layers;
-            for (size_t i = idx_layer_object;
-                 i < object.layers().size() && object.layers()[i]->print_z <= top_contact_print_z + EPSILON; ++i)
+            // Whole layers of gap are produced by positioning, not by height reduction, so a gap
+            // that is a whole multiple of the layer height leaves the interface heights untouched.
+            // Detected tolerantly on both sides of fmod so an exact multiple that lands at
+            // ~layer_height instead of ~0 is still whole.
+            const coordf_t gap_remainder = std::fmod(gap, layer_height);
+            const bool gap_on_whole_layer = gap > EPSILON && (gap_remainder < grid_snap_tol ||
+                                                              gap_remainder > layer_height - grid_snap_tol);
+
+            // How far the supported surface sits above its grid slot. Zero at a fixed layer
+            // height; under a variable layer height profile the contact anchors to the real
+            // surface and this offset is spread over the interface stack, exactly as the gap
+            // remainder is, so the stack meets the object-anchored contact above and the grid
+            // below. Soluble contacts keep their own machinery and take no correction.
+            coordf_t anchor_offset = 0.;
+            if (!m_slicing_params.soluble_interface && extr2_is_top_interface && gap > EPSILON)
             {
-                sync_layers.emplace_back(object.layers()[i]->print_z, object.layers()[i]->height);
+                const coordf_t surface_z = top_contact_print_z + gap;
+                if (const auto it = std::upper_bound(grid_zs.begin(), grid_zs.end(), surface_z + grid_snap_tol);
+                    it != grid_zs.begin())
+                    anchor_offset = std::max(0., surface_z - *(it - 1));
+                if (anchor_offset < grid_snap_tol)
+                    anchor_offset = 0.;
+                if (anchor_offset > 0.)
+                {
+                    ++dbg_stacks_anchored;
+                    dbg_max_anchor = std::max(dbg_max_anchor, anchor_offset);
+                }
+                else
+                    ++dbg_stacks_on_grid;
+            }
+
+            // Find grid layers in range for syncing sparse layers
+            while (idx_grid < grid_zs.size() && grid_zs[idx_grid] < extr1z + EPSILON)
+                ++idx_grid;
+
+            // Collect ALL grid layer Z heights from extr1z to the contact's grid-frame position:
+            // subtracting the anchor keeps the slot reservation identical to fixed-height
+            // geometry, so the offset never shifts a body layer into the interface stack's span.
+            std::vector<std::pair<coordf_t, coordf_t>> sync_layers;
+            for (size_t i = idx_grid;
+                 i < grid_zs.size() && grid_zs[i] <= top_contact_print_z - anchor_offset + grid_snap_tol; ++i)
+            {
+                sync_layers.emplace_back(grid_zs[i], grid_zs[i] - grid_bottom_z(i));
             }
 
             size_t total_sync_layers = sync_layers.size();
 
-            // Sparse layers = total object layers minus interface layers (TopContact doesn't sync to object layer)
-            size_t sync_up_to = (total_sync_layers > num_interface_layers_below)
-                                    ? (total_sync_layers - num_interface_layers_below)
-                                    : 0;
+            // Sparse layers = total minus the reserved stack slots. A whole-layer gap puts a top
+            // contact's own grid slot inside the sync range, so it is reserved along with the
+            // interface slots, keeping the top sparse layer out of the stack's span. Bottom
+            // contacts have no stack below them and reserve nothing.
+            const size_t reserved_slots = num_interface_layers_below +
+                                          (gap_on_whole_layer && extr2_is_top_interface ? 1 : 0);
+            size_t sync_up_to = (total_sync_layers > reserved_slots) ? (total_sync_layers - reserved_slots) : 0;
 
             coordf_t current_z = extr1z;
             size_t layers_created = 0;
@@ -3052,15 +3101,24 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_supp
             {
                 // Only reduce height by the REMAINDER of gap / layer_height
                 // Full layers are handled by TopContact positioning (lower Z)
-                const coordf_t gap_remainder = std::fmod(gap, layer_height);
-                const coordf_t height_reduction = gap_remainder / num_interface_total;
+                const coordf_t height_reduction = gap_on_whole_layer ? 0. : gap_remainder / num_interface_total;
                 uniform_interface_height = layer_height - height_reduction;
 
-                // Clamp to min/max bounds
+                // Clamp: the ceiling admits full layer height, so whole-layer gaps print
+                // full-height interfaces instead of being cut to the nozzle-derived bound.
                 if (uniform_interface_height < min_interface_height)
                     uniform_interface_height = min_interface_height;
-                else if (uniform_interface_height > max_interface_height)
-                    uniform_interface_height = max_interface_height;
+                else if (const coordf_t ceiling = std::max(max_interface_height, layer_height);
+                         uniform_interface_height > ceiling)
+                    uniform_interface_height = ceiling;
+
+                // The anchor share is added after the clamp so a fixed layer height keeps its
+                // clamped heights while the stack absorbs the surface's offset off the grid. The
+                // span ceiling bounds the sum; the anchor is under one grid layer spread over the
+                // stack, so this cap only engages against pathological inputs.
+                uniform_interface_height = std::min(uniform_interface_height + anchor_offset / num_interface_total,
+                                                    std::max(max_interface_height,
+                                                             layer_height * (1. + 1. / coordf_t(num_interface_total))));
             }
 
             // STEP 3: Set TopContact's height using the uniform height
@@ -3117,10 +3175,9 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_supp
                 intermediate_layers.push_back(&layer_new);
             }
 
-            // Advance idx_layer_object past this range
-            while (idx_layer_object < object.layers().size() &&
-                   object.layers()[idx_layer_object]->print_z <= target_z + EPSILON)
-                ++idx_layer_object;
+            // Advance idx_grid past this range
+            while (idx_grid < grid_zs.size() && grid_zs[idx_grid] <= target_z + EPSILON)
+                ++idx_grid;
         }
     }
 
@@ -3128,6 +3185,12 @@ SupportGeneratorLayersPtr PrintObjectSupportMaterial::raft_and_intermediate_supp
     for (size_t i = 0; i < top_contacts.size(); ++i)
         assert(top_contacts[i]->height > 0.);
 #endif /* _DEBUG */
+
+    // Contact anchoring tally for the classic generator, the counterpart of TREE-ANCHOR.
+    // Nonzero anchored counts and offsets appear only when the object leaves the support grid.
+    dbg_log(DBG_SUPPORT, 0., "SNUG-ANCHOR", "stacks object=%zu grid=%zu offset_max_um=%lld grid_layers=%zu",
+            dbg_stacks_anchored, dbg_stacks_on_grid, static_cast<long long>(dbg_max_anchor * 1000. + 0.5),
+            grid_zs.size());
 
     return intermediate_layers;
 }

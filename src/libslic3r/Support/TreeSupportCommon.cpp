@@ -16,7 +16,9 @@
 #include <limits>
 #include <cstdio>
 
+#include "BaobabSupport.hpp"
 #include "libslic3r/Flow.hpp"
+#include "libslic3r/Layer.hpp"
 #include "libslic3r/Print.hpp"
 #include "libslic3r/Utils.hpp"
 
@@ -32,7 +34,8 @@ TreeSupportMeshGroupSettings::TreeSupportMeshGroupSettings(const PrintObject &pr
 
     // Support must be enabled and set to Tree style.
     assert(config.support_material);
-    assert(config.support_material_style == smsTree || config.support_material_style == smsOrganic);
+    assert(config.support_material_style == smsTree || config.support_material_style == smsOrganic ||
+           config.support_material_style == smsBaobab);
 
     // Calculate maximum external perimeter width over all printing regions, taking into account the default layer height.
     coordf_t external_perimeter_width = 0.;
@@ -91,6 +94,8 @@ TreeSupportMeshGroupSettings::TreeSupportMeshGroupSettings(const PrintObject &pr
     //    this->minimum_bottom_area       =
     //    this->support_offset            =
     this->support_tree_branch_distance = scaled<coord_t>(config.support_tree_branch_distance.value);
+    this->support_baobab_max_canopy_angle = std::clamp<double>(config.support_baobab_max_canopy_angle * M_PI / 180., 0.,
+                                                               0.5 * M_PI - EPSILON);
     this->support_tree_angle = std::clamp<double>(config.support_tree_angle * M_PI / 180., 0., 0.5 * M_PI - EPSILON);
     this->support_tree_angle_slow = std::clamp<double>(config.support_tree_angle_slow * M_PI / 180., 0.,
                                                        this->support_tree_angle - EPSILON);
@@ -99,13 +104,24 @@ TreeSupportMeshGroupSettings::TreeSupportMeshGroupSettings(const PrintObject &pr
                                                                       180.,
                                                                   0., 0.5 * M_PI - EPSILON);
     this->support_tree_top_rate = config.support_tree_top_rate.value; // percent
+
     //    this->support_tree_tip_diameter = this->support_line_width;
     this->support_tree_tip_diameter = std::clamp(scaled<coord_t>(config.support_tree_tip_diameter.value), coord_t(0),
                                                  this->support_tree_branch_diameter);
+
+    // Baobab parameterizes the tree here, at the single point where these settings are built
+    // from the object, and after every stock assignment so no Organic-derived value survives
+    // it. TreeModelVolumes and its precalculate() construct their own copy from the
+    // PrintObject, so an override applied at only some call sites would leave the avoidance
+    // cache quantized and sized for a different branch radius than the one the pathing engine
+    // goes on to request - which spins getAvoidance() forever on a radius the cache can never
+    // hold.
+    if (is_baobab_object(print_object))
+        baobab_apply_tree_settings(*this, config);
 }
 
 TreeSupportSettings::TreeSupportSettings(const TreeSupportMeshGroupSettings &mesh_group_settings,
-                                         const SlicingParameters &slicing_params)
+                                         const SlicingParameters &slicing_params, const PrintObject *print_object)
     : support_line_width(mesh_group_settings.support_line_width)
     , layer_height(mesh_group_settings.layer_height)
     , branch_radius(mesh_group_settings.support_tree_branch_diameter / 2)
@@ -213,6 +229,76 @@ TreeSupportSettings::TreeSupportSettings(const TreeSupportMeshGroupSettings &mes
                 z += step;
                 this->raft_layers.emplace_back(z);
             }
+        }
+    }
+
+    this->support_layer_zs = generate_support_layer_zs(slicing_params);
+
+    // Under a variable layer height profile the object leaves that grid, so the two stacks stop
+    // being the same thing and every input the engine reads per object layer has to be carried
+    // across by height. Both walks collapse to the identity when the layer height is fixed.
+    // All tables or none: consumers gate remaps on these being populated, and a populated walk
+    // against an empty grid would map every layer to slot zero and drop everything.
+    if (print_object != nullptr && !print_object->layers().empty() && !this->support_layer_zs.empty())
+    {
+        const auto layers = print_object->layers();
+
+        this->grid_matches_object = layers.size() == this->support_layer_zs.size();
+        if (this->grid_matches_object)
+            for (size_t j = 0; j < layers.size(); ++j)
+                if (std::abs(layers[j]->print_z - this->support_layer_zs[j]) > EPSILON)
+                {
+                    this->grid_matches_object = false;
+                    break;
+                }
+
+        const auto object_layer_at = [&layers](const coordf_t z)
+        {
+            const auto it = std::lower_bound(layers.begin(), layers.end(), z - EPSILON,
+                                             [](const Layer *l, const coordf_t v) { return l->print_z < v; });
+            return size_t(std::min<ptrdiff_t>(it - layers.begin(), ptrdiff_t(layers.size()) - 1));
+        };
+        // Rounds down. The support layer carrying an overhang has to sit at or below the surface it
+        // holds up; rounding to the nearest can land it above, which puts the branch tip inside the
+        // object and the collision pass then drops the support entirely.
+        const auto support_layer_at = [this](const coordf_t z)
+        {
+            const auto it = std::upper_bound(this->support_layer_zs.begin(), this->support_layer_zs.end(), z + EPSILON);
+            return size_t(std::max<ptrdiff_t>(0, (it - this->support_layer_zs.begin()) - 1));
+        };
+
+        this->object_layer_of.reserve(this->support_layer_zs.size());
+        for (const coordf_t z : this->support_layer_zs)
+            this->object_layer_of.emplace_back(object_layer_at(z));
+
+        // The slot an overhang is carried to keys off the surface it rests on, the layer's
+        // bottom, one slot above the surface's own. A thin layer's top lands there anyway; a
+        // thick layer's top can sit several slots higher, and carrying by it would place the
+        // stack inside the layer's own collision, where no roof can be generated.
+        const auto layer_bottom = [&layers](const size_t j)
+        {
+            return j > 0 ? layers[j - 1]->print_z : layers.front()->print_z - layers.front()->height;
+        };
+        this->support_layer_of.reserve(layers.size());
+        for (size_t j = 0; j < layers.size(); ++j)
+            this->support_layer_of.emplace_back(
+                std::min(support_layer_at(layers[j]->print_z), support_layer_at(layer_bottom(j)) + 1));
+
+        // The object surface resting on each support layer: the lowest surface among the layers
+        // whose overhangs are carried there, so the contact anchors to exactly what it has to
+        // clear. Slots that receive nothing fall back to the bottom of the layer covering their
+        // height, which keeps every entry a real surface for reads that drifted off the carry.
+        this->object_bottom_z_of.reserve(this->support_layer_zs.size());
+        for (const size_t j : this->object_layer_of)
+            this->object_bottom_z_of.emplace_back(layer_bottom(j));
+        {
+            std::vector<coordf_t> carried_min(this->support_layer_zs.size(), std::numeric_limits<coordf_t>::max());
+            for (size_t j = 0; j < layers.size(); ++j)
+                if (const size_t s = this->support_layer_of[j]; s < carried_min.size())
+                    carried_min[s] = std::min(carried_min[s], layer_bottom(j));
+            for (size_t i = 0; i < carried_min.size(); ++i)
+                if (carried_min[i] != std::numeric_limits<coordf_t>::max())
+                    this->object_bottom_z_of[i] = carried_min[i];
         }
     }
 }

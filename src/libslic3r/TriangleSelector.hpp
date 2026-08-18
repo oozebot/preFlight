@@ -37,12 +37,13 @@ class TriangleMesh;
 
 enum class TriangleStateType : uint16_t
 {
-    // Values 0-4 used for paint-on supports:
+    // Values 0-5 used for paint-on supports:
     NONE = 0,
     ENFORCER = 1,         // Snug support (blue)
     BLOCKER = 2,          // Blocker (red)
     ORGANIC_ENFORCER = 3, // Organic support (green)
-    GRID_ENFORCER = 4,    // Grid support (orange)
+    GRID_ENFORCER = 4,    // Grid support (purple)
+    BAOBAB_ENFORCER = 5,  // Baobab support (terracotta)
     // For the fuzzy skin, we use just two values (NONE and FUZZY_SKIN).
     FUZZY_SKIN = ENFORCER,
     // Extruder aliases for MMU painting (states 1-15)
@@ -50,7 +51,7 @@ enum class TriangleStateType : uint16_t
     Extruder2 = BLOCKER,
     Extruder3 = ORGANIC_ENFORCER,
     Extruder4 = GRID_ENFORCER,
-    Extruder5,
+    Extruder5 = BAOBAB_ENFORCER,
     Extruder6,
     Extruder7,
     Extruder8,

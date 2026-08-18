@@ -14,6 +14,7 @@
 #include <boost/log/trivial.hpp>
 #include <cmath>
 #include <cstdint>
+#include <functional>
 #include <iterator>
 #include <numeric>
 #include <tuple>
@@ -987,7 +988,92 @@ void Layer::make_perimeters()
         }
     }
 
+    this->check_generated_widths_against_warning(true);
+
     BOOST_LOG_TRIVIAL(trace) << "Generating perimeters for layer " << this->id() << " - Done";
+}
+
+void Layer::check_generated_widths_against_warning(const bool include_perimeters)
+{
+    PrintObject *print_object = this->object();
+    if (print_object->width_overrun_tripped())
+        return;
+    const PrintConfig &print_config = print_object->print()->config();
+
+    struct WidthLimit
+    {
+        double limit_mm;
+        double nozzle;
+        double warn_pct;
+    };
+    auto limit_for = [&print_config](int extruder_1based) -> WidthLimit
+    {
+        const size_t i = extruder_1based > 0 ? size_t(extruder_1based - 1) : size_t(0);
+        const double nozzle = print_config.nozzle_diameter.get_at(i);
+        const double pct = print_config.nozzle_width_warning_max.get_at(i);
+        return {nozzle * 0.01 * pct, nozzle, pct};
+    };
+
+    // Interlocking perimeters are exempt: their wide bonding beads are the pattern's structure.
+    // A fills tree mixes sparse and solid roles printed by possibly different extruders, so the
+    // limit is picked per path role. The comparison carries the same 1e-5 mm tolerance as the
+    // editing-time check: wide enough that a bead clamped to exactly the ceiling cannot read as
+    // exceeding it through float-to-double noise, narrow enough that a threshold set any
+    // UI-expressible amount below the generated width still trips.
+    std::function<bool(const ExtrusionEntity &, const WidthLimit &, const WidthLimit *)> scan =
+        [&](const ExtrusionEntity &entity, const WidthLimit &primary, const WidthLimit *sparse_alt) -> bool
+    {
+        if (const auto *collection = dynamic_cast<const ExtrusionEntityCollection *>(&entity))
+        {
+            for (const ExtrusionEntity *child : collection->entities)
+                if (child != nullptr && scan(*child, primary, sparse_alt))
+                    return true;
+            return false;
+        }
+        auto check_path = [&](const ExtrusionPath &path)
+        {
+            if (path.role().has(ExtrusionRoleModifier::Interlocking))
+                return false;
+            const WidthLimit &l = sparse_alt != nullptr && path.role().has(ExtrusionRoleModifier::Infill) &&
+                                          !path.role().has(ExtrusionRoleModifier::Solid)
+                                      ? *sparse_alt
+                                      : primary;
+            if (const float w = path.width(); double(w) > l.limit_mm + 1e-5)
+            {
+                print_object->warn_on_width_overrun(w, l.nozzle, l.warn_pct, this->print_z);
+                return true;
+            }
+            return false;
+        };
+        if (const auto *path = dynamic_cast<const ExtrusionPath *>(&entity))
+            return check_path(*path);
+        if (const auto *multi = dynamic_cast<const ExtrusionMultiPath *>(&entity))
+        {
+            for (const ExtrusionPath &p : multi->paths)
+                if (check_path(p))
+                    return true;
+            return false;
+        }
+        if (const auto *loop = dynamic_cast<const ExtrusionLoop *>(&entity))
+        {
+            for (const ExtrusionPath &p : loop->paths)
+                if (check_path(p))
+                    return true;
+            return false;
+        }
+        return false;
+    };
+
+    for (const LayerRegion *layerm : m_regions)
+    {
+        const PrintRegionConfig &region_config = layerm->region().config();
+        const WidthLimit solid = limit_for(region_config.solid_infill_extruder);
+        const WidthLimit sparse = limit_for(region_config.infill_extruder);
+        if (include_perimeters && scan(layerm->perimeters(), limit_for(region_config.perimeter_extruder), nullptr))
+            return;
+        if (scan(layerm->fills(), solid, &sparse))
+            return;
+    }
 }
 
 void Layer::sort_perimeters_into_islands(

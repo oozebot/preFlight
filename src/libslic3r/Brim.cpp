@@ -27,6 +27,7 @@
 #include "ShortestPath.hpp"
 #include "libslic3r.h"
 #include "libslic3r/BoundingBox.hpp"
+#include "libslic3r/DebugOutput.hpp"
 #include "libslic3r/ExPolygon.hpp"
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
@@ -1109,7 +1110,38 @@ ExtrusionEntityCollection make_brim(const Print &print, PrintTryCancel try_cance
     Polygons islands = top_level_outer_brim_islands(top_level_objects_with_brim, scaled_resolution);
     BrimAreas brim_areas = top_level_outer_brim_area(print, top_level_objects_with_brim, bottom_layers_expolygons,
                                                      float(flow.scaled_spacing()));
-    // Build islands_area from all brim region types (used to trim support base overlap)
+
+    // The first support layer carries the whole support tower, so the outer brim yields to it: the
+    // regular brim and all ear regions are clipped away from the support footprint (with the
+    // object's brim separation as clearance) before any brim line is generated. Inner brim is
+    // generated separately and is not clipped here.
+    ExPolygons support_keepout;
+    for (const PrintObject *object : print.objects())
+    {
+        if (object->support_layers().empty())
+            continue;
+        const SupportLayer *first_support_layer = object->support_layers().front();
+        // Only a support layer that sits on the bed counts as the flange.
+        if (first_support_layer->bottom_z() > EPSILON || first_support_layer->support_islands.empty())
+            continue;
+        const ExPolygons flange = offset_ex(first_support_layer->support_islands,
+                                            float(scale_(object->config().brim_separation.value)), JoinType::Square);
+        for (const PrintInstance &instance : object->instances())
+            append_and_translate(support_keepout, flange, instance);
+    }
+    if (!support_keepout.empty())
+    {
+        support_keepout = union_ex(support_keepout);
+        if (debug_enabled(DBG_SUPPORT))
+            dbg_log(DBG_SUPPORT, 0., "SUPPORT-BRIM-KEEPOUT", "polys=%zu area=%.1f", support_keepout.size(),
+                    area(to_polygons(support_keepout)) * SCALING_FACTOR * SCALING_FACTOR);
+        brim_areas.regular_brim = diff_ex(brim_areas.regular_brim, support_keepout);
+        brim_areas.auto_ears = diff_ex(brim_areas.auto_ears, support_keepout);
+        brim_areas.clippable = diff_ex(brim_areas.clippable, support_keepout);
+        brim_areas.painted_preclipped = diff_ex(brim_areas.painted_preclipped, support_keepout);
+    }
+
+    // Build islands_area from all brim region types
     ExPolygons islands_area_ex = brim_areas.regular_brim;
     append(islands_area_ex, brim_areas.auto_ears);
     append(islands_area_ex, brim_areas.clippable);

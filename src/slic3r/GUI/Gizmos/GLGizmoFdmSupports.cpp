@@ -81,6 +81,7 @@ bool GLGizmoFdmSupports::on_init()
     m_desc["enforcer_snug"] = _u8L("Snug");
     m_desc["enforcer_grid"] = _u8L("Grid");
     m_desc["enforcer_organic"] = _u8L("Organic");
+    m_desc["enforcer_baobab"] = _u8L("Baobab");
 
     return true;
 }
@@ -161,6 +162,15 @@ void GLGizmoFdmSupports::on_render_input_window(float x, float y, float bottom_l
     const float on_overhangs_only_checkbox_width = ImGuiPureWrap::calc_text_size(m_desc["on_overhangs_only"]).x +
                                                    m_imgui->scaled(2.5f);
 
+    const float enforcer_radio_snug = ImGuiPureWrap::calc_text_size(m_desc["enforcer_snug"]).x + m_imgui->scaled(2.5f);
+    const float enforcer_radio_grid = ImGuiPureWrap::calc_text_size(m_desc["enforcer_grid"]).x + m_imgui->scaled(2.5f);
+    const float enforcer_radio_organic = ImGuiPureWrap::calc_text_size(m_desc["enforcer_organic"]).x +
+                                         m_imgui->scaled(2.5f);
+    const float enforcer_radio_baobab = ImGuiPureWrap::calc_text_size(m_desc["enforcer_baobab"]).x +
+                                        m_imgui->scaled(2.5f);
+    const float total_enforcer_width = enforcer_radio_snug + enforcer_radio_grid + enforcer_radio_organic +
+                                       enforcer_radio_baobab;
+
     float caption_max = 0.f;
     float total_text_max = 0.f;
     for (const auto &t : std::array<std::string, 3>{"enforce", "block", "remove"})
@@ -182,6 +192,7 @@ void GLGizmoFdmSupports::on_render_input_window(float x, float y, float bottom_l
     window_width = std::max(window_width,
                             cursor_type_radio_circle + cursor_type_radio_sphere + cursor_type_radio_pointer);
     window_width = std::max(window_width, tool_type_radio_left + tool_type_radio_brush + tool_type_radio_smart_fill);
+    window_width = std::max(window_width, total_enforcer_width);
     window_width = std::max(window_width, 2.f * buttons_width + m_imgui->scaled(1.f));
 
     auto draw_text_with_caption = [&caption_max](const std::string &caption, const std::string &text)
@@ -200,13 +211,9 @@ void GLGizmoFdmSupports::on_render_input_window(float x, float y, float bottom_l
 
     ImGuiPureWrap::text(m_desc["enforcer_type"]);
 
-    // Calculate widths for radio buttons
-    const float enforcer_radio_snug = ImGuiPureWrap::calc_text_size(m_desc["enforcer_snug"]).x + m_imgui->scaled(2.5f);
-    const float enforcer_radio_grid = ImGuiPureWrap::calc_text_size(m_desc["enforcer_grid"]).x + m_imgui->scaled(2.5f);
-    const float enforcer_radio_organic = ImGuiPureWrap::calc_text_size(m_desc["enforcer_organic"]).x +
-                                         m_imgui->scaled(2.5f);
-    float total_enforcer_width = enforcer_radio_snug + enforcer_radio_grid + enforcer_radio_organic;
-    float enforcer_offset = (window_width - total_enforcer_width) / 2.f;
+    // The radio widths feed the window_width chain above, so the row always fits; keep the
+    // centering non-negative anyway in case a translation outgrows everything else.
+    float enforcer_offset = std::max(0.f, (window_width - total_enforcer_width) / 2.f);
 
     // Snug radio button (blue)
     ImGui::SetCursorPosX(enforcer_offset);
@@ -220,17 +227,17 @@ void GLGizmoFdmSupports::on_render_input_window(float x, float y, float bottom_l
     if (ImGui::IsItemHovered())
         ImGuiPureWrap::tooltip(_u8L("Paint regions that will use Snug support style (Blue)."), max_tooltip_width);
 
-    // Grid radio button (orange)
+    // Grid radio button (purple)
     ImGui::SameLine();
     ImGui::PushItemWidth(enforcer_radio_grid);
     if (ImGuiPureWrap::radio_button(m_desc["enforcer_grid"], m_enforcer_type == 1))
     {
         m_enforcer_type = 1;
         if (m_highlight_by_angle_threshold_deg > 0.f)
-            m_parent.set_slope_color(1.0f, 0.8f, 0.5f); // Light orange - Grid
+            m_parent.set_slope_color(0.8f, 0.65f, 0.95f); // Light purple - Grid
     }
     if (ImGui::IsItemHovered())
-        ImGuiPureWrap::tooltip(_u8L("Paint regions that will use Grid support style (Orange)."), max_tooltip_width);
+        ImGuiPureWrap::tooltip(_u8L("Paint regions that will use Grid support style (Purple)."), max_tooltip_width);
 
     // Organic radio button (green)
     ImGui::SameLine();
@@ -243,6 +250,19 @@ void GLGizmoFdmSupports::on_render_input_window(float x, float y, float bottom_l
     }
     if (ImGui::IsItemHovered())
         ImGuiPureWrap::tooltip(_u8L("Paint regions that will use Organic support style (Green)."), max_tooltip_width);
+
+    // Baobab radio button (terracotta)
+    ImGui::SameLine();
+    ImGui::PushItemWidth(enforcer_radio_baobab);
+    if (ImGuiPureWrap::radio_button(m_desc["enforcer_baobab"], m_enforcer_type == 3))
+    {
+        m_enforcer_type = 3;
+        if (m_highlight_by_angle_threshold_deg > 0.f)
+            m_parent.set_slope_color(0.95f, 0.7f, 0.55f); // Light terracotta - Baobab
+    }
+    if (ImGui::IsItemHovered())
+        ImGuiPureWrap::tooltip(_u8L("Paint regions that will use Baobab support style (Terracotta)."),
+                               max_tooltip_width);
 
     ImGui::Separator();
 
@@ -289,11 +309,14 @@ void GLGizmoFdmSupports::on_render_input_window(float x, float y, float bottom_l
             m_parent.set_slope_color(0.7f, 0.7f, 1.0f);
             break; // Light blue - Snug
         case 1:
-            m_parent.set_slope_color(1.0f, 0.8f, 0.5f);
-            break; // Light orange - Grid
+            m_parent.set_slope_color(0.8f, 0.65f, 0.95f);
+            break; // Light purple - Grid
         case 2:
             m_parent.set_slope_color(0.5f, 0.85f, 0.5f);
             break; // Light green - Organic
+        case 3:
+            m_parent.set_slope_color(0.95f, 0.7f, 0.55f);
+            break; // Light terracotta - Baobab
         default:
             m_parent.set_slope_color(0.7f, 0.7f, 1.0f);
             break;
@@ -565,6 +588,10 @@ void GLGizmoFdmSupports::apply_data_from_backend()
     {
         if (po->model_object()->id() == mo->id())
         {
+            // The spots search step can be done without data (skipped for objects with
+            // automatic supports).
+            if (!po->shared_regions()->generated_support_points.has_value())
+                continue;
             std::unordered_map<size_t, TriangleSelectorWrapper> selectors;
             SupportSpotsGenerator::SupportPoints support_points =
                 po->shared_regions()->generated_support_points->support_points;
@@ -768,15 +795,17 @@ wxString GLGizmoFdmSupports::handle_snapshot_action_name(bool control_down,
 
 TriangleStateType GLGizmoFdmSupports::get_left_button_state_type() const
 {
-    // m_enforcer_type: 0 = Snug (blue), 1 = Grid (orange), 2 = Organic (green)
+    // m_enforcer_type: 0 = Snug (blue), 1 = Grid (purple), 2 = Organic (green), 3 = Baobab (terracotta)
     switch (m_enforcer_type)
     {
     case 0:
         return TriangleStateType::ENFORCER; // Snug - blue
     case 1:
-        return TriangleStateType::GRID_ENFORCER; // Grid - orange
+        return TriangleStateType::GRID_ENFORCER; // Grid - purple
     case 2:
         return TriangleStateType::ORGANIC_ENFORCER; // Organic - green
+    case 3:
+        return TriangleStateType::BAOBAB_ENFORCER; // Baobab - terracotta
     default:
         return TriangleStateType::ENFORCER;
     }
@@ -784,15 +813,17 @@ TriangleStateType GLGizmoFdmSupports::get_left_button_state_type() const
 
 ColorRGBA GLGizmoFdmSupports::get_cursor_sphere_left_button_color() const
 {
-    // m_enforcer_type: 0 = Snug (blue), 1 = Grid (orange), 2 = Organic (green)
+    // m_enforcer_type: 0 = Snug (blue), 1 = Grid (purple), 2 = Organic (green), 3 = Baobab (terracotta)
     switch (m_enforcer_type)
     {
     case 0:
         return ColorRGBA{0.47f, 0.47f, 1.0f, 0.25f}; // Blue - Snug
     case 1:
-        return ColorRGBA{1.0f, 0.6f, 0.2f, 0.25f}; // Orange - Grid
+        return ColorRGBA{0.6f, 0.3f, 0.85f, 0.25f}; // Purple - Grid
     case 2:
         return ColorRGBA{0.3f, 0.7f, 0.3f, 0.25f}; // Green - Organic
+    case 3:
+        return ColorRGBA{0.8f, 0.42f, 0.2f, 0.25f}; // Terracotta - Baobab
     default:
         return ColorRGBA{0.47f, 0.47f, 1.0f, 0.25f};
     }

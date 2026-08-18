@@ -25,7 +25,21 @@ struct Params
     ExPolygons fill_core;   // depth mode: the island offset inward by the depth (the region teeth must not enter).
                             // Teeth conform to this boundary so their tips fuse with the inner Athena bead,
                             // regardless of contour shape. Empty = fall back to the scalar depth_clamp.
-    int phase_mode{1};      // 0 = aligned ridges, 1 = half-tooth stagger (brickwork), 2 = randomized (hash)
+    coord_t rib_pitch{0};   // >0: relaxed mode - sparse ribs at this center-to-center pitch along the
+                            // contour (spokes on a wheel). The cascade, braking and anchor machinery run
+                            // unchanged; stacking is forced aligned and holes print plain bead loops. Also
+                            // sets the band pitch on solid-surface face layers; depth mode ignores it.
+    bool outer_loop{false}; // full mode, any pitch: wrap one continuous perimeter around the island and move
+                            // the rib-carrying wall a bonded spacing inside it; the tour snakes out through
+                            // the widened seam rib, laps the object, and snakes back in (a single seam).
+    bool prefer_clockwise{false}; // outer loop only: the lap prints clockwise when set, matching how
+                                  // emission orients perimeter loops. Honored by building on the mirrored
+                                  // island, so the tour keeps its order while every bead reverses.
+    bool outer_first{false};      // outer loop only: print the lap first, then the interior (the woven tour
+                                  // reverses; the mirror decision compensates so the lap direction still
+                                  // follows prefer_clockwise).
+    bool mirror_build{false};     // internal: this call is the mirrored build (set by the wrapper only)
+    int phase_mode{1};            // 0 = aligned ridges, 1 = half-tooth stagger (brickwork), 2 = randomized (hash)
     int aim{0}; // 0 = Convergent (aim at anchor), 1 = Perpendicular (aim at inner boundary); depth mode only
     Flow flow;
     int layer_id;

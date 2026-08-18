@@ -78,7 +78,7 @@ class Generator;
 
 struct SurfaceFillParams
 {
-    // Zero based extruder ID.
+    // 1-based extruder ID, the raw region config value from PrintRegion::extruder().
     unsigned int extruder = 0;
     // Infill pattern, adjusted for the density etc.
     InfillPattern pattern = InfillPattern(0);
@@ -584,6 +584,21 @@ std::vector<SurfaceFill> group_fills(const Layer &layer)
                     params.spacing = layerm.region()
                                          .flow(*layer.object(), frInfill, layer.object()->config().layer_height, false)
                                          .spacing();
+                    // A bead cannot be narrower than it is tall. On a tall variable-height layer with a
+                    // fixed extrusion width, the region-wide spacing can demand exactly that (width for
+                    // spacing s at height h is s + h*(1-pi/4), which drops below h once s < h*pi/4).
+                    // Clamp to the round-bead minimum: this layer prints width == height beads at
+                    // slightly wider spacing instead of aborting the slice.
+                    const double min_round_bead_spacing = params.flow.height() * (0.25 * M_PI) + EPSILON;
+                    if (params.spacing < min_round_bead_spacing)
+                    {
+                        // Clamping breaks the layer-height-independent pitch on this surface, so
+                        // its lines will not register with neighboring layers - log the trade.
+                        dbg_log(Slic3r::DBG_FILL, layer.print_z, "FILL",
+                                "SPACING_CLAMP surface_h=%.3f requested=%.3f clamped=%.3f", params.flow.height(),
+                                params.spacing, min_round_bead_spacing);
+                        params.spacing = min_round_bead_spacing;
+                    }
                     // When fill surface thickness differs from layer height, rescale width to maintain
                     // requested density with the rounded rectangle extrusion model.
                     params.flow = params.flow.with_spacing(params.spacing);
@@ -1840,6 +1855,16 @@ void Layer::make_fills(FillAdaptive::Octree *adaptive_fill_octree, FillAdaptive:
                                                  : perimeter_generator;
                 params.layer_height = layerm->layer()->height;
                 params.prefer_clockwise_movements = this->object()->print()->config().prefer_clockwise_movements;
+                // Bead width ceiling for Athena fills from max_perimeter_width, resolved against
+                // the nozzle of the extruder printing this fill, the same basis as the
+                // perimeter-side ceiling and the per-extruder generated-width warning.
+                if (const double mpw_pct = layerm->region().config().max_perimeter_width.value; mpw_pct > 0)
+                {
+                    const int fill_extruder = surface_fill.params.extruder;
+                    const double nozzle = this->object()->print()->config().nozzle_diameter.get_at(
+                        fill_extruder > 0 ? size_t(fill_extruder - 1) : size_t(0));
+                    params.max_bead_width = scaled<coord_t>(nozzle * mpw_pct * 0.01);
+                }
 
                 // Track fill range for this island and surface type
                 uint32_t fill_begin = uint32_t(layerm->m_fills.entities.size());
@@ -2021,9 +2046,13 @@ void Layer::make_fills(FillAdaptive::Octree *adaptive_fill_octree, FillAdaptive:
                                     Flow new_flow = surface_fill.params.bridge
                                                         ? surface_fill.params.flow
                                                         : surface_fill.params.flow.with_spacing(float(f->spacing));
+                                    // The flow-hold baseline is the configured feature flow, not
+                                    // the solver-adjusted spacing flow, so a solver-widened bead
+                                    // still registers its volumetric excess.
                                     ExtrusionMultiPath multi_path = PerimeterGenerator::thick_polyline_to_multi_path(
                                         thick_polyline, surface_fill.params.extrusion_role, new_flow,
-                                        scaled<float>(0.05), float(SCALED_EPSILON));
+                                        scaled<float>(0.05), float(SCALED_EPSILON), std::nullopt,
+                                        surface_fill.params.flow.mm3_per_mm());
                                     if (!multi_path.empty())
                                     {
                                         for (auto &p : multi_path.paths)
@@ -2052,6 +2081,13 @@ void Layer::make_fills(FillAdaptive::Octree *adaptive_fill_octree, FillAdaptive:
                                                                    ExtrusionFlow{flow_mm3_per_mm, float(flow_width),
                                                                                  surface_fill.params.flow.height()},
                                                                    f->is_self_crossing()};
+                                    // Constant-width lines at solver-widened spacing carry their
+                                    // volumetric excess over the configured feature flow, same as
+                                    // the variable-width path above.
+                                    if (const double nominal = surface_fill.params.flow.mm3_per_mm();
+                                        nominal > 0. && !surface_fill.params.extrusion_role.is_bridge() &&
+                                        !surface_fill.params.extrusion_role.has(ExtrusionRoleModifier::Interlocking))
+                                        fill_attrs.flow_ratio = float(std::max(1., flow_mm3_per_mm / nominal));
                                     fill_attrs.region_area_mm2 = ep_area_mm2;
                                     fill_attrs.fill_pattern = fill_pattern_id;
                                     extrusion_entities_append_paths(eec->entities, std::move(polylines), fill_attrs,
@@ -2279,6 +2315,9 @@ void Layer::make_fills(FillAdaptive::Octree *adaptive_fill_octree, FillAdaptive:
         for (const ExtrusionEntity *e : layerm->fills())
             assert(dynamic_cast<const ExtrusionEntityCollection *>(e) != nullptr);
 #endif
+
+    // Perimeters were already checked when they were generated
+    this->check_generated_widths_against_warning(false);
 }
 
 Polylines Layer::generate_sparse_infill_polylines_for_anchoring(FillAdaptive::Octree *adaptive_fill_octree,

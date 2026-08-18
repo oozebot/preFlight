@@ -80,6 +80,7 @@
 #include "GUI_App.hpp"
 #include "GUI_ObjectList.hpp"
 #include "Plater.hpp"
+#include "Sidebar.hpp"
 #include "MainFrame.hpp"
 #include "format.hpp"
 #include "UnsavedChangesDialog.hpp"
@@ -1331,6 +1332,12 @@ void Tab::on_value_change(const std::string &opt_key, const boost::any &value)
         return;
     }
 
+    // Filament color commits straight into the preset from any picker; it never enters the
+    // unsaved-changes state. The field has already written the value into the edited config.
+    if (m_type == Preset::TYPE_FILAMENT && opt_key == "filament_colour")
+        commit_filament_color_to_preset(m_presets->get_edited_preset().name,
+                                        m_config->opt_string("filament_colour", 0u));
+
     if (opt_key == "compatible_prints")
         this->compatible_widget_reload(m_compatible_prints);
     if (opt_key == "compatible_printers")
@@ -1940,6 +1947,9 @@ void TabPrint::build()
     optgroup->append_single_option_line("serpentine_extrusion_width", category_path + "serpentine-width");
     optgroup->append_single_option_line("serpentine_overlap", category_path + "serpentine-overlap");
     optgroup->append_single_option_line("serpentine_max_bead", category_path + "serpentine-max-bead");
+    optgroup->append_single_option_line("serpentine_relaxed", category_path + "serpentine-relaxed");
+    optgroup->append_single_option_line("serpentine_spacing", category_path + "serpentine-spacing");
+    optgroup->append_single_option_line("serpentine_outer_loop", category_path + "serpentine-outer-loop");
     optgroup->append_single_option_line("serpentine_limit_depth", category_path + "serpentine-limit-depth");
     optgroup->append_single_option_line("serpentine_depth", category_path + "serpentine-depth");
     optgroup->append_single_option_line("serpentine_solid_surfaces", category_path + "serpentine-solid-surfaces");
@@ -2120,6 +2130,8 @@ void TabPrint::build()
     optgroup->append_single_option_line("support_material_auto", category_path + "auto-generated-supports");
     optgroup->append_single_option_line("support_material_style", category_path + "style");
     optgroup->append_single_option_line("support_material_threshold", category_path + "overhang-threshold");
+    optgroup->append_single_option_line("support_material_buildplate_only",
+                                        category_path + "support-on-build-plate-only");
     optgroup->append_single_option_line("support_material_enforce_layers",
                                         category_path + "enforce-support-for-the-first");
     optgroup->append_single_option_line("raft_first_layer_density", category_path + "raft-first-layer-density");
@@ -2154,8 +2166,6 @@ void TabPrint::build()
     optgroup->append_single_option_line("support_material_interface_spacing",
                                         category_path + "interface-pattern-spacing");
     optgroup->append_single_option_line("support_material_interface_contact_loops", category_path + "interface-loops");
-    optgroup->append_single_option_line("support_material_buildplate_only",
-                                        category_path + "support-on-build-plate-only");
     optgroup->append_single_option_line("support_material_xy_spacing",
                                         category_path + "xy-separation-between-an-object-and-its-support");
     optgroup->append_single_option_line("dont_support_bridges", category_path + "dont-support-bridges");
@@ -2174,6 +2184,16 @@ void TabPrint::build()
     optgroup->append_single_option_line("support_tree_tip_diameter", path);
     optgroup->append_single_option_line("support_tree_branch_distance", path);
     optgroup->append_single_option_line("support_tree_top_rate", path);
+
+    optgroup = page->new_optgroup_for_sidebar(L("Baobab supports"));
+    optgroup->append_single_option_line("support_baobab_angle");
+    optgroup->append_single_option_line("support_baobab_angle_slow");
+    optgroup->append_single_option_line("support_baobab_trunk_diameter");
+    optgroup->append_single_option_line("support_baobab_trunk_diameter_angle");
+    optgroup->append_single_option_line("support_baobab_trunk_distance");
+    optgroup->append_single_option_line("support_baobab_canopy_density");
+    optgroup->append_single_option_line("support_baobab_max_canopy_angle");
+    optgroup->append_single_option_line("support_baobab_plant_on_model");
 
     page = add_options_page(L("Speed"), "time");
     optgroup = page->new_optgroup_for_sidebar(L("Speed for print moves"));

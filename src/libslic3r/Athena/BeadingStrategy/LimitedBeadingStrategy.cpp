@@ -65,8 +65,13 @@ LimitedBeadingStrategy::Beading LimitedBeadingStrategy::compute(coord_t thicknes
                                  ret.toolpath_locations.begin() + insert_pos);
             new_widths.insert(new_widths.end(), ret.bead_widths.begin(), ret.bead_widths.begin() + insert_pos);
 
-            // Add inserted element
-            new_locations.push_back(innermost_toolpath_location + innermost_toolpath_width / 2);
+            // Add inserted element. A split-promoted center pair is spaced tighter than
+            // half its bead width, which would place the marker past the right-hand
+            // bead; keep the marker between its neighbors so locations stay ordered.
+            coord_t marker_location = innermost_toolpath_location + innermost_toolpath_width / 2;
+            if (marker_location > ret.toolpath_locations[insert_pos])
+                marker_location = (innermost_toolpath_location + ret.toolpath_locations[insert_pos]) / 2;
+            new_locations.push_back(marker_location);
             new_widths.push_back(0);
 
             // Copy remaining elements
@@ -112,9 +117,17 @@ LimitedBeadingStrategy::Beading LimitedBeadingStrategy::compute(coord_t thicknes
     const coord_t first_location = ret.toolpath_locations[first_insert_pos - 1] +
                                    ret.bead_widths[first_insert_pos - 1] / 2;
 
-    // Clamp to valid index range to prevent out-of-bounds with low perimeter counts
-    const size_t opposite_bead = std::min(bead_count - (max_bead_count / 2 - 1), bead_count - 1);
-    const coord_t second_location = ret.toolpath_locations[opposite_bead] - ret.bead_widths[opposite_bead] / 2;
+    // In this pre-insert array the far-side beads start at max_bead_count / 2, so the second
+    // marker sits just inside the innermost far-side bead. Both markers land back to back
+    // between the two sides, leaving max_bead_count / 2 full-width walls per side. Clamped in
+    // case a parent strategy ever returns fewer beads than requested.
+    const size_t opposite_bead = std::min(first_insert_pos, size_t(bead_count - 1));
+    coord_t second_location = ret.toolpath_locations[opposite_bead] - ret.bead_widths[opposite_bead] / 2;
+    // Just above the count threshold the mirrored far-side bead sits within an overlap width
+    // of the near-side one, which would place its marker before the first; keep locations
+    // ordered so the marker pair stays a valid inner-contour seam.
+    if (second_location < first_location)
+        second_location = first_location;
 
     // Build new vectors with both insertions
     std::vector<coord_t> new_locations;

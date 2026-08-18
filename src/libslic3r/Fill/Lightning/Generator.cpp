@@ -74,6 +74,30 @@ Generator::Generator(const PrintObject &print_object, const coordf_t fill_densit
     generateTrees(print_object, throw_on_cancel_callback);
 }
 
+// preFlight: build a generator over caller-supplied outlines rather than a PrintObject, so a
+// support structure can grow a lightning fill inside its own hollow interior.
+Generator::Generator(std::vector<Polygons> &&infill_outlines, std::vector<Polygons> &&overhang_per_layer,
+                     float infill_extrusion_width, coord_t supporting_radius, coord_t wall_supporting_radius,
+                     coord_t prune_length, coord_t straightening_max_distance,
+                     const std::function<void()> &throw_on_cancel_callback)
+{
+    m_infill_extrusion_width = infill_extrusion_width;
+    m_supporting_radius = supporting_radius;
+    m_wall_supporting_radius = wall_supporting_radius;
+    m_prune_length = prune_length;
+    m_straightening_max_distance = straightening_max_distance;
+
+    assert(infill_outlines.size() == overhang_per_layer.size());
+    m_overhang_per_layer = std::move(overhang_per_layer);
+    m_lightning_layers.resize(infill_outlines.size());
+    // The tree build derives its search grid from the top layer's extents; an empty top layer
+    // would give an undefined bounding box, so produce zero trees instead.
+    if (infill_outlines.empty() || infill_outlines.back().empty())
+        return;
+    const std::vector<Polygons> outlines = std::move(infill_outlines);
+    generateTreesFromOutlines(outlines, throw_on_cancel_callback);
+}
+
 void Generator::generateInitialInternalOverhangs(const PrintObject &print_object,
                                                  const std::function<void()> &throw_on_cancel_callback)
 {
@@ -125,8 +149,14 @@ void Generator::generateTrees(const PrintObject &print_object, const std::functi
         infill_outlines[layer_id] = union_(infill_outlines[layer_id]);
     }
 
+    generateTreesFromOutlines(infill_outlines, throw_on_cancel_callback);
+}
+
+void Generator::generateTreesFromOutlines(const std::vector<Polygons> &infill_outlines,
+                                          const std::function<void()> &throw_on_cancel_callback)
+{
     // For various operations its beneficial to quickly locate nearby features on the polygon:
-    const size_t top_layer_id = print_object.layers().size() - 1;
+    const size_t top_layer_id = infill_outlines.size() - 1;
     EdgeGrid::Grid outlines_locator(get_extents(infill_outlines[top_layer_id]).inflated(SCALED_EPSILON));
     outlines_locator.create(infill_outlines[top_layer_id], locator_cell_size);
 

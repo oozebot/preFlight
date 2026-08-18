@@ -776,6 +776,13 @@ private:
     std::map<wxString, bool> m_section_states;
 };
 
+// Commit a filament color straight into the named filament preset, from any of the color pickers
+// (sidebar swatch, sidebar filament panel, filament settings tab). The saved baseline and, when
+// the preset is open in the edit slot, the working copy receive the same value, and user presets
+// are written to disk immediately. A color change therefore never creates an unsaved-changes
+// state, and pending edits of other options keep their dirty state untouched.
+void commit_filament_color_to_preset(std::string preset_name, std::string color_hex);
+
 } // namespace GUI
 } // namespace Slic3r
 

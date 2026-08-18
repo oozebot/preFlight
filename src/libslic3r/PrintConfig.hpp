@@ -287,6 +287,7 @@ enum SupportMaterialStyle
     smsSnug,
     smsTree,
     smsOrganic,
+    smsBaobab,
 };
 
 enum SupportMaterialInterfacePattern
@@ -997,6 +998,11 @@ PRINT_CONFIG_CLASS_DEFINE(
     // Overhang angle threshold.
     ((ConfigOptionInt, support_material_threshold))((ConfigOptionBool, support_material_with_sheath))(
         (ConfigOptionFloatOrPercent, support_material_xy_spacing))
+    // Baobab supports
+    ((ConfigOptionFloat, support_baobab_angle))((ConfigOptionFloat, support_baobab_angle_slow))(
+        (ConfigOptionPercent, support_baobab_canopy_density))((ConfigOptionFloat, support_baobab_max_canopy_angle))(
+        (ConfigOptionBool, support_baobab_plant_on_model))((ConfigOptionFloat, support_baobab_trunk_diameter))(
+        (ConfigOptionFloat, support_baobab_trunk_diameter_angle))((ConfigOptionFloat, support_baobab_trunk_distance))
     // Tree supports
     ((ConfigOptionFloat, support_tree_angle))((ConfigOptionFloat, support_tree_angle_slow))(
         (ConfigOptionFloat, support_tree_branch_diameter))((ConfigOptionFloat, support_tree_branch_diameter_angle))(
@@ -1052,8 +1058,9 @@ PRINT_CONFIG_CLASS_DEFINE(
     // Serpentine fill
     ((ConfigOptionBool, serpentine_enabled))((ConfigOptionFloatOrPercent, serpentine_extrusion_width))(
         (ConfigOptionFloatOrPercent, serpentine_overlap))((ConfigOptionPercent, serpentine_max_bead))(
-        (ConfigOptionBool, serpentine_limit_depth))((ConfigOptionFloat, serpentine_depth))((ConfigOptionBool,
-                                                                                            serpentine_solid_surfaces))(
+        (ConfigOptionBool, serpentine_relaxed))((ConfigOptionFloat, serpentine_spacing))(
+        (ConfigOptionBool, serpentine_outer_loop))((ConfigOptionBool, serpentine_limit_depth))(
+        (ConfigOptionFloat, serpentine_depth))((ConfigOptionBool, serpentine_solid_surfaces))(
         (ConfigOptionEnum<SerpentineRidges>, serpentine_ridges))((ConfigOptionEnum<SerpentineAimType>, serpentine_aim))
     // Ironing options
     ((ConfigOptionBool, ironing))((ConfigOptionEnum<IroningType>, ironing_type))(

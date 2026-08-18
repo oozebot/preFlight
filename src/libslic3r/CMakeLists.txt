@@ -355,6 +355,8 @@ set(SLIC3R_SOURCES
     SlicingAdaptive.hpp
     Subdivide.cpp
     Subdivide.hpp
+    Support/BaobabSupport.cpp
+    Support/BaobabSupport.hpp
     Support/SupportCommon.cpp
     Support/SupportCommon.hpp
     Support/SupportDebug.cpp
@@ -483,6 +485,8 @@ set(SLIC3R_SOURCES
     Athena/BeadingStrategy/OuterWallInsetBeadingStrategy.cpp
     Athena/BeadingStrategy/RedistributeBeadingStrategy.hpp
     Athena/BeadingStrategy/RedistributeBeadingStrategy.cpp
+    Athena/BeadingStrategy/SplitPromotionBeadingStrategy.hpp
+    Athena/BeadingStrategy/SplitPromotionBeadingStrategy.cpp
     Athena/BeadingStrategy/WideningBeadingStrategy.hpp
     Athena/BeadingStrategy/WideningBeadingStrategy.cpp
     Athena/utils/ExtrusionJunction.hpp

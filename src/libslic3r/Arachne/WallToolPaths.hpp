@@ -116,8 +116,10 @@ protected:
     static void simplifyToolPaths(std::vector<VariableWidthLines> &toolpaths);
 
 private:
-    const Polygons &outline; //<! A reference to the outline polygon that is the designated area
-    coord_t bead_width_0;    //<! The nominal or first extrusion line width with which libArachne generates its walls
+    // Owned copy of the designated outline area. The constructor may receive a
+    // temporary, so the instance must not keep a reference to caller storage.
+    Polygons outline;
+    coord_t bead_width_0; //<! The nominal or first extrusion line width with which libArachne generates its walls
     coord_t
         bead_width_x; //<! The subsequently extrusion line width with which libArachne generates its walls if WallToolPaths was called with the nominal_bead_width Constructor this is the same as bead_width_0
     size_t inset_count; //<! The maximum number of walls to generate

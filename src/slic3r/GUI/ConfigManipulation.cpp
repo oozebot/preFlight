@@ -462,8 +462,10 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig *config, con
         double warn_max_pct = warn_max_opt ? warn_max_opt->get_at(extruder_idx) : 150.0;
         double min_width = nozzle_diam * warn_min_pct / 100.0;
         double max_width = nozzle_diam * warn_max_pct / 100.0;
-        bool is_too_narrow = width_mm < min_width - 0.001;
-        bool is_too_wide = width_mm > max_width + 0.001;
+        // Same 1e-5 mm tolerance as the slicing-time generated-width check: absorbs arithmetic
+        // noise at exact equality without swallowing sub-percent threshold margins.
+        bool is_too_narrow = width_mm < min_width - 1e-5;
+        bool is_too_wide = width_mm > max_width + 1e-5;
 
         if (!is_too_narrow && !is_too_wide)
         {
@@ -667,8 +669,9 @@ void ConfigManipulation::update_print_fff_config(DynamicPrintConfig *config, con
     }
 
     if (config->opt_bool("wipe_tower") && config->opt_bool("support_material") &&
-        // Organic supports are always synchronized with object layers as of now.
-        config->opt_enum<SupportMaterialStyle>("support_material_style") != smsOrganic)
+        // Organic and Baobab supports are always synchronized with object layers as of now.
+        config->opt_enum<SupportMaterialStyle>("support_material_style") != smsOrganic &&
+        config->opt_enum<SupportMaterialStyle>("support_material_style") != smsBaobab)
     {
         // preFlight: Removed soluble-support synchronize_layers dialog.
         // preFlight always syncs sparse support layers to object layer heights;
@@ -885,11 +888,22 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config)
     toggle_field("serpentine_extrusion_width", serpentine_enabled);
     toggle_field("serpentine_overlap", serpentine_enabled);
     toggle_field("serpentine_max_bead", serpentine_enabled);
-    toggle_field("serpentine_limit_depth", serpentine_enabled);
-    toggle_field("serpentine_depth", serpentine_enabled && config->opt_bool("serpentine_limit_depth"));
+    // Relaxed spacing overrides the depth limit; only relaxed stays live when both
+    // are ticked so the user can always untick it to get the depth options back.
+    bool serpentine_relaxed = serpentine_enabled && config->opt_bool("serpentine_relaxed");
+    toggle_field("serpentine_relaxed", serpentine_enabled);
+    toggle_field("serpentine_spacing", serpentine_relaxed);
+    toggle_field("serpentine_outer_loop", serpentine_enabled);
+    toggle_field("serpentine_limit_depth", serpentine_enabled && !serpentine_relaxed);
+    toggle_field("serpentine_depth",
+                 serpentine_enabled && !serpentine_relaxed && config->opt_bool("serpentine_limit_depth"));
     toggle_field("serpentine_solid_surfaces", serpentine_enabled);
-    toggle_field("serpentine_ridges", serpentine_enabled);
-    toggle_field("serpentine_aim", serpentine_enabled && config->opt_bool("serpentine_limit_depth"));
+    // The outer loop re-anchors the whole grid to the host rib, so ridging is
+    // forced aligned there too (the seam must stack into one column).
+    toggle_field("serpentine_ridges",
+                 serpentine_enabled && !serpentine_relaxed && !config->opt_bool("serpentine_outer_loop"));
+    toggle_field("serpentine_aim",
+                 serpentine_enabled && !serpentine_relaxed && config->opt_bool("serpentine_limit_depth"));
 
     toggle_field("interlock_perimeters_enabled", !has_spiral_vase);
     bool interlock_enabled = config->opt_bool("interlock_perimeters_enabled");
@@ -951,6 +965,9 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config)
                     "support_material_angle", "support_material_interface_pattern", "support_material_interface_layers",
                     "dont_support_bridges", "support_material_contact_distance", "support_material_xy_spacing"})
         toggle_field(el, have_support_material);
+    // Auto-support options: painted regions carry their engine and coverage in the paint
+    // itself, and buildplate-only is likewise scoped to auto supports per its tooltip. Painted
+    // Baobab gets its own on-model option when its UI settings land.
     toggle_field("support_material_style", have_support_material_auto);
     toggle_field("support_material_threshold", have_support_material_auto);
     toggle_field("support_material_buildplate_only", have_support_material_auto);
@@ -981,6 +998,17 @@ void ConfigManipulation::toggle_print_fff_options(DynamicPrintConfig *config)
           "support_tree_branch_diameter_angle", "support_tree_branch_diameter_double_wall", "support_tree_tip_diameter",
           "support_tree_branch_distance", "support_tree_top_rate"})
         toggle_field(key, has_organic_supports);
+
+    // Paint-on supports can likewise use Baobab regardless of the Style dropdown setting.
+    const bool has_baobab_supports = has_organic_supports;
+    for (const std::string &key : {"support_baobab_angle", "support_baobab_angle_slow", "support_baobab_trunk_diameter",
+                                   "support_baobab_trunk_diameter_angle", "support_baobab_trunk_distance",
+                                   "support_baobab_canopy_density", "support_baobab_max_canopy_angle"})
+        toggle_field(key, has_baobab_supports);
+    // Planting contradicts an active "build plate only": grey it while both would apply.
+    const bool buildplate_only_active = have_support_material_auto &&
+                                        config->opt_bool("support_material_buildplate_only");
+    toggle_field("support_baobab_plant_on_model", has_baobab_supports && !buildplate_only_active);
 
     for (auto el : {"support_material_bottom_interface_layers", "support_material_interface_spacing",
                     "support_material_interface_extruder", "support_material_interface_contact_loops"})

@@ -14,6 +14,7 @@
 #include "libslic3r/ExtrusionEntity.hpp"
 #include "libslic3r/ExtrusionEntityCollection.hpp"
 #include "libslic3r/ExtrusionRole.hpp"
+#include "libslic3r/DebugOutput.hpp"
 #include "libslic3r/GCode/WipeTowerIntegration.hpp"
 #include "libslic3r/Geometry/ArcWelder.hpp"
 #include "libslic3r/LayerRegion.hpp"
@@ -113,6 +114,8 @@ ExtrusionEntitiesPtr extract_infill_extrusions(const PrintRegion &region, const 
     return result;
 }
 
+std::optional<Geometry::ArcWelder::Segment> get_first_point(const SmoothPath &path);
+
 std::vector<Perimeter> extract_perimeter_extrusions(const Print &print, const Layer &layer, const LayerIsland &island,
                                                     const ExtractEntityPredicate &should_pick_extrusion,
                                                     const unsigned extruder_id, const Point &offset,
@@ -135,25 +138,122 @@ std::vector<Perimeter> extract_perimeter_extrusions(const Print &print, const La
             continue;
         }
 
-        for (ExtrusionEntity *ee : *eec)
+        // An extra overhang perimeter ring: a raw, exactly closed path preceding the island's
+        // loops, with a seam baked in at slicing time.
+        auto as_extra_ring = [](ExtrusionEntity *e) -> ExtrusionPath *
         {
-            if (ee != nullptr)
+            auto *p = dynamic_cast<ExtrusionPath *>(e);
+            return (p != nullptr && p->role() == ExtrusionRole::OverhangPerimeter && p->polyline.size() > 3 &&
+                    p->first_point() == p->last_point())
+                       ? p
+                       : nullptr;
+        };
+
+        // Single-entity processing, shared by the generic flow and by entities that sit between
+        // an extras run and its seam-authority loop.
+        auto process_entity = [&](ExtrusionEntity *entity)
+        {
+            std::optional<InstancePoint> last_position{get_instance_point(previous_position, offset)};
+            bool reverse_loop{false};
+            if (auto loop = dynamic_cast<const ExtrusionLoop *>(entity))
             {
-                std::optional<InstancePoint> last_position{get_instance_point(previous_position, offset)};
-                bool reverse_loop{false};
-                if (auto loop = dynamic_cast<const ExtrusionLoop *>(ee))
-                {
-                    const bool is_hole = loop->is_clockwise();
-                    reverse_loop = print.config().prefer_clockwise_movements ? !is_hole : is_hole;
-                }
-                auto [path, wipe_offset]{smooth_path(&layer, &region, ExtrusionEntityReference{*ee, reverse_loop},
-                                                     extruder_id, last_position)};
-                previous_position = get_gcode_point(last_position, offset);
-                if (!path.empty())
-                {
-                    result.push_back(Perimeter{std::move(path), reverse_loop, ee, wipe_offset});
-                }
+                const bool is_hole = loop->is_clockwise();
+                reverse_loop = print.config().prefer_clockwise_movements ? !is_hole : is_hole;
             }
+            auto [path, wipe_offset]{smooth_path(&layer, &region, ExtrusionEntityReference{*entity, reverse_loop},
+                                                 extruder_id, last_position)};
+            previous_position = get_gcode_point(last_position, offset);
+            if (!path.empty())
+            {
+                result.push_back(Perimeter{std::move(path), reverse_loop, entity, wipe_offset});
+            }
+        };
+
+        const ExtrusionEntitiesPtr &entities = eec->entities;
+        for (size_t entity_idx = 0; entity_idx < entities.size(); ++entity_idx)
+        {
+            ExtrusionEntity *ee = entities[entity_idx];
+            if (ee == nullptr)
+                continue;
+
+            // A run of extra overhang rings: smooth the island's first following loop early so
+            // the seam placer chooses its seam undisturbed, then rotate every ring in the run to
+            // start at its vertex nearest that seam. The stack and its perimeter then share one
+            // seam position and print without intermediate travels. Entities between the run and
+            // the loop (thin walls and similar) keep their order and normal processing.
+            if (as_extra_ring(ee) != nullptr)
+            {
+                size_t run_end = entity_idx;
+                while (run_end < entities.size() && as_extra_ring(entities[run_end]) != nullptr)
+                    ++run_end;
+                size_t loop_idx = run_end;
+                while (loop_idx < entities.size() && dynamic_cast<ExtrusionLoop *>(entities[loop_idx]) == nullptr)
+                    ++loop_idx;
+                if (loop_idx < entities.size())
+                {
+                    auto *following_loop = static_cast<ExtrusionLoop *>(entities[loop_idx]);
+                    const bool loop_is_hole = following_loop->is_clockwise();
+                    const bool reverse_loop = print.config().prefer_clockwise_movements ? !loop_is_hole : loop_is_hole;
+                    std::optional<InstancePoint> loop_last{get_instance_point(previous_position, offset)};
+                    auto [loop_path, loop_wipe_offset]{
+                        smooth_path(&layer, &region, ExtrusionEntityReference{*following_loop, reverse_loop},
+                                    extruder_id, loop_last)};
+                    if (std::optional<Geometry::ArcWelder::Segment> seam = get_first_point(loop_path); seam)
+                    {
+                        const double fit_resolution = scaled<double>(print.config().gcode_resolution.value);
+                        for (size_t k = entity_idx; k < run_end; ++k)
+                        {
+                            ExtrusionPath *ring = as_extra_ring(entities[k]);
+                            // Rotate a local copy: the stored entity stays untouched, so object
+                            // instances, re-export and the address-keyed smooth-path cache need
+                            // no reasoning about mutation.
+                            Points pts(ring->polyline.points.begin(), std::prev(ring->polyline.points.end()));
+                            size_t seam_idx = 0;
+                            double min_dist2 = std::numeric_limits<double>::max();
+                            for (size_t i = 0; i < pts.size(); ++i)
+                                if (double d2 = (pts[i] - seam->point).cast<double>().squaredNorm(); d2 < min_dist2)
+                                {
+                                    min_dist2 = d2;
+                                    seam_idx = i;
+                                }
+                            std::rotate(pts.begin(), pts.begin() + seam_idx, pts.end());
+                            pts.push_back(pts.front());
+
+                            // fit_polyline emits line segments only; it matches the smooth-path
+                            // cache because arc output is disabled. If arc output is ever
+                            // enabled, rotated rings must gain arc fitting as well.
+                            SmoothPath ring_path{
+                                SmoothPathElement{ring->attributes(),
+                                                  Geometry::ArcWelder::fit_polyline(pts, fit_resolution)}};
+                            if (!ring_path.front().path.empty())
+                            {
+                                previous_position = get_gcode_point(InstancePoint{ring_path.front().path.back().point},
+                                                                    offset);
+                                result.push_back(Perimeter{std::move(ring_path), false, ring, std::size_t{0}});
+                            }
+                        }
+                        for (size_t k = run_end; k < loop_idx; ++k)
+                            if (entities[k] != nullptr)
+                                process_entity(entities[k]);
+                        previous_position = get_gcode_point(loop_last, offset);
+                        if (!loop_path.empty())
+                            result.push_back(
+                                Perimeter{std::move(loop_path), reverse_loop, following_loop, loop_wipe_offset});
+                        entity_idx = loop_idx;
+                        continue;
+                    }
+                }
+                // Fallback: the run keeps its slicing-time seams and generic processing.
+                dbg_log(DBG_PERIMETERS, layer.print_z, "EXTRAP", "rej reason=%s rings=%zu",
+                        loop_idx < entities.size() ? "empty_loop_path" : "no_following_loop", run_end - entity_idx);
+                for (size_t k = entity_idx; k < run_end; ++k)
+                    if (entities[k] != nullptr)
+                        process_entity(entities[k]);
+                entity_idx = run_end - 1;
+                continue;
+            }
+
+            process_entity(ee);
         }
     }
 

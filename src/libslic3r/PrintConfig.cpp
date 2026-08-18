@@ -220,10 +220,8 @@ static const t_config_enum_values s_keys_map_SupportMaterialPattern{{"rectilinea
                                                                     {"honeycomb", smpHoneycomb}};
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SupportMaterialPattern)
 
-static const t_config_enum_values s_keys_map_SupportMaterialStyle{{"grid", smsGrid},
-                                                                  {"snug", smsSnug},
-                                                                  {"tree", smsTree},
-                                                                  {"organic", smsOrganic}};
+static const t_config_enum_values s_keys_map_SupportMaterialStyle{
+    {"grid", smsGrid}, {"snug", smsSnug}, {"tree", smsTree}, {"organic", smsOrganic}, {"baobab", smsBaobab}};
 CONFIG_OPTION_ENUM_DEFINE_STATIC_MAPS(SupportMaterialStyle)
 
 static const t_config_enum_values s_keys_map_SupportMaterialInterfacePattern{{"auto", smipAuto},
@@ -2361,13 +2359,13 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionEnum<PerimeterCompression>(pcAggressive));
 
     def = this->add("max_perimeter_width", coPercent);
-    def->label = L("Maximum perimeter width");
+    def->label = L("Maximum width");
     def->category = L("Layers and Perimeters");
-    def->tooltip = L("Controls when thin walls split from one bead into two. When a wall is too wide "
-                     "for one perimeter but too narrow for two, Athena can either stretch a single bead "
-                     "or split into a pair. Beads will never exceed this limit - if the wall is wider, "
-                     "Athena splits into two beads instead. Lower values split sooner; higher values "
-                     "allow wider single beads. This setting only applies to the Athena perimeter generator.");
+    def->tooltip = L("Bead width ceiling for Athena-generated walls and fills, as a percentage of the "
+                     "nozzle diameter. When a wall is too wide for one bead, Athena stretches a single "
+                     "bead up to this limit and splits into two beads beyond it. Lower values split "
+                     "sooner; higher values allow wider single beads. The ceiling never reduces walls "
+                     "below the configured extrusion widths.");
     def->sidetext = L("%");
     def->min = 100;
     def->mode = comAdvanced;
@@ -3310,7 +3308,9 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("nozzle_width_warning_min", coPercents);
     def->label = L("Width warning min");
-    def->tooltip = L("Warn when any extrusion width falls below this percentage of the nozzle diameter.");
+    def->tooltip = L("Warn while editing when a configured extrusion width falls below this percentage of "
+                     "the nozzle diameter. Generated beads such as gap fill and thin walls are narrower "
+                     "by design and are not checked.");
     def->sidetext = L("%");
     def->min = 33;
     def->max = 500;
@@ -3318,7 +3318,12 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("nozzle_width_warning_max", coPercents);
     def->label = L("Width warning max");
-    def->tooltip = L("Warn when any extrusion width exceeds this percentage of the nozzle diameter.");
+    def->tooltip = L("Warn when an extrusion width exceeds this percentage of the nozzle diameter: "
+                     "configured values are checked while editing, and generated wall and fill widths "
+                     "are checked as they are produced while slicing. Support, skirt, brim and wipe "
+                     "tower widths are not checked. Set it to the widest bead the nozzle can properly "
+                     "iron down. Interlocking perimeters are exempt: their wide bonding beads are "
+                     "intentional.");
     def->sidetext = L("%");
     def->min = 33;
     def->max = 500;
@@ -3510,6 +3515,44 @@ void PrintConfigDef::init_fff_params()
     def->min = 100;
     def->max = 250;
     def->set_default_value(new ConfigOptionPercent(150));
+
+    def = this->add("serpentine_relaxed", coBool);
+    def->label = L("Relaxed spacing");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Space the serpentine teeth apart instead of packing them tightly: the bead follows "
+                     "the wall cleanly for the distance set below, then turns inward as a single solid rib "
+                     "and returns to the wall, like spokes on a wheel. The spacing acts as a fill density "
+                     "control while the part keeps one continuous bead and a single-bead wall.\n\n"
+                     "Ribs stack vertically into continuous webs (the Ridges setting is ignored) and holes "
+                     "print as plain single-bead loops. The interior stays mostly open, so this suits "
+                     "open-top parts; solid top surfaces cannot bridge the cells. Overrides the depth "
+                     "limit when both are enabled.");
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("serpentine_spacing", coFloat);
+    def->label = L("Rib spacing");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Distance the bead follows the wall between ribs when Relaxed spacing is enabled. "
+                     "Ribs march from the seam at exactly this spacing in both directions; the leftover "
+                     "is absorbed by one wider or narrower cell on the far side, so rib columns stack "
+                     "into unbroken vertical webs even on tapered parts. Smaller values pack more ribs "
+                     "(denser fill); values below about two extrusion widths are floored to the classic "
+                     "dense pitch.");
+    def->sidetext = L("mm");
+    def->min = 0.5;
+    def->set_default_value(new ConfigOptionFloat(10));
+
+    def = this->add("serpentine_outer_loop", coBool);
+    def->label = L("Outer surface loop");
+    def->category = L("Layers and Perimeters");
+    def->tooltip = L("Wraps one continuous perimeter around the outside of the serpentine pattern and "
+                     "moves the tooth-carrying wall just inside it, bonded to it. The tooth openings then "
+                     "interrupt only the hidden inner wall, so the outer surface is a single uninterrupted "
+                     "bead: the extrusion snakes out through one widened tooth, loops the whole object, and "
+                     "snakes back in, leaving a single seam-like crossover. The pattern stacks aligned so "
+                     "the seam forms one vertical column (the Ridges setting is ignored). Works at both "
+                     "classic and relaxed spacing.");
+    def->set_default_value(new ConfigOptionBool(false));
 
     def = this->add("serpentine_limit_depth", coBool);
     def->label = L("Limit Serpentine depth");
@@ -4788,9 +4831,9 @@ void PrintConfigDef::init_fff_params()
         "Style and shape of the support towers for auto-generated supports. Projecting the supports into a regular grid "
         "will create more stable supports, while snug support towers will save material and reduce "
         "object scarring. Note: This setting only affects auto-generated supports. Paint-on supports "
-        "specify their own type (Blocker/Snug/Grid/Organic) and will override this setting in painted regions.");
+        "specify their own type (Blocker/Snug/Grid/Organic/Baobab) and will override this setting in painted regions.");
     def->set_enum<SupportMaterialStyle>(std::initializer_list<std::pair<std::string_view, std::string_view>>{
-        {"grid", L("Grid")}, {"snug", L("Snug")}, {"organic", L("Organic")}});
+        {"grid", L("Grid")}, {"snug", L("Snug")}, {"organic", L("Organic")}, {"baobab", L("Baobab")}});
     def->mode = comAdvanced;
     def->width = 8;
     def->set_default_value(new ConfigOptionEnum<SupportMaterialStyle>(smsGrid));
@@ -4827,10 +4870,103 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert;
     def->set_default_value(new ConfigOptionBool(true));
 
-    def = this->add("support_tree_angle", coFloat);
-    def->label = L("Maximum Branch Angle");
+    def = this->add("support_baobab_angle", coFloat);
+    def->label = L("Maximum trunk angle");
     def->category = L("Support material");
-    // TRN PrintSettings: "Organic supports" > "Maximum Branch Angle"
+    // TRN PrintSettings: "Baobab supports" > "Maximum trunk angle"
+    def->tooltip = L(
+        "The maximum angle of the trunks, from vertical, when they have to avoid the model. "
+        "Use a lower angle to make them more vertical and more stable. Use a higher angle to be able to have more reach.");
+    def->sidetext = L("°");
+    def->min = 0;
+    def->max = 85;
+    def->set_default_value(new ConfigOptionFloat(40));
+
+    def = this->add("support_baobab_angle_slow", coFloat);
+    def->label = L("Preferred trunk angle");
+    def->category = L("Support material");
+    // TRN PrintSettings: "Baobab supports" > "Preferred trunk angle"
+    def->tooltip = L(
+        "The preferred angle of the trunks when they do not have to avoid the model. "
+        "Use a lower angle to make them more vertical and more stable. Use a higher angle for trunks to merge faster.");
+    def->sidetext = L("°");
+    def->min = 10;
+    def->max = 85;
+    def->set_default_value(new ConfigOptionFloat(25));
+
+    def = this->add("support_baobab_canopy_density", coPercent);
+    def->label = L("Canopy density");
+    def->category = L("Support material");
+    // TRN PrintSettings: "Baobab supports" > "Canopy density"
+    def->tooltip = L(
+        "Density of the lightning fill inside a Baobab support's canopy. The fill carries the support interface "
+        "across the canopy's mouth. A higher value gives the interface more to land on but uses more material and time.");
+    def->sidetext = L("%");
+    def->min = 5;
+    def->max = 100;
+    def->set_default_value(new ConfigOptionPercent(33));
+
+    def = this->add("support_baobab_max_canopy_angle", coFloat);
+    def->label = L("Maximum canopy angle");
+    def->category = L("Support material");
+    // TRN PrintSettings: "Baobab supports" > "Maximum canopy angle"
+    def->tooltip = L(
+        "The maximum angle, from vertical, at which a Baobab support's canopy tapers down onto its trunk. "
+        "A higher angle reaches the trunk sooner and makes a shallower canopy. It is reduced automatically "
+        "where a layer would grow outward by more than half the support extrusion width, and where a "
+        "leaning trunk already spends part of that allowance.");
+    def->sidetext = L("°");
+    def->min = 0;
+    def->max = 85;
+    def->set_default_value(new ConfigOptionFloat(40));
+
+    def = this->add("support_baobab_plant_on_model", coBool);
+    def->label = L("Plant trunks on object");
+    def->category = L("Support material");
+    // TRN PrintSettings: "Baobab supports" > "Plant trunks on object"
+    def->tooltip = L(
+        "Allow trunks to land on stable top surfaces of the object instead of always descending to the build plate. "
+        "A surface qualifies when it is wide enough for the whole foot and backed by solid material beneath it.");
+    def->set_default_value(new ConfigOptionBool(false));
+
+    def = this->add("support_baobab_trunk_diameter", coFloat);
+    def->label = L("Trunk diameter");
+    def->category = L("Support material");
+    // TRN PrintSettings: "Baobab supports" > "Trunk diameter"
+    def->tooltip = L("The diameter of the thinnest trunks. Thicker trunks are more sturdy. "
+                     "Trunks towards the base will be thicker than this.");
+    def->sidetext = L("mm");
+    def->min = 0.1f;
+    def->max = 100.f;
+    def->set_default_value(new ConfigOptionFloat(4));
+
+    def = this->add("support_baobab_trunk_diameter_angle", coFloat);
+    def->label = L("Trunk diameter angle");
+    def->category = L("Support material");
+    // TRN PrintSettings: "Baobab supports" > "Trunk diameter angle"
+    def->tooltip = L("The angle of the trunks' diameter as they gradually become thicker towards the bottom. "
+                     "An angle of 0 will cause the trunks to have uniform thickness over their length. "
+                     "A bit of an angle can increase stability.");
+    def->sidetext = L("°");
+    def->min = 0;
+    def->max = 15;
+    def->set_default_value(new ConfigOptionFloat(5));
+
+    def = this->add("support_baobab_trunk_distance", coFloat);
+    def->label = L("Trunk distance");
+    def->category = L("Support material");
+    // TRN PrintSettings: "Baobab supports" > "Trunk distance"
+    def->tooltip = L("How much interface area a single trunk gathers: seeds closer than this distance share a trunk, "
+                     "and each canopy reaches this far from its trunk to cover its share of the interface.");
+    def->sidetext = L("mm");
+    def->min = 1;
+    def->max = 100.f;
+    def->set_default_value(new ConfigOptionFloat(8));
+
+    def = this->add("support_tree_angle", coFloat);
+    def->label = L("Maximum branch angle");
+    def->category = L("Support material");
+    // TRN PrintSettings: "Organic supports" > "Maximum branch angle"
     def->tooltip = L(
         "The maximum angle of the branches, when the branches have to avoid the model. "
         "Use a lower angle to make them more vertical and more stable. Use a higher angle to be able to have more reach.");
@@ -4841,9 +4977,9 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloat(40));
 
     def = this->add("support_tree_angle_slow", coFloat);
-    def->label = L("Preferred Branch Angle");
+    def->label = L("Preferred branch angle");
     def->category = L("Support material");
-    // TRN PrintSettings: "Organic supports" > "Preferred Branch Angle"
+    // TRN PrintSettings: "Organic supports" > "Preferred branch angle"
     def->tooltip = L(
         "The preferred angle of the branches, when they do not have to avoid the model. "
         "Use a lower angle to make them more vertical and more stable. Use a higher angle for branches to merge faster.");
@@ -4854,9 +4990,9 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloat(25));
 
     def = this->add("support_tree_tip_diameter", coFloat);
-    def->label = L("Tip Diameter");
+    def->label = L("Tip diameter");
     def->category = L("Support material");
-    // TRN PrintSettings: "Organic supports" > "Tip Diameter"
+    // TRN PrintSettings: "Organic supports" > "Tip diameter"
     def->tooltip = L("Branch tip diameter for organic supports.");
     def->sidetext = L("mm");
     def->min = 0.1f;
@@ -4865,9 +5001,9 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloat(0.8));
 
     def = this->add("support_tree_branch_diameter", coFloat);
-    def->label = L("Branch Diameter");
+    def->label = L("Branch diameter");
     def->category = L("Support material");
-    // TRN PrintSettings: "Organic supports" > "Branch Diameter"
+    // TRN PrintSettings: "Organic supports" > "Branch diameter"
     def->tooltip = L("The diameter of the thinnest branches of organic support. Thicker branches are more sturdy. "
                      "Branches towards the base will be thicker than this.");
     def->sidetext = L("mm");
@@ -4878,9 +5014,9 @@ void PrintConfigDef::init_fff_params()
 
     def = this->add("support_tree_branch_diameter_angle", coFloat);
     // TRN PrintSettings: #lmFIXME
-    def->label = L("Branch Diameter Angle");
+    def->label = L("Branch diameter angle");
     def->category = L("Support material");
-    // TRN PrintSettings: "Organic supports" > "Branch Diameter Angle"
+    // TRN PrintSettings: "Organic supports" > "Branch diameter angle"
     def->tooltip = L("The angle of the branches' diameter as they gradually become thicker towards the bottom. "
                      "An angle of 0 will cause the branches to have uniform thickness over their length. "
                      "A bit of an angle can increase stability of the organic support.");
@@ -4891,9 +5027,9 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloat(5));
 
     def = this->add("support_tree_branch_diameter_double_wall", coFloat);
-    def->label = L("Branch Diameter with double walls");
+    def->label = L("Branch diameter with double walls");
     def->category = L("Support material");
-    // TRN PrintSettings: "Organic supports" > "Branch Diameter"
+    // TRN PrintSettings: "Organic supports" > "Branch diameter"
     def->tooltip = L(
         "Branches with area larger than the area of a circle of this diameter will be printed with double walls for stability. "
         "Set this value to zero for no double walls.");
@@ -4903,14 +5039,14 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloat(3));
 
-    // Tree Support Branch Distance
+    // Tree Support Branch distance
     // How far apart the branches need to be when they touch the model. Making this distance small will cause
     // the tree support to touch the model at more points, causing better overhang but making support harder to remove.
     def = this->add("support_tree_branch_distance", coFloat);
     // TRN PrintSettings: #lmFIXME
-    def->label = L("Branch Distance");
+    def->label = L("Branch distance");
     def->category = L("Support material");
-    // TRN PrintSettings: "Organic supports" > "Branch Distance"
+    // TRN PrintSettings: "Organic supports" > "Branch distance"
     def->tooltip = L("How far apart the branches need to be when they touch the model. "
                      "Making this distance small will cause the tree support to touch the model at more points, "
                      "causing better overhang but making support harder to remove.");
@@ -4918,9 +5054,9 @@ void PrintConfigDef::init_fff_params()
     def->set_default_value(new ConfigOptionFloat(1.));
 
     def = this->add("support_tree_top_rate", coPercent);
-    def->label = L("Branch Density");
+    def->label = L("Branch density");
     def->category = L("Support material");
-    // TRN PrintSettings: "Organic supports" > "Branch Density"
+    // TRN PrintSettings: "Organic supports" > "Branch density"
     def->tooltip = L("Adjusts the density of the support structure used to generate the tips of the branches. "
                      "A higher value results in better overhangs but the supports are harder to remove, "
                      "thus it is recommended to enable top support interfaces instead of a high branch density value "
@@ -7711,8 +7847,10 @@ CLIMiscConfigDef::CLIMiscConfigDef()
 
     def = this->add("debug", coString);
     def->label = L("Debug output categories");
-    def->tooltip = L("Emit diagnostic output to stdout for the given comma-separated categories: "
-                     "fill, perimeters, interlock, serpentine, or all. Example: --debug serpentine,fill");
+    // Developer-facing diagnostic switch; deliberately not translated.
+    def->tooltip = "Emit diagnostic output to stdout for the given comma-separated categories: "
+                   "fill, perimeters, interlock, serpentine, baobab, support, stability, or all. Example: --debug "
+                   "serpentine,fill";
     def->cli = "debug";
     def->set_default_value(new ConfigOptionString());
 

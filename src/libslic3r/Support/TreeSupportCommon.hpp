@@ -20,12 +20,15 @@
 #include <stddef.h>
 #include <string_view>
 #include <algorithm>
+#include <atomic>
+#include <memory>
 #include <mutex>
 #include <utility>
 #include <vector>
 #include <cassert>
 #include <cmath>
 #include <cstddef>
+#include <cstdint>
 
 #include "libslic3r/libslic3r.h"
 #include "libslic3r/Polygon.hpp"
@@ -174,20 +177,27 @@ struct TreeSupportMeshGroupSettings
     /* Parameters for the Cura tree supports implementation:             */
     /*********************************************************************/
 
-    // Tree Support Maximum Branch Angle
+    // Baobab Maximum canopy angle
+    // The maximum angle, from vertical, at which a canopy tapers down onto its trunk. The bead
+    // rule and a leaning trunk may both reduce it further; see baobab_taper_angle_rad().
+    double support_baobab_max_canopy_angle{40. * M_PI / 180.};
+    // Baobab: plant trunks on stable top surfaces of the model instead of always descending to
+    // the plate. Set only by baobab_apply_tree_settings(), so non-baobab organic never plants.
+    bool support_baobab_plant_on_model{false};
+    // Tree Support Maximum branch angle
     // The maximum angle of the branches, when the branches have to avoid the model. Use a lower angle to make them more vertical and more stable. Use a higher angle to be able to have more reach.
     // minimum: 0, minimum warning: 20, maximum: 89, maximum warning": 85
     double support_tree_angle{60. * M_PI / 180.};
-    // Tree Support Branch Diameter Angle
+    // Tree Support Branch diameter angle
     // The angle of the branches' diameter as they gradually become thicker towards the bottom. An angle of 0 will cause the branches to have uniform thickness over their length.
     // A bit of an angle can increase stability of the tree support.
     // minimum: 0, maximum: 89.9999, maximum warning: 15
     double support_tree_branch_diameter_angle{5. * M_PI / 180.};
-    // Tree Support Branch Distance
+    // Tree Support Branch distance
     // How far apart the branches need to be when they touch the model. Making this distance small will cause
     // the tree support to touch the model at more points, causing better overhang but making support harder to remove.
     coord_t support_tree_branch_distance{scaled<coord_t>(1.)};
-    // Tree Support Branch Diameter
+    // Tree Support Branch diameter
     // The diameter of the thinnest branches of tree support. Thicker branches are more sturdy. Branches towards the base will be thicker than this.
     // minimum: 0.001, minimum warning: support_line_width * 2
     coord_t support_tree_branch_diameter{scaled<coord_t>(2.)};
@@ -196,7 +206,7 @@ struct TreeSupportMeshGroupSettings
     /* Parameters new to the Thomas Rahm's tree supports implementation: */
     /*********************************************************************/
 
-    // Tree Support Preferred Branch Angle
+    // Tree Support Preferred branch angle
     // The preferred angle of the branches, when they do not have to avoid the model. Use a lower angle to make them more vertical and more stable. Use a higher angle for branches to merge faster.
     // minimum: 0, minimum warning: 10, maximum: support_tree_angle, maximum warning: support_tree_angle-1
     double support_tree_angle_slow{50. * M_PI / 180.};
@@ -213,7 +223,7 @@ struct TreeSupportMeshGroupSettings
     // Diameter every branch tries to achieve when reaching the buildplate. Improves bed adhesion.
     // minimum: 0, maximum warning: 20
     coord_t support_tree_bp_diameter{scaled<coord_t>(7.5)};
-    // Tree Support Branch Density
+    // Tree Support Branch density
     // Adjusts the density of the support structure used to generate the tips of the branches. A higher value results in better overhangs,
     // but the supports are harder to remove. Use Support Roof for very high values or ensure support density is similarly high at the top.
     // ->
@@ -222,7 +232,7 @@ struct TreeSupportMeshGroupSettings
     // instead of a high branch density value if dense interfaces are needed.
     // 5%-35%
     double support_tree_top_rate{15.};
-    // Tree Support Tip Diameter
+    // Tree Support Tip diameter
     // The diameter of the top of the tip of the branches of tree support.
     // minimum: min_wall_line_width, minimum warning: min_wall_line_width+0.05, maximum_value: support_tree_branch_diameter, value: support_line_width
     coord_t support_tree_tip_diameter{scaled<coord_t>(0.4)};
@@ -241,7 +251,7 @@ public:
     TreeSupportSettings() =
         default; // required for the definition of the config variable in the TreeSupportGenerator class.
     explicit TreeSupportSettings(const TreeSupportMeshGroupSettings &mesh_group_settings,
-                                 const SlicingParameters &slicing_params);
+                                 const SlicingParameters &slicing_params, const PrintObject *print_object = nullptr);
 
     // some static variables dependent on other meshes that are not currently processed.
     // Has to be static because TreeSupportConfig will be used in TreeModelVolumes as this reduces redundancy.
@@ -389,6 +399,31 @@ public:
     // Extra raft layers below the object.
     std::vector<coordf_t> raft_layers;
 
+    // Print z of every support layer above the raft. Built by the object's own layer generator at a
+    // fixed layer height, so it carries the whole-millimetre snapping object layers get. With no
+    // variable layer height profile this is the object's layer stack; with one, the object leaves
+    // this grid and the supports stay on it, printing as they would with the profile switched off.
+    std::vector<coordf_t> support_layer_zs;
+
+    // Once the two stacks differ, every input the engine reads per object layer has to be carried
+    // across by height. object_layer_of[support layer] is the object layer covering that height,
+    // support_layer_of[object layer] is the support layer at that object layer's height. Both are
+    // the identity when the layer height is fixed.
+    std::vector<size_t> object_layer_of;
+    std::vector<size_t> support_layer_of;
+
+    // Print z of the object surface resting on each support layer: the bottom of the object layer
+    // covering that height. Contacts anchor to this instead of the support grid, so the air gap
+    // stays the requested distance instead of picking up whatever the two stacks happen to differ
+    // by. At a fixed layer height every entry equals the grid layer below, so anchoring here moves
+    // nothing.
+    std::vector<coordf_t> object_bottom_z_of;
+
+    // True when the object's layers sit exactly on the support grid, i.e. no variable layer
+    // height profile is in effect. Every cross-walk remap is an identity copy then and is skipped
+    // outright, so a fixed-height slice structurally cannot be altered by the remapping code.
+    bool grid_matches_object = false;
+
 public:
     bool operator==(const TreeSupportSettings &other) const
     {
@@ -443,7 +478,7 @@ public:
                          settings.get<int>("meshfix_maximum_extrusion_area_deviation") == other.settings.get<int>("meshfix_maximum_extrusion_area_deviation"))
                     )
 #endif
-               && raft_layers == other.raft_layers;
+               && raft_layers == other.raft_layers && support_layer_zs == other.support_layer_zs;
     }
 
     /*!
@@ -508,28 +543,53 @@ void tree_supports_show_error(std::string_view message, bool critical);
 inline double layer_z(const SlicingParameters &slicing_params, const TreeSupportSettings &config,
                       const size_t layer_idx)
 {
-    return layer_idx >= config.raft_layers.size()
-               ? slicing_params.object_print_z_min + slicing_params.first_object_layer_height +
-                     (layer_idx - config.raft_layers.size()) * slicing_params.layer_height
-               : config.raft_layers[layer_idx];
+    if (layer_idx < config.raft_layers.size())
+        return config.raft_layers[layer_idx];
+    const size_t idx = layer_idx - config.raft_layers.size();
+    if (idx < config.support_layer_zs.size())
+        return config.support_layer_zs[idx];
+    if (config.support_layer_zs.empty())
+        return slicing_params.object_print_z_min + slicing_params.first_object_layer_height +
+               double(idx) * slicing_params.layer_height;
+    // Above the top of the object. Carry the grid on at the nominal height so callers that probe
+    // past the last layer still get a monotonic answer.
+    return config.support_layer_zs.back() +
+           double(idx + 1 - config.support_layer_zs.size()) * slicing_params.layer_height;
 }
-// Lowest collision layer
+// Lowest support layer whose print z reaches z. Above the grid top both helpers extrapolate from
+// the last grid layer at the nominal height, exactly as layer_z does, so the three functions stay
+// mutual inverses on and above a populated grid; with an empty grid all three fall back to the
+// same nominal ladder.
 inline LayerIndex layer_idx_ceil(const SlicingParameters &slicing_params, const TreeSupportSettings &config,
                                  const double z)
 {
-    return LayerIndex(config.raft_layers.size()) +
-           std::max<LayerIndex>(0, ceil((z - slicing_params.object_print_z_min -
-                                         slicing_params.first_object_layer_height) /
-                                        slicing_params.layer_height));
+    const auto &layers = config.support_layer_zs;
+    const auto it = std::lower_bound(layers.begin(), layers.end(), z - EPSILON);
+    if (it != layers.end())
+        return LayerIndex(config.raft_layers.size()) + LayerIndex(it - layers.begin());
+    if (layers.empty())
+        return LayerIndex(config.raft_layers.size()) +
+               std::max<LayerIndex>(0, LayerIndex(std::ceil((z - slicing_params.object_print_z_min -
+                                                             slicing_params.first_object_layer_height) /
+                                                            slicing_params.layer_height)));
+    return LayerIndex(config.raft_layers.size()) + LayerIndex(layers.size()) - 1 +
+           std::max<LayerIndex>(0, LayerIndex(std::ceil((z - EPSILON - layers.back()) / slicing_params.layer_height)));
 }
-// Highest collision layer
+// Highest support layer whose print z does not pass z.
 inline LayerIndex layer_idx_floor(const SlicingParameters &slicing_params, const TreeSupportSettings &config,
                                   const double z)
 {
-    return LayerIndex(config.raft_layers.size()) +
-           std::max<LayerIndex>(0, floor((z - slicing_params.object_print_z_min -
-                                          slicing_params.first_object_layer_height) /
-                                         slicing_params.layer_height));
+    const auto &layers = config.support_layer_zs;
+    const auto it = std::upper_bound(layers.begin(), layers.end(), z + EPSILON);
+    if (it != layers.end())
+        return LayerIndex(config.raft_layers.size()) + std::max<LayerIndex>(0, LayerIndex(it - layers.begin()) - 1);
+    if (layers.empty())
+        return LayerIndex(config.raft_layers.size()) +
+               std::max<LayerIndex>(0, LayerIndex(std::floor((z - slicing_params.object_print_z_min -
+                                                              slicing_params.first_object_layer_height) /
+                                                             slicing_params.layer_height)));
+    return LayerIndex(config.raft_layers.size()) + LayerIndex(layers.size()) - 1 +
+           std::max<LayerIndex>(0, LayerIndex(std::floor((z + EPSILON - layers.back()) / slicing_params.layer_height)));
 }
 
 inline SupportGeneratorLayer &layer_initialize(SupportGeneratorLayer &layer_new,
@@ -560,6 +620,29 @@ inline SupportGeneratorLayer &layer_allocate(SupportGeneratorLayerStorage &layer
     return layer_initialize(layer, slicing_params, config, layer_idx);
 }
 
+// Contact anchoring telemetry. One tally per tree support group, shared by every copy of the
+// InterfacePlacer so parallel tip placement and the raft contact land in the same counts.
+struct InterfaceAnchorStats
+{
+    std::atomic<size_t> anchor_object{0};          // layers anchored to an object surface
+    std::atomic<size_t> anchor_grid_fallback{0};   // layers anchored to the grid: no object table or read off its end
+    std::atomic<size_t> anchor_raft{0};            // raft contacts, grid-anchored by design
+    std::atomic<size_t> height_clamped_floor{0};   // interface heights raised to the minimum
+    std::atomic<size_t> height_clamped_ceiling{0}; // interface heights cut to the ceiling
+    std::atomic<int64_t> offset_up_max_um{0};      // farthest an anchor sat above its grid layer, micrometers
+    std::atomic<int64_t> offset_down_max_um{0};    // farthest an anchor sat below its grid layer, micrometers
+
+    void note_offset(const double offset_mm)
+    {
+        std::atomic<int64_t> &slot = offset_mm > 0. ? offset_up_max_um : offset_down_max_um;
+        const auto um = int64_t(std::abs(offset_mm) * 1000. + 0.5);
+        int64_t cur = slot.load(std::memory_order_relaxed);
+        while (um > cur && !slot.compare_exchange_weak(cur, um, std::memory_order_relaxed))
+        {
+        }
+    }
+};
+
 // Used by generate_initial_areas() in parallel by multiple layers.
 class InterfacePlacer
 {
@@ -571,6 +654,7 @@ public:
         : slicing_parameters(slicing_parameters)
         , support_parameters(support_parameters)
         , config(config)
+        , anchor_stats(std::make_shared<InterfaceAnchorStats>())
         , layer_storage(layer_storage)
         , top_contacts(top_contacts)
         , top_interfaces(top_interfaces)
@@ -581,6 +665,7 @@ public:
         : slicing_parameters(rhs.slicing_parameters)
         , support_parameters(rhs.support_parameters)
         , config(rhs.config)
+        , anchor_stats(rhs.anchor_stats)
         , layer_storage(rhs.layer_storage)
         , top_contacts(rhs.top_contacts)
         , top_interfaces(rhs.top_interfaces)
@@ -591,7 +676,26 @@ public:
     const SlicingParameters &slicing_parameters;
     const SupportParameters &support_parameters;
     const TreeSupportSettings &config;
+    // Shared across copies so one report covers the whole group.
+    const std::shared_ptr<InterfaceAnchorStats> anchor_stats;
     SupportGeneratorLayersPtr &top_contacts_mutable() { return this->top_contacts; }
+
+    // Print z of the object surface resting on the support layer at layer_idx: the bottom of the
+    // object layer covering that height. The interface stack is positioned against this so the
+    // requested air gap is what actually gets printed no matter how the support grid and the
+    // object's layers line up. Off the table it falls back to the grid layer below, which is the
+    // same height when the two stacks agree.
+    coordf_t supported_object_z(const size_t layer_idx) const
+    {
+        if (const size_t num_raft = config.raft_layers.size();
+            layer_idx >= num_raft && layer_idx - num_raft < config.object_bottom_z_of.size())
+        {
+            anchor_stats->anchor_object.fetch_add(1, std::memory_order_relaxed);
+            return config.object_bottom_z_of[layer_idx - num_raft];
+        }
+        anchor_stats->anchor_grid_fallback.fetch_add(1, std::memory_order_relaxed);
+        return layer_z(slicing_parameters, config, layer_idx > 0 ? layer_idx - 1 : 0);
+    }
 
 public:
     // Insert the contact layer and some of the inteface and base interface layers below.
@@ -713,49 +817,81 @@ public:
             const coordf_t gap = slicing_parameters.gap_support_object;
             const coordf_t layer_height = slicing_parameters.layer_height;
 
-            // Adjust interface layer heights to achieve the requested gap
-            // This works for any gap > 0 (both partial gaps and larger gaps)
-            if (num_interface > 0 && gap > EPSILON)
+            // Anchor the stack to the object surface and adjust interface layer heights so the
+            // requested gap, including a gap of zero, is what actually prints.
+            if (num_interface > 0)
             {
-                const coordf_t nozzle_diam = support_parameters.support_material_interface_flow.nozzle_diameter();
-                const coordf_t min_height = nozzle_diam * 0.25;
-                const coordf_t max_height = nozzle_diam * 0.75;
-
                 // Calculate TopContact's layer_idx by adding dtt_roof offset
                 // dtt_roof=0 for TopContact, dtt_roof=1 for layer below, etc.
                 const size_t top_contact_layer_idx = insert_layer_idx + dtt_roof;
 
-                // The object Z is the surface being supported
+                // The overhang this stack holds up was carried onto the support layer
+                // z_distance_top_layers + 1 above the contact, and the surface it rests against is
+                // the bottom of the object layer covering that height, read off the object rather
+                // than the support grid so the gap below is exactly the requested distance. Raft
+                // contacts support the raft-to-object seam, not an overhang, and stay on the grid.
                 const size_t z_dist_layers = config.z_distance_top_layers;
-                const coordf_t object_z = layer_z(slicing_parameters, config, top_contact_layer_idx + z_dist_layers);
+                const size_t overhang_layer_idx = top_contact_layer_idx + z_dist_layers + 1;
+                const coordf_t grid_anchor_z = layer_z(slicing_parameters, config, overhang_layer_idx - 1);
+                const bool raft_contact = top_contact_layer_idx < config.raft_layers.size();
+                if (raft_contact)
+                    anchor_stats->anchor_raft.fetch_add(1, std::memory_order_relaxed);
+                const coordf_t object_z = raft_contact ? grid_anchor_z : this->supported_object_z(overhang_layer_idx);
 
-                // TopContact should be at object_z - gap
-                const coordf_t top_contact_print_z = object_z - gap;
+                // How far the real surface sits off the grid layer it coincides with at a fixed
+                // layer height. The stack hangs from the object but has to meet the support body,
+                // which is on the grid, so the offset is spread over the stack instead of shifting
+                // its bottom off the body and opening a void. Zero whenever the two grids agree,
+                // which is what leaves a fixed layer height untouched. Negative when the profile
+                // ran thicker than nominal and the surface dropped below its grid slot; the
+                // unclamped formula stays valid then, and profiles deep enough to drive the
+                // heights below the printable minimum are refused up front in Print::validate().
+                const coordf_t anchor_offset = object_z - grid_anchor_z;
+                anchor_stats->note_offset(anchor_offset);
 
-                // Calculate interface height based on GAP REMAINDER only
-                // Full layers of gap are handled by layer positioning (TopContact moves down),
-                // not by reducing interface layer heights.
-                // This ensures gap = N * layer_height results in normal layer heights.
-                const coordf_t gap_remainder = std::fmod(gap, layer_height);
-                const coordf_t height_reduction = gap_remainder / num_interface;
-                coordf_t interface_height = layer_height - height_reduction;
-                interface_height = std::clamp(interface_height, min_height, max_height);
+                // Reposition when a gap is requested or the surface left the grid. With no gap
+                // the contact still has to move up to meet the object or an unrequested gap
+                // prints; when both are zero the allocated grid position is already exact.
+                if (gap > EPSILON || std::abs(anchor_offset) > EPSILON)
+                {
+                    const coordf_t nozzle_diam = support_parameters.support_material_interface_flow.nozzle_diameter();
+                    const coordf_t min_height = nozzle_diam * 0.25;
+                    const coordf_t max_height = nozzle_diam * 0.75;
 
-                // Stack bottom for reference (where branches end after +2 extension)
-                const coordf_t stack_bottom_z = top_contact_print_z - (num_interface * interface_height);
+                    // TopContact should be at object_z - gap
+                    const coordf_t top_contact_print_z = object_z - gap;
 
-                // Calculate this layer's position
-                // dtt_roof=0 is TopContact (top), dtt_roof=num_interface-1 is bottom
-                const size_t position_from_top = dtt_roof; // 0 for TopContact
+                    // Calculate interface height based on GAP REMAINDER only
+                    // Full layers of gap are handled by layer positioning (TopContact moves down),
+                    // not by reducing interface layer heights.
+                    // This ensures gap = N * layer_height results in normal layer heights.
+                    const coordf_t gap_remainder = std::fmod(gap, layer_height);
+                    const coordf_t height_reduction = gap_remainder / num_interface;
+                    coordf_t interface_height = layer_height - height_reduction + anchor_offset / num_interface;
+                    // Safety net only. The ceiling admits the anchor correction, which is under
+                    // one support layer spread over the stack; clipping it would separate the
+                    // stack from the body below.
+                    const coordf_t span_ceiling = layer_height * (1. + 1. / coordf_t(num_interface));
+                    const coordf_t height_ceiling = std::max(max_height, span_ceiling);
+                    if (interface_height < min_height)
+                        anchor_stats->height_clamped_floor.fetch_add(1, std::memory_order_relaxed);
+                    else if (interface_height > height_ceiling)
+                        anchor_stats->height_clamped_ceiling.fetch_add(1, std::memory_order_relaxed);
+                    interface_height = std::clamp(interface_height, min_height, height_ceiling);
 
-                // Stack layers down from TopContact
-                coordf_t this_print_z = top_contact_print_z - (position_from_top * interface_height);
-                coordf_t this_height = interface_height;
-                coordf_t this_bottom_z = this_print_z - this_height;
+                    // Calculate this layer's position
+                    // dtt_roof=0 is TopContact (top), dtt_roof=num_interface-1 is bottom
+                    const size_t position_from_top = dtt_roof; // 0 for TopContact
 
-                l->bottom_z = this_bottom_z;
-                l->print_z = this_print_z;
-                l->height = this_height;
+                    // Stack layers down from TopContact
+                    coordf_t this_print_z = top_contact_print_z - (position_from_top * interface_height);
+                    coordf_t this_height = interface_height;
+                    coordf_t this_bottom_z = this_print_z - this_height;
+
+                    l->bottom_z = this_bottom_z;
+                    l->print_z = this_print_z;
+                    l->height = this_height;
+                }
             }
         }
         // will be unioned in finalize_interface_and_support_areas()

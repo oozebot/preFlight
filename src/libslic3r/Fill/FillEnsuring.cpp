@@ -565,7 +565,7 @@ ThickPolylines make_fill_polylines(const Fill *fill, const Surface *surface, con
             Athena::WallToolPaths wall_tool_paths(polygons, scaled_spacing, scaled_spacing, loops_count, 0,
                                                   params.layer_height, *fill->print_object_config, *fill->print_config,
                                                   scaled_spacing, scaled_spacing, scaled_spacing, scaled_spacing, 0, -1,
-                                                  gap_fill_mbw_factor);
+                                                  gap_fill_mbw_factor, coord_t(10000), params.max_bead_width);
             wall_tool_paths.skip_thin_contour_regeneration();
             if (std::vector<Athena::VariableWidthLines> loops = wall_tool_paths.getToolPaths(); !loops.empty())
             {

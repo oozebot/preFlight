@@ -175,7 +175,9 @@ bool lineSegmentPolygonsIntersection(const Point &a, const Point &b, const EdgeG
                 if (Vec2d ip;
                     Geometry::segment_segment_intersection(segment.first.cast<double>(), segment.second.cast<double>(),
                                                            this->line_a, this->line_b, ip))
-                    if (double d = (this->intersection_pt - this->line_b).squaredNorm(); d < d2min)
+                    // Keep the candidate intersection nearest to line_b, so the accept check
+                    // below compares the real crossing distance.
+                    if (double d = (ip - this->line_b).squaredNorm(); d < d2min)
                     {
                         this->d2min = d;
                         this->intersection_pt = ip;

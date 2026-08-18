@@ -800,6 +800,10 @@ protected:
     void clear_fills();
 
 private:
+    // Real-time check of this layer's generated widths against the width warning maximum;
+    // raises the object's first-trip notification. Called as perimeters and fills are produced.
+    void check_generated_widths_against_warning(bool include_perimeters);
+
     mutable std::unique_ptr<RoleIndex> m_role_index_below;
     mutable std::unique_ptr<RoleIndex> m_role_index_above;
 

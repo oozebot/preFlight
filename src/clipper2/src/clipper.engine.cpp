@@ -9,6 +9,7 @@
 
 #include "clipper2/clipper.engine.h"
 #include "clipper2/clipper.h"
+#include <algorithm>
 #include <stdexcept>
 
 // https://github.com/AngusJohnson/Clipper2/discussions/334
@@ -21,9 +22,16 @@
 #define nearbyint(a) _mm_cvtsd_si64(_mm_set_sd(a)) /* Note: expression type is (int64_t) */
 #endif
 
+#include <atomic>
+
 namespace Clipper2Lib {
 
   static const Rect64 invalid_rect = Rect64(false);
+
+  // preFlight local patch: reject counters for the intersection validations in this
+  // file, read by the slicer's debug telemetry through extern declarations.
+  std::atomic<uint64_t> pf_split_op_intersection_rejects{0};
+  std::atomic<uint64_t> pf_intersect_node_corrections{0};
 
   // Every closed path (ie polygon) is made up of a series of vertices forming edge 
   // 'bounds' that alternate between ascending bounds (containing edges going up 
@@ -1568,8 +1576,22 @@ namespace Clipper2Lib {
     outrec->pts = prevOp;
 
     Point64 ip;
-    GetLineIntersectPt(prevOp->pt, splitOp->pt,
-      splitOp->next->pt, nextNextOp->pt, ip);
+    // preFlight local patch: GetLineIntersectPt returns false for parallel
+    // segments (leaving ip unset), and with CLIPPER2_HI_PRECISION the
+    // unconstrained line-line intersection of nearly parallel segments can
+    // land arbitrarily far outside them. Such a point must never be inserted
+    // into an output path, so fall back to the shared region's vertex and let
+    // the micro self-intersection collapse to a point.
+    if (!GetLineIntersectPt(prevOp->pt, splitOp->pt,
+      splitOp->next->pt, nextNextOp->pt, ip) ||
+      ip.x < std::min({ prevOp->pt.x, splitOp->pt.x, splitOp->next->pt.x, nextNextOp->pt.x }) ||
+      ip.x > std::max({ prevOp->pt.x, splitOp->pt.x, splitOp->next->pt.x, nextNextOp->pt.x }) ||
+      ip.y < std::min({ prevOp->pt.y, splitOp->pt.y, splitOp->next->pt.y, nextNextOp->pt.y }) ||
+      ip.y > std::max({ prevOp->pt.y, splitOp->pt.y, splitOp->next->pt.y, nextNextOp->pt.y }))
+    {
+      ++pf_split_op_intersection_rejects;
+      ip = splitOp->pt;
+    }
 
 #ifdef USINGZ
     if (zCallback_) zCallback_(prevOp->pt, splitOp->pt,
@@ -1653,25 +1675,18 @@ namespace Clipper2Lib {
       if (SegmentsIntersect(op2->prev->pt,
         op2->pt, op2->next->pt, op2->next->next->pt))
       {
-        if (SegmentsIntersect(op2->prev->pt,
-          op2->pt, op2->next->next->pt, op2->next->next->next->pt))
-        {
-          // adjacent intersections (ie a micro self-intersections)
-          op2 = DuplicateOp(op2, false);
-          op2->pt = op2->next->next->next->pt;
-          op2 = op2->next;
-        }
-        else
-        {
-          if (op2 == outrec->pts || op2->next == outrec->pts)
-            outrec->pts = outrec->pts->prev;
-          DoSplitOp(outrec, op2);
-          if (!outrec->pts) break;
-          op2 = outrec->pts;
-          if (op2->prev == op2->next->next)
-            break; // again, because triangles can't self-intersect
-          continue;
-        }
+        // preFlight local patch, mirrors upstream commit 4da1564f (issue #1067):
+        // the former adjacent micro self-intersection branch duplicated a vertex
+        // and could fabricate area not present in any input when unioning
+        // near-zero-area slivers. All self-intersections now go through the split.
+        if (op2 == outrec->pts || op2->next == outrec->pts)
+          outrec->pts = outrec->pts->prev;
+        DoSplitOp(outrec, op2);
+        if (!outrec->pts) break;
+        op2 = outrec->pts;
+        if (op2->prev == op2->next->next)
+          break; // again, because triangles can't self-intersect
+        continue;
       }
       else
         op2 = op2->next;
@@ -2361,8 +2376,20 @@ namespace Clipper2Lib {
 
     //rounding errors can occasionally place the calculated intersection
     //point either below or above the scanbeam, so check and correct ...
-    if (ip.y > bot_y_ || ip.y < top_y)
+    // preFlight local patch: nearly parallel edges can also throw the computed
+    // intersection point arbitrarily far off horizontally while its y stays
+    // inside the scanbeam, so the x range must be validated against both
+    // segments as well. A genuine crossing always lies inside their joint
+    // range, so only degenerate results are corrected.
+    bool y_out_of_range = ip.y > bot_y_ || ip.y < top_y;
+    bool x_out_of_range = ip.x < std::min({ e1.bot.x, e1.top.x, e2.bot.x, e2.top.x }) ||
+      ip.x > std::max({ e1.bot.x, e1.top.x, e2.bot.x, e2.top.x });
+    if (y_out_of_range || x_out_of_range)
     {
+      // Count only intersections the x validation alone rejects; the y correction
+      // is stock behavior and fires routinely on rounding.
+      if (x_out_of_range && !y_out_of_range)
+        ++pf_intersect_node_corrections;
       double abs_dx1 = std::fabs(e1.dx);
       double abs_dx2 = std::fabs(e2.dx);
       if (abs_dx1 > 100 && abs_dx2 > 100)
@@ -2943,7 +2970,9 @@ namespace Clipper2Lib {
     // nb: use indexing (not an iterator) in case 'splits' is modified inside this loop (#1029)
     for (size_t idx = 0; idx < splits->size(); ++idx)
     {
-      OutRec* split = (*splits)[idx]; 
+      OutRec* split = (*splits)[idx];
+      // preFlight local patch, not yet upstream: cycle guard on the #942 recursion,
+      // matching the #957 guard below; prevents stack overflow when split lists cycle.
       if (!split->pts && split->splits) //#942
       {
         if (split->recursive_split == outrec) continue;

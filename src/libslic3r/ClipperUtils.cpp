@@ -643,6 +643,17 @@ ExPolygons ClipperPaths_to_Slic3rExPolygons(const Paths &input, bool do_union)
     return PolyTreeToExPolygons(std::move(polytree));
 }
 
+// Reconstruct ExPolygons from paths whose winding is trusted (contours CCW, holes CW),
+// e.g. the output of the per-path offset helpers. The Positive fill rule discards
+// regions of non-positive winding, so a hole grown past its contour by a negative
+// offset annihilates the contour instead of surviving as a phantom solid.
+static ExPolygons WindingTrustedPaths_to_ExPolygons(const Paths &input)
+{
+    PolyTree polytree;
+    clipper_union_polytree(input, pftPositive, polytree);
+    return PolyTreeToExPolygons(std::move(polytree));
+}
+
 // Overload for Slic3r::Polygons - converts to Paths first
 ExPolygons ClipperPaths_to_Slic3rExPolygons(const Polygons &input, bool do_union)
 {
@@ -678,16 +689,15 @@ template<class TResult, typename PathsProvider>
 static void shrink_paths_impl(PathsProvider &&paths, float offset, JoinType joinType, double miterLimit, TResult &out)
 {
     assert(offset > 0);
-    // Simplified shrink_paths to avoid bounding box issues: The old approach used FillRule::Negative
-    // with a bounding box, which creates complex geometry (733+ vertices) that breaks all downstream
-    // clipping operations. Since raw_offset with negative offset already gives us the shrunk paths,
-    // we can just use them directly after a union to clean up any self-intersections.
+    // raw_offset preserves winding: contours stay CCW and shrink, holes stay CW and grow.
+    // The regularizing union must use the Positive fill rule: a hole grown past its contour
+    // leaves regions of winding <= 0 which must vanish. NonZero would fill the winding -1
+    // region left by an overgrown hole, fabricating a phantom polygon where no material exists.
     if (auto raw = raw_offset(std::forward<PathsProvider>(paths), -offset, joinType, miterLimit); !raw.empty())
     {
-        // Use union to clean up any self-intersections or overlaps
         Clipper2Lib::Clipper64 clipper;
         clipper.AddSubject(raw);
-        clipper.Execute(Clipper2Lib::ClipType::Union, Clipper2Lib::FillRule::NonZero, out);
+        clipper.Execute(Clipper2Lib::ClipType::Union, Clipper2Lib::FillRule::Positive, out);
     }
 }
 
@@ -830,12 +840,13 @@ static int offset_expolygon_inner(const Slic3r::ExPolygon &expoly, const float d
                 // Note: ShortestEdgeLength removed in Clipper2
                 co.AddPath(Slic3rPoints_to_ClipperPath(hole.points), joinType, etClosedPolygon);
                 Paths out2;
-                // Execute reorients the contours so that the outer most contour has a positive area. Thus the output
-                // contours will be CCW oriented even though the input paths are CW oriented.
-                // Offset is applied after contour reorientation, thus the signum of the offset value is reversed.
-                co.Execute(-delta, out2); // Parameter swap
-
-                // Removed: for (path : out2) std::reverse(path);
+                // ClipperOffset retains the input orientation (ExecuteInternal reverses the
+                // solution for reversed groups), so these CW holes come back CW. The delta is
+                // applied relative to the path's winding and holes wind opposite to contours,
+                // so the ExPolygon's delta is negated here. Downstream relies on the CW output:
+                // the PolyTree hierarchy reconstruction below and the Positive-fill unions in
+                // the offset legs both classify holes by their negative area.
+                co.Execute(-delta, out2);
 
                 append(holes, std::move(out2));
             }
@@ -859,7 +870,7 @@ static int offset_expolygon_inner(const Slic3r::ExPolygon &expoly, const float d
             //
             // Why this works:
             // - Contours are CCW (positive area)
-            // - Holes are CW (negative area) after our reversal fix
+            // - Holes are CW (negative area): ClipperOffset retains the input orientation
             // - ClipperPaths_to_Slic3rExPolygons() uses PolyTree which respects winding order
             // - If holes grow so large they intersect/exceed the contour, PolyTree handles it correctly
 
@@ -916,13 +927,20 @@ static Paths expolygons_offset(const ExPolygonVector &expolygons, const float de
 {
     auto [output, expolygons_collected] = expolygons_offset_raw(expolygons, delta, joinType, miterLimit);
     // Unite the offsetted expolygons.
-    return expolygons_collected > 1 && delta > 0
-               ?
-               // There is a chance that the outwards offsetted expolygons may intersect. Perform a union.
-               clipper_union<Paths>(output)
-               :
-               // Negative offset. The shrunk expolygons shall not mutually intersect. Just copy the output.
-               output;
+    if (expolygons_collected > 1 && delta > 0)
+        // There is a chance that the outwards offsetted expolygons may intersect. Perform a union.
+        return clipper_union<Paths>(output);
+    if (delta < 0)
+    {
+        // The shrunk expolygons cannot mutually intersect, but a hole grown past its own
+        // contour would escape as a stray CW path and become phantom area downstream.
+        // Holes are the CW (negative area) paths; regularize with a Positive union so an
+        // overgrown hole annihilates its contour. Hole-free output needs no union.
+        for (const auto &path : output)
+            if (Clipper2Lib::Area(path) < 0.)
+                return clipper_union<Paths>(output, pftPositive);
+    }
+    return output;
 }
 
 // See comment on expolygons_offset_raw. In addition, the polygons are always united to conver to polytree.
@@ -931,8 +949,10 @@ static void expolygons_offset_pt(const ExPolygonVector &expolygons, const float 
                                  double miterLimit, PolyTree &out_result)
 {
     auto [output, expolygons_collected] = expolygons_offset_raw(expolygons, delta, joinType, miterLimit);
-    // Unite the offsetted expolygons for both the
-    clipper_union_polytree(output, pftNonZero, out_result);
+    // The offset output has trusted winding (contours CCW, holes CW). Positive keeps
+    // holes intact and lets a hole grown past its contour annihilate the contour,
+    // where NonZero would fill the overflow region with phantom area.
+    clipper_union_polytree(output, pftPositive, out_result);
 }
 
 Slic3r::Polygons offset(const Slic3r::ExPolygon &expolygon, const float delta, JoinType joinType, double miterLimit)
@@ -955,8 +975,8 @@ Slic3r::ExPolygons offset_ex(const Slic3r::ExPolygon &expolygon, const float del
                              double miterLimit)
 //FIXME one may spare one Clipper Union call.
 {
-    return ClipperPaths_to_Slic3rExPolygons(expolygon_offset(expolygon, delta, joinType, miterLimit),
-                                            /* do union */ false);
+    // expolygon_offset preserves winding, so reconstruct with the Positive rule.
+    return WindingTrustedPaths_to_ExPolygons(expolygon_offset(expolygon, delta, joinType, miterLimit));
 }
 Slic3r::ExPolygons offset_ex(const Slic3r::ExPolygons &expolygons, const float delta, JoinType joinType,
                              double miterLimit)
@@ -1056,12 +1076,11 @@ ExPolygons offset2_ex(const ExPolygons &expolygons, const float delta1, const fl
     // First offset: expand (or shrink) - this returns Paths with CW holes
     Paths paths1 = expolygons_offset(expolygons, delta1, joinType, miterLimit);
 
-    // Convert back to ExPolygons so holes are recognized
-    // DON'T use clipper_union! Union treats holes as separate shapes and merges them!
-    // Instead, convert Paths directly to ExPolygons using winding order
-    ExPolygons expolygons1 = ClipperPaths_to_Slic3rExPolygons(paths1, false);
+    // The intermediate paths have trusted winding (contours CCW, holes CW), so a
+    // Positive-rule reconstruction keeps the holes and drops any hole overflow.
+    ExPolygons expolygons1 = WindingTrustedPaths_to_ExPolygons(paths1);
 
-    // Second offset: on ExPolygons, which preserves holes properly!
+    // Second offset: on ExPolygons, which offsets holes as holes.
     ExPolygons result = offset_ex(expolygons1, delta2, joinType, miterLimit);
 
     return result;
@@ -1299,6 +1318,126 @@ Slic3r::Polygons union_(const Slic3r::Polygons &subject, const PolyFillType fill
     return ClipperPaths_to_Slic3rPolygons(clipper_do<Paths>(ctUnion, ClipperUtils::PolygonsProvider(subject),
                                                             ClipperUtils::EmptyPathsProvider(), fillType,
                                                             ApplySafetyOffset::No));
+}
+Slic3r::Polygons union_unknown_winding(const Slic3r::Polygons &loops, UnknownWindingStats *stats)
+{
+    CLIPPER_UTILS_TIME_LIMIT_MILLIS(CLIPPER_UTILS_TIME_LIMIT_DEFAULT);
+
+    // Canonicalize each loop (CCW winding, rotated to its lexicographically smallest vertex)
+    // so exact duplicates compare equal regardless of direction or start point. Bounds and
+    // area per kept loop feed the near-duplicate test here and the containment prefilter
+    // below. A loop matching a kept loop's bounds within near_dup_tol and its area within a
+    // perimeter's worth of that drift is the same physical wall re-emitted with coordinate
+    // drift (the solver drifts ~1nm; 100nm sits far below any printable feature). It must be
+    // dropped like an exact duplicate BEFORE containment counting: counted as containment it
+    // would flip one copy to a hole and the pair would annihilate under the Positive union,
+    // and kept as a sibling it would inflate the depth of every loop inside it. A genuine
+    // hole hugging its contour within 100nm is sub-printable; keeping material is the safe
+    // reading.
+    constexpr int64_t near_dup_tol = 100;
+    auto near_edge = [](int64_t a, int64_t b)
+    {
+        const int64_t d = a > b ? a - b : b - a;
+        return d <= near_dup_tol;
+    };
+    Paths canonical;
+    std::vector<Clipper2Lib::Rect64> bounds;
+    std::vector<double> areas;
+    canonical.reserve(loops.size());
+    bounds.reserve(loops.size());
+    areas.reserve(loops.size());
+    for (const Polygon &loop : loops)
+    {
+        if (loop.points.size() < 3)
+            continue;
+        Clipper2Lib::Path64 path = Slic3rPoints_to_ClipperPath(loop.points);
+        if (!Clipper2Lib::IsPositive(path))
+            std::reverse(path.begin(), path.end());
+        auto mn = std::min_element(path.begin(), path.end(),
+                                   [](const Clipper2Lib::Point64 &a, const Clipper2Lib::Point64 &b)
+                                   { return a.x < b.x || (a.x == b.x && a.y < b.y); });
+        std::rotate(path.begin(), mn, path.end());
+        const Clipper2Lib::Rect64 path_bounds = Clipper2Lib::GetBounds(path);
+        const double path_area = Clipper2Lib::Area(path);
+        const double max_area_drift = 4. *
+                                      double((path_bounds.right - path_bounds.left) +
+                                             (path_bounds.bottom - path_bounds.top)) *
+                                      double(near_dup_tol);
+        bool duplicate = false, near_duplicate = false;
+        for (size_t k = 0; k < canonical.size() && !duplicate && !near_duplicate; ++k)
+        {
+            if (canonical[k] == path)
+                duplicate = true;
+            else if (near_edge(path_bounds.left, bounds[k].left) && near_edge(path_bounds.right, bounds[k].right) &&
+                     near_edge(path_bounds.top, bounds[k].top) && near_edge(path_bounds.bottom, bounds[k].bottom) &&
+                     (path_area > areas[k] ? path_area - areas[k] : areas[k] - path_area) <= max_area_drift)
+                near_duplicate = true;
+        }
+        if (duplicate)
+        {
+            if (stats)
+                ++stats->duplicates_dropped;
+        }
+        else if (near_duplicate)
+        {
+            if (stats)
+                ++stats->near_duplicates_dropped;
+        }
+        else
+        {
+            canonical.emplace_back(std::move(path));
+            bounds.emplace_back(path_bounds);
+            areas.emplace_back(path_area);
+        }
+    }
+
+    // Containment decided by the first vertex that is strictly inside or outside; vertices
+    // lying on the other loop's boundary are skipped. A loop whose vertices ALL lie on the
+    // other loop (a boundary-coincident near-duplicate) counts as not contained, so it
+    // behaves like a duplicate under the Positive union instead of cancelling as a hole.
+    auto contains_loop = [](const Clipper2Lib::Path64 &outer, const Clipper2Lib::Path64 &inner)
+    {
+        for (const Clipper2Lib::Point64 &v : inner)
+        {
+            Clipper2Lib::PointInPolygonResult r = Clipper2Lib::PointInPolygon(v, outer);
+            if (r == Clipper2Lib::PointInPolygonResult::IsOn)
+                continue;
+            return r == Clipper2Lib::PointInPolygonResult::IsInside;
+        }
+        return false;
+    };
+    Paths oriented;
+    oriented.reserve(canonical.size());
+    for (size_t i = 0; i < canonical.size(); ++i)
+    {
+        int depth = 0;
+        for (size_t j = 0; j < canonical.size(); ++j)
+        {
+            if (i == j)
+                continue;
+            // A contained loop's bounds lie within its container's; skip the vertex
+            // walk when they cannot.
+            if (!bounds[j].Contains(bounds[i]))
+                continue;
+            if (contains_loop(canonical[j], canonical[i]))
+                ++depth;
+        }
+        Clipper2Lib::Path64 path = canonical[i];
+        if (depth & 1)
+        {
+            // Odd containment depth: this loop is a hole; orient CW.
+            std::reverse(path.begin(), path.end());
+            if (stats)
+                ++stats->hole_loops;
+        }
+        oriented.emplace_back(std::move(path));
+    }
+
+    Clipper2Lib::Clipper64 clipper;
+    clipper.AddSubject(oriented);
+    Paths out;
+    clipper.Execute(Clipper2Lib::ClipType::Union, Clipper2Lib::FillRule::Positive, out);
+    return ClipperPaths_to_Slic3rPolygons(out);
 }
 Slic3r::Polygons union_(const Slic3r::ExPolygons &subject)
 {
@@ -1758,6 +1897,10 @@ Slic3r::Polylines diff_pl(const Slic3r::Polylines &subject, const Slic3r::ExPoly
 }
 Slic3r::Polylines diff_pl(const Slic3r::Polygons &subject, const Slic3r::Polygons &clip)
 {
+    // Deprecated contract: with a POLYGONS subject this performs an AREA boolean and returns
+    // the result's boundary split into polylines, NOT a clip of the subject's boundary curves.
+    // No live callers. Do not add one without reworking the semantics.
+    assert(false && "diff_pl(Polygons, Polygons): deprecated area-boolean semantics");
     return _clipper_pl_closed(ctDifference, ClipperUtils::PolygonsProvider(subject),
                               ClipperUtils::PolygonsProvider(clip));
 }
@@ -1798,6 +1941,10 @@ Slic3r::Polylines intersection_pl(const Slic3r::Polylines &subject, const Slic3r
 }
 Slic3r::Polylines intersection_pl(const Slic3r::Polygons &subject, const Slic3r::Polygons &clip)
 {
+    // Deprecated contract: with a POLYGONS subject this performs an AREA boolean and returns
+    // the result's boundary split into polylines, NOT a clip of the subject's boundary curves.
+    // No live callers. Do not add one without reworking the semantics.
+    assert(false && "intersection_pl(Polygons, Polygons): deprecated area-boolean semantics");
     return _clipper_pl_closed(ctIntersection, ClipperUtils::PolygonsProvider(subject),
                               ClipperUtils::PolygonsProvider(clip));
 }

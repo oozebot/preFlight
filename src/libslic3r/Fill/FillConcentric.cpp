@@ -28,6 +28,7 @@
 #include "libslic3r/Point.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/libslic3r.h"
+#include "libslic3r/DebugOutput.hpp"
 #include "libslic3r/TravelOptimization.hpp"
 
 namespace Slic3r
@@ -681,9 +682,34 @@ void FillConcentric::_fill_surface_single(const FillParams &params, unsigned int
             // min_spacing already has the standard overlap baked in via Flow spacing.
             Athena::WallToolPaths wallToolPaths(polygons, min_spacing, min_spacing, loops_count, 0, params.layer_height,
                                                 *this->print_object_config, *this->print_config, min_spacing,
-                                                min_spacing, min_spacing, min_spacing);
+                                                min_spacing, min_spacing, min_spacing, 0, -1, 1.0, coord_t(10000),
+                                                params.max_bead_width);
+            wallToolPaths.set_debug_print_z(this->z);
 
             std::vector<Athena::VariableWidthLines> loops = wallToolPaths.getToolPaths();
+            if (Slic3r::debug_enabled(Slic3r::DBG_FILL))
+            {
+                double band_area = std::abs(expolygon.area()) * SCALING_FACTOR * SCALING_FACTOR;
+                dbg_log(Slic3r::DBG_FILL, this->z, "FILL", "CONC_IN area=%.3fmm2 holes=%zu spacing=%.4f loop_sets=%zu",
+                        band_area, expolygon.holes.size(), unscaled<double>(min_spacing), loops.size());
+                for (size_t li = 0; li < loops.size(); ++li)
+                    for (const Athena::ExtrusionLine &el : loops[li])
+                    {
+                        if (el.junctions.empty())
+                            continue;
+                        coord_t wmin = std::numeric_limits<coord_t>::max(), wmax = 0;
+                        for (const auto &j : el.junctions)
+                        {
+                            wmin = std::min(wmin, j.w);
+                            wmax = std::max(wmax, j.w);
+                        }
+                        dbg_log(Slic3r::DBG_FILL, this->z, "FILL",
+                                "CONC_LINE set=%zu inset=%zu closed=%d odd=%d pts=%zu w=%.3f-%.3fmm len=%.2fmm", li,
+                                size_t(el.inset_idx), int(el.is_closed), int(el.is_odd), el.junctions.size(),
+                                unscaled<double>(wmin), unscaled<double>(wmax),
+                                unscaled<double>(double(el.getLength())));
+                    }
+            }
 
             process_concentric_loops_by_region<Athena::ExtrusionLine>(loops, thick_polylines_out, last_pos,
                                                                       params.prefer_clockwise_movements, min_spacing,

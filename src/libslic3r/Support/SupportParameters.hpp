@@ -102,6 +102,11 @@ struct SupportParameters
     bool with_sheath;
     // Branches of organic supports with area larger than this threshold will be extruded with double lines.
     double tree_branch_diameter_double_wall_area_scaled;
+    // Baobab islands with area larger than this threshold carry the full wall count instead of a
+    // single loop. Keyed off the trunk diameter, not the Organic double-wall option.
+    double baobab_double_wall_area_scaled;
+    // Density of the lightning fill inside Baobab canopies, percent.
+    double baobab_canopy_density_percent;
 
     float raft_angle_1st_layer;
     float raft_angle_base;

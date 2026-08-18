@@ -129,28 +129,41 @@ bool Fill::use_bridge_flow(const InfillPattern type)
     return cached[type] != 0;
 }
 
+// Sections of a solid surface narrower than twice the standard inset vanish from the
+// inset fill boundary. Recover just those sections at the reduced inset so a single
+// fill line is still generated through them: re-expand the survivors, subtract them
+// from the surface to isolate the thin sections, inset those by the reduced amount.
+// Wide regions keep the standard inset and are not double-filled.
+static void append_recovered_thin_sections(const ExPolygon &surface_expoly, float offset, float thin_offset,
+                                           ExPolygons &expp)
+{
+    if (!(offset < 0.f))
+        return;
+    ExPolygons wide = offset_ex(expp, -offset);
+    ExPolygons thin = diff_ex(surface_expoly, wide);
+    if (thin.empty())
+        return;
+    ExPolygons recovered = offset_ex(thin, thin_offset);
+    // Junction slivers along the wide/thin seams are too small to carry a fill line.
+    const double min_area = sqr(double(offset));
+    for (ExPolygon &ep : recovered)
+        if (std::abs(ep.area()) > min_area)
+            expp.emplace_back(std::move(ep));
+}
+
 Polylines Fill::fill_surface(const Surface *surface, const FillParams &params)
 {
     // Perform offset.
     float offset = float(scale_(this->overlap - 0.5 * this->bounding_width));
     Slic3r::ExPolygons expp = offset_ex(surface->expolygon, offset);
 
-    // For solid fills, thin strips collapse under the standard 0.5*spacing offset.
-    // Retry with FillRectilinear's outer offset (0.05*spacing) so a single fill line
-    // can still be generated through the thin region.
+    // For solid fills, recover thin sections that collapsed under the standard
+    // 0.5*spacing inset at FillRectilinear's outer inset (0.05*spacing).
     if (params.full_infill())
     {
-        double orig_area = std::abs(surface->expolygon.area());
-        double offset_area = 0;
-        for (const ExPolygon &ep : expp)
-            offset_area += std::abs(ep.area());
-        if (orig_area > 0 && offset_area < orig_area * 0.01)
-        {
-            constexpr float INFILL_OVERLAP_OVER_SPACING = 0.45f;
-            float thin_offset = float(
-                scale_(this->overlap - (0.5 - INFILL_OVERLAP_OVER_SPACING) * this->bounding_width));
-            expp = offset_ex(surface->expolygon, thin_offset);
-        }
+        constexpr float INFILL_OVERLAP_OVER_SPACING = 0.45f;
+        float thin_offset = float(scale_(this->overlap - (0.5 - INFILL_OVERLAP_OVER_SPACING) * this->bounding_width));
+        append_recovered_thin_sections(surface->expolygon, offset, thin_offset, expp);
     }
 
     // Create the infills for each of the regions.
@@ -167,20 +180,12 @@ ThickPolylines Fill::fill_surface_advanced(const Surface *surface, const FillPar
     float offset = float(scale_(this->overlap - 0.5 * this->bounding_width));
     Slic3r::ExPolygons expp = offset_ex(surface->expolygon, offset);
 
-    // Same thin-strip retry as fill_surface
+    // Same thin-section recovery as fill_surface.
     if (params.full_infill())
     {
-        double orig_area = std::abs(surface->expolygon.area());
-        double offset_area = 0;
-        for (const ExPolygon &ep : expp)
-            offset_area += std::abs(ep.area());
-        if (orig_area > 0 && offset_area < orig_area * 0.01)
-        {
-            constexpr float INFILL_OVERLAP_OVER_SPACING = 0.45f;
-            float thin_offset = float(
-                scale_(this->overlap - (0.5 - INFILL_OVERLAP_OVER_SPACING) * this->bounding_width));
-            expp = offset_ex(surface->expolygon, thin_offset);
-        }
+        constexpr float INFILL_OVERLAP_OVER_SPACING = 0.45f;
+        float thin_offset = float(scale_(this->overlap - (0.5 - INFILL_OVERLAP_OVER_SPACING) * this->bounding_width));
+        append_recovered_thin_sections(surface->expolygon, offset, thin_offset, expp);
     }
 
     // Create the infills for each of the regions.

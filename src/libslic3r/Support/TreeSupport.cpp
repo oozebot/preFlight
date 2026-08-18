@@ -36,6 +36,8 @@
 #include "TreeSupportCommon.hpp"
 #include "SupportCommon.hpp"
 #include "OrganicSupport.hpp"
+#include "BaobabSupport.hpp"
+#include "libslic3r/DebugOutput.hpp"
 #include "../AABBTreeIndirect.hpp"
 #include "../BuildVolume.hpp"
 #include "../EdgeGrid.hpp"
@@ -175,8 +177,9 @@ static std::vector<std::pair<TreeSupportSettings, std::vector<size_t>>> group_me
         // assert(object_config.support_material_style == smsTree || object_config.support_material_style == smsOrganic);
 
         bool found_existing_group = false;
-        TreeSupportSettings next_settings{TreeSupportMeshGroupSettings{print_object},
-                                          print_object.slicing_parameters()};
+        // Baobab's parameterization is applied inside TreeSupportMeshGroupSettings' constructor.
+        TreeSupportSettings next_settings{TreeSupportMeshGroupSettings{print_object}, print_object.slicing_parameters(),
+                                          &print_object};
         //FIXME for now only a single object per group is enabled.
 #if 0
         for (size_t idx = 0; idx < grouped_meshes.size(); ++ idx)
@@ -239,9 +242,13 @@ static std::vector<std::pair<TreeSupportSettings, std::vector<size_t>>> group_me
     const int support_enforce_layers = config.support_material_enforce_layers.value;
     std::vector<Polygons> enforcers_layers{print_object.slice_support_enforcers()};
     std::vector<Polygons> blockers_layers{print_object.slice_support_blockers()};
-    // Regular ENFORCER (blue) is handled by Snug/Grid generator
-    // ORGANIC_ENFORCER (green) is for Organic generator
-    print_object.project_and_append_custom_facets(false, TriangleStateType::ORGANIC_ENFORCER, enforcers_layers);
+    // Regular ENFORCER (blue) is handled by Snug/Grid generator.
+    // ORGANIC_ENFORCER (green) drives Organic; BAOBAB_ENFORCER (terracotta) drives Baobab,
+    // which routes through this engine.
+    print_object.project_and_append_custom_facets(false,
+                                                  is_baobab_object(print_object) ? TriangleStateType::BAOBAB_ENFORCER
+                                                                                 : TriangleStateType::ORGANIC_ENFORCER,
+                                                  enforcers_layers);
     print_object.project_and_append_custom_facets(false, TriangleStateType::BLOCKER, blockers_layers);
     // enforce_layers only applies when supports are actually being generated
     // (auto or painted); without either, it should not create standalone support.
@@ -253,7 +260,13 @@ static std::vector<std::pair<TreeSupportSettings, std::vector<size_t>>> group_me
     // +1 makes the threshold inclusive
     double tan_threshold = support_threshold_auto ? 0. : tan(M_PI * double(support_threshold + 1) / 180.);
     //FIXME this is a fudge constant!
-    auto enforcer_overhang_offset = scaled<double>(config.support_tree_tip_diameter.value);
+    // Baobab derives its tip diameter (two beads, capped at the trunk) instead of reading the
+    // Organic option.
+    auto enforcer_overhang_offset =
+        is_baobab_object(print_object)
+            ? std::min(2. * double(support_material_flow(&print_object, config.layer_height).scaled_width()),
+                       scaled<double>(config.support_baobab_trunk_diameter.value))
+            : scaled<double>(config.support_tree_tip_diameter.value);
 
     size_t num_overhang_layers = support_auto ? num_object_layers
                                               : std::min(num_object_layers, std::max(size_t(effective_enforce_layers),
@@ -376,6 +389,38 @@ static std::vector<std::pair<TreeSupportSettings, std::vector<size_t>>> group_me
             }
         });
 
+    // The overhangs were found on the object's layers; supports are built on their own grid. Carry
+    // them across by height. Under a variable layer height profile several object layers can share
+    // one support layer, so contributions accumulate instead of overwriting. Skipped entirely when
+    // the object sits on the grid, where the walk is the identity.
+    if (!settings.support_layer_of.empty() && !settings.grid_matches_object)
+    {
+        std::vector<Polygons> remapped(settings.support_layer_zs.size() + num_raft_layers, Polygons{});
+        std::vector<uint8_t> shared(remapped.size(), 0);
+        size_t dbg_src_layers = 0;
+        for (size_t i = 0; i < num_raft_layers && i < out.size(); ++i)
+            remapped[i] = std::move(out[i]);
+        for (size_t layer_id = 0; layer_id < num_object_layers && layer_id < settings.support_layer_of.size();
+             ++layer_id)
+            if (Polygons &src = out[layer_id + num_raft_layers]; !src.empty())
+                if (const size_t dst = settings.support_layer_of[layer_id] + num_raft_layers; dst < remapped.size())
+                {
+                    ++dbg_src_layers;
+                    shared[dst] |= uint8_t(!remapped[dst].empty());
+                    polygons_append(remapped[dst], std::move(src));
+                }
+        size_t dbg_shared_slots = 0;
+        for (size_t i = 0; i < remapped.size(); ++i)
+            if (shared[i])
+            {
+                remapped[i] = union_(remapped[i]);
+                ++dbg_shared_slots;
+            }
+        out = std::move(remapped);
+        dbg_log(DBG_SUPPORT, 0., "TREE-OVERHANG-REMAP", "object_layers=%zu support_slots=%zu shared_slots=%zu",
+                dbg_src_layers, out.size(), dbg_shared_slots);
+    }
+
 #if 0
     if (num_raft_layers > 0) {
         const Layer   &first_layer = *print_object.get_layer(0);
@@ -401,6 +446,23 @@ static std::vector<std::pair<TreeSupportSettings, std::vector<size_t>>> group_me
     }
 #endif
 
+    if (is_baobab_object(print_object) && debug_enabled(DBG_BAOBAB))
+    {
+        // Hole census at the pipeline's entry: holes here come straight off the object's
+        // geometry, before any support stage runs, and everything downstream inherits them.
+        size_t layers_with_holes = 0, holes_total = 0;
+        for (size_t layer_id = 0; layer_id < out.size(); ++layer_id)
+            if (const size_t holes = baobab_count_holes(out[layer_id]); holes > 0)
+            {
+                ++layers_with_holes;
+                holes_total += holes;
+                dbg_log(DBG_BAOBAB, 0., "BAOBAB-OVERHANG", "layer=%zu polys=%zu holes=%zu", layer_id,
+                        out[layer_id].size(), holes);
+            }
+        dbg_log(DBG_BAOBAB, 0., "BAOBAB-OVERHANG", "layers_with_holes=%zu holes_total=%zu", layers_with_holes,
+                holes_total);
+    }
+
     return out;
 }
 
@@ -420,7 +482,8 @@ static std::vector<std::pair<TreeSupportSettings, std::vector<size_t>>> group_me
     {
         const PrintObject &print_object = *print.get_object(object_id);
         const int num_raft_layers = int(config.raft_layers.size());
-        const int num_layers = int(print_object.layer_count()) + num_raft_layers;
+        const int num_layers = std::min<int>(int(config.support_layer_zs.size()) + num_raft_layers,
+                                             int(overhangs.size()));
         int max_support_layer_id = 0;
         for (int layer_id = std::max<int>(num_raft_layers, 1); layer_id < num_layers; ++layer_id)
             if (!overhangs[layer_id].empty())
@@ -1225,6 +1288,60 @@ void finalize_raft_contact(const PrintObject &print_object, const int raft_conta
     }
 }
 
+// A canopy's rim envelope reaches one gather spacing from its trunk, so an interface point
+// farther than that from every seed lies outside every canopy's clip and no chain can ever cover
+// it - but the rim must cover the entire interface outline. The gather grid samples
+// fill-generated lines, which do not reach into outline corners, so a corner pocket can sit
+// beyond the gather spacing from the whole grid. Walk the region outline (contours and holes)
+// and give any point beyond one gather spacing from every seed a seed of its own; the walk is
+// greedy, so later samples measure against seeds it already added.
+static void baobab_supplement_outline_seeds(const Polygons &overhang_area, const coord_t gather_spacing,
+                                            Polylines &polylines, BaobabSeedStats *stats)
+{
+    if (gather_spacing <= 0)
+        return;
+    Points seeds;
+    for (const Polyline &poly : polylines)
+        append(seeds, poly.points);
+    const double radius2 = double(gather_spacing) * double(gather_spacing);
+    const double step = double(gather_spacing) / 4.;
+    size_t added = 0;
+    for (const Polygon &contour : overhang_area)
+    {
+        double carry = 0.;
+        for (size_t i = 0; i < contour.points.size(); ++i)
+        {
+            const Vec2d a = contour.points[i].cast<double>();
+            const Vec2d b = contour.points[(i + 1) % contour.points.size()].cast<double>();
+            const double len = (b - a).norm();
+            double t = carry;
+            for (; t < len; t += step)
+            {
+                const Point sample = (a + (b - a) * (t / len)).cast<coord_t>();
+                bool covered = false;
+                for (const Point &seed : seeds)
+                    if ((sample.cast<double>() - seed.cast<double>()).squaredNorm() <= radius2)
+                    {
+                        covered = true;
+                        break;
+                    }
+                if (!covered)
+                {
+                    seeds.emplace_back(sample);
+                    polylines.emplace_back(Polyline{sample});
+                    ++added;
+                }
+            }
+            carry = t - len;
+        }
+    }
+    if (stats != nullptr && added > 0)
+    {
+        stats->regions_supplemented.fetch_add(1, std::memory_order_relaxed);
+        stats->points_supplemental.fetch_add(added, std::memory_order_relaxed);
+    }
+}
+
 // Called by generate_initial_areas(), used in parallel by multiple layers.
 // Produce
 // 1) Maximum num_support_roof_layers roof (top interface & contact) layers.
@@ -1246,11 +1363,18 @@ void sample_overhang_area(
     const size_t num_support_roof_layers,
     //
     const coord_t connect_length,
+    // Baobab tip grid spacing, or zero to seed tips on the stock organic grid.
+    const coord_t baobab_tip_spacing,
+    // Baobab seeding telemetry, or nullptr when not collecting.
+    BaobabSeedStats *baobab_stats,
     // Configuration classes
     const TreeSupportMeshGroupSettings &mesh_group_settings,
     // Configuration & Output
     RichInterfacePlacer &interface_placer)
 {
+    if (baobab_stats != nullptr)
+        (large_horizontal_roof ? baobab_stats->regions_roof : baobab_stats->regions_regular)
+            .fetch_add(1, std::memory_order_relaxed);
     // Assumption is that roof will support roof further up to avoid a lot of unnecessary branches. Each layer down it is checked whether the roof area
     // is still large enough to be a roof and aborted as soon as it is not. This part was already reworked a few times, and there could be an argument
     // made to change it again if there are actual issues encountered regarding supporting roofs.
@@ -1264,6 +1388,29 @@ void sample_overhang_area(
         return generate_support_infill_lines(area, interface_placer.support_parameters, true, layer_idx,
                                              mesh_group_settings.support_roof_line_distance);
     };
+
+    // Whether a roof is viable is judged on the roof's own line spacing (generate_roof_lines);
+    // only the tips are sampled from the coarser gather grid, so widening it cannot cost an
+    // interface layer. These lines are sampled for tip positions and never printed, so Baobab
+    // requests them as support rather than roof lines: the roof branch of
+    // generate_support_infill_lines() derives density from interface_density and discards the
+    // line distance entirely, which would make the gather spacing a no-op.
+    auto generate_tip_lines = [&interface_placer, &mesh_group_settings,
+                               baobab_tip_spacing](const Polygons &area, LayerIndex layer_idx) -> Polylines
+    {
+        if (baobab_tip_spacing > 0)
+            return generate_support_infill_lines(area, interface_placer.support_parameters, false, layer_idx,
+                                                 baobab_tip_spacing);
+        return generate_support_infill_lines(area, interface_placer.support_parameters, true, layer_idx,
+                                             mesh_group_settings.support_roof_line_distance);
+    };
+
+    // Spacing of tip points ALONG a sampled line, so a Baobab gather cell is square. Safe to
+    // widen only here: these two call sites resample open, fill-generated polylines with
+    // min_points = 1, so neither the closed-polygon all-pairs scan nor the min_points back-off
+    // loop inside ensure_maximum_distance_polyline() engages. The calls that hand it closed
+    // overhang outlines keep the stock connect_length, whose cost grows superlinearly with it.
+    const coord_t tip_sample_length = baobab_tip_spacing > 0 ? baobab_tip_spacing : connect_length;
 
     LineInformations overhang_lines;
     // Track how many top contact / interface layers were already generated.
@@ -1303,13 +1450,15 @@ void sample_overhang_area(
                 {
                     size_t dtt_before = dtt_roof - 1;
                     // Produce support head points supporting an interface layer: First produce the interface lines, then sample them.
+                    Polylines roof_tip_lines = ensure_maximum_distance_polyline(
+                        generate_tip_lines(last_overhang, layer_idx - dtt_before), tip_sample_length, 1);
+                    if (baobab_stats != nullptr)
+                        for (const Polyline &poly : roof_tip_lines)
+                            baobab_stats->points_gathered.fetch_add(poly.size(), std::memory_order_relaxed);
+                    baobab_supplement_outline_seeds(last_overhang, baobab_tip_spacing, roof_tip_lines, baobab_stats);
                     overhang_lines =
-                        split_lines(convert_lines_to_internal(
-                                        interface_placer.volumes, interface_placer.config,
-                                        ensure_maximum_distance_polyline(generate_roof_lines(last_overhang,
-                                                                                             layer_idx - dtt_before),
-                                                                         connect_length, 1),
-                                        layer_idx - dtt_before),
+                        split_lines(convert_lines_to_internal(interface_placer.volumes, interface_placer.config,
+                                                              roof_tip_lines, layer_idx - dtt_before),
                                     [&interface_placer, layer_idx, dtt_before](const std::pair<Point, LineStatus> &p)
                                     {
                                         return evaluate_point_for_next_layer_function(interface_placer.volumes,
@@ -1352,15 +1501,22 @@ void sample_overhang_area(
         // This is not doen when a roof is above as the roof will support the model and the trees only need to support the roof
         bool supports_roof = dtt_roof > 0;
         bool continuous_tips = !supports_roof && large_horizontal_roof;
+        // Baobab samples as support lines for the same reason as generate_tip_lines: only the
+        // support branch honors the line distance that carries the gather spacing.
+        const bool sample_as_roof = supports_roof && baobab_tip_spacing == 0;
+        const coord_t sample_distance = baobab_tip_spacing > 0
+                                            ? baobab_tip_spacing
+                                            : (supports_roof ? mesh_group_settings.support_roof_line_distance
+                                                             : mesh_group_settings.support_tree_branch_distance);
         Polylines polylines = ensure_maximum_distance_polyline(
-            generate_support_infill_lines(overhang_area, interface_placer.support_parameters, supports_roof,
-                                          layer_idx - layer_generation_dtt,
-                                          supports_roof ? mesh_group_settings.support_roof_line_distance
-                                                        : mesh_group_settings.support_tree_branch_distance),
-            continuous_tips ? interface_placer.config.min_radius / 2 : connect_length, 1);
+            generate_support_infill_lines(overhang_area, interface_placer.support_parameters, sample_as_roof,
+                                          layer_idx - layer_generation_dtt, sample_distance),
+            continuous_tips ? interface_placer.config.min_radius / 2 : tip_sample_length, 1);
         size_t point_count = 0;
         for (const Polyline &poly : polylines)
             point_count += poly.size();
+        if (baobab_stats != nullptr)
+            baobab_stats->points_gathered.fetch_add(point_count, std::memory_order_relaxed);
         const size_t min_support_points = std::max(coord_t(1),
                                                    std::min(coord_t(3),
                                                             coord_t(total_length(overhang_area) / connect_length)));
@@ -1379,8 +1535,20 @@ void sample_overhang_area(
                                                  jtMiter, 1.2)) < sqr(scaled<double>(0.001))
                                  ? reduced_overhang_area
                                  : overhang_area),
-                connect_length, min_support_points);
+                // Baobab resamples at its tip spacing so a small region seeds sparse tips, not a
+                // dense ring. Safe from the closed-polyline resample cost: the fallback only
+                // fires on regions the gather grid found nearly empty, so the outline is short.
+                tip_sample_length, min_support_points);
+            // The sparse gather sampling was discarded and the region's outline re-sampled at
+            // the tip sampling distance.
+            if (baobab_stats != nullptr)
+            {
+                baobab_stats->outline_fallbacks.fetch_add(1, std::memory_order_relaxed);
+                for (const Polyline &poly : polylines)
+                    baobab_stats->points_from_fallback.fetch_add(poly.size(), std::memory_order_relaxed);
+            }
         }
+        baobab_supplement_outline_seeds(overhang_area, baobab_tip_spacing, polylines, baobab_stats);
         overhang_lines = convert_lines_to_internal(interface_placer.volumes, interface_placer.config, polylines,
                                                    layer_idx - dtt_roof);
     }
@@ -1422,7 +1590,14 @@ static void generate_initial_areas(const PrintObject &print_object, const TreeMo
                                    std::function<void()> throw_on_cancel)
 {
     using AvoidanceType = TreeModelVolumes::AvoidanceType;
+    // Baobab's parameterization is applied inside the constructor.
     TreeSupportMeshGroupSettings mesh_group_settings(print_object);
+    const bool baobab = is_baobab_object(print_object);
+    // Zero leaves the stock tip grid alone; nonzero seeds one element per gather cell. For
+    // baobab the branch distance IS the effective gather spacing (config or env sweep).
+    const coord_t baobab_tip_spacing = baobab ? mesh_group_settings.support_tree_branch_distance : coord_t(0);
+    BaobabSeedStats baobab_seed_stats;
+    BaobabSeedStats *const baobab_stats = (baobab && debug_enabled(DBG_BAOBAB)) ? &baobab_seed_stats : nullptr;
 
     // To ensure z_distance_top_layers are left empty between the overhang (zeroth empty layer), the support has to be added z_distance_top_layers+1 layers below
     const size_t z_distance_delta = config.z_distance_top_layers + 1;
@@ -1434,6 +1609,9 @@ static void generate_initial_areas(const PrintObject &print_object, const TreeMo
         return;
 #endif
 
+    // Not a density knob: this is the along-a-line sampling distance handed to
+    // ensure_maximum_distance_polyline(), whose cost is superlinear in it. Tip density is
+    // set by the line spacing instead. Left at the stock value for Baobab too.
     const coord_t connect_length = (config.support_line_width * 100. / mesh_group_settings.support_tree_top_rate) +
                                    std::max(2. * config.min_radius - 1.0 * config.support_line_width, 0.0);
     // As r*r=x*x+y*y (circle equation): If a circle with center at (0,0) the top most point is at (0,r) as in y=r.
@@ -1487,7 +1665,7 @@ static void generate_initial_areas(const PrintObject &print_object, const TreeMo
         const size_t num_raft_layers = config.raft_layers.size();
         const size_t first_support_layer = std::max(int(num_raft_layers) - int(z_distance_delta), 1);
         num_support_layers = size_t(
-            std::max(0, int(print_object.layer_count()) + int(num_raft_layers) - int(z_distance_delta)));
+            std::max(0, int(config.support_layer_zs.size()) + int(num_raft_layers) - int(z_distance_delta)));
         raft_contact_layer_idx = generate_raft_contact(print_object, config, interface_placer);
         // Enumerate layers for which the support tips may be generated from overhangs above.
         raw_overhangs.reserve(num_support_layers - first_support_layer);
@@ -1502,8 +1680,8 @@ static void generate_initial_areas(const PrintObject &print_object, const TreeMo
     tbb::parallel_for(
         tbb::blocked_range<size_t>(0, raw_overhangs.size()),
         [&volumes, &config, &raw_overhangs, &mesh_group_settings, min_xy_dist, roof_enabled, num_support_roof_layers,
-         extra_outset, circle_length_to_half_linewidth_change, connect_length, &rich_interface_placer,
-         &throw_on_cancel](const tbb::blocked_range<size_t> &range)
+         extra_outset, circle_length_to_half_linewidth_change, connect_length, baobab_tip_spacing, baobab_stats,
+         &rich_interface_placer, &throw_on_cancel](const tbb::blocked_range<size_t> &range)
         {
             for (size_t raw_overhang_idx = range.begin(); raw_overhang_idx < range.end(); ++raw_overhang_idx)
             {
@@ -1631,8 +1809,8 @@ static void generate_initial_areas(const PrintObject &print_object, const TreeMo
                     for (ExPolygon &roof_part : union_ex(overhang_roofs))
                     {
                         sample_overhang_area(to_polygons(std::move(roof_part)), true, layer_idx,
-                                             num_support_roof_layers, connect_length, mesh_group_settings,
-                                             rich_interface_placer);
+                                             num_support_roof_layers, connect_length, baobab_tip_spacing, baobab_stats,
+                                             mesh_group_settings, rich_interface_placer);
                         throw_on_cancel();
                     }
                 }
@@ -1643,12 +1821,32 @@ static void generate_initial_areas(const PrintObject &print_object, const TreeMo
                 for (ExPolygon &support_part : union_ex(overhang_regular))
                 {
                     sample_overhang_area(to_polygons(std::move(support_part)), false, layer_idx,
-                                         num_support_roof_layers, connect_length, mesh_group_settings,
-                                         rich_interface_placer);
+                                         num_support_roof_layers, connect_length, baobab_tip_spacing, baobab_stats,
+                                         mesh_group_settings, rich_interface_placer);
                     throw_on_cancel();
                 }
             }
         });
+
+    if (baobab_stats != nullptr)
+    {
+        // points_gathered are seeded on the gather grid; points_from_fallback are seeded on a
+        // region outline because the gather grid gave that region too few points. The outline is
+        // resampled at the tip sampling distance, so fallback points keep the gather spacing.
+        // points_supplemental are outline points farther than the gather spacing from every
+        // gathered seed - outside every canopy's rim envelope - seeded so the rim can cover the
+        // whole interface outline.
+        const size_t gathered = baobab_stats->points_gathered.load(std::memory_order_relaxed);
+        const size_t fallback_points = baobab_stats->points_from_fallback.load(std::memory_order_relaxed);
+        dbg_log(DBG_BAOBAB, 0., "BAOBAB-SEED",
+                "gather_spacing=%.3f regions_roof=%zu regions_regular=%zu points_gathered=%zu outline_fallbacks=%zu "
+                "points_from_fallback=%zu regions_supplemented=%zu points_supplemental=%zu",
+                unscaled<double>(baobab_tip_spacing), baobab_stats->regions_roof.load(std::memory_order_relaxed),
+                baobab_stats->regions_regular.load(std::memory_order_relaxed), gathered,
+                baobab_stats->outline_fallbacks.load(std::memory_order_relaxed), fallback_points,
+                baobab_stats->regions_supplemented.load(std::memory_order_relaxed),
+                baobab_stats->points_supplemental.load(std::memory_order_relaxed));
+    }
 
     finalize_raft_contact(print_object, raft_contact_layer_idx, interface_placer.top_contacts_mutable(), move_bounds);
 }
@@ -2051,6 +2249,17 @@ static void increase_areas_one_layer(const TreeModelVolumes &volumes, const Tree
 {
     using AvoidanceType = TreeModelVolumes::AvoidanceType;
 
+    // Baobab plant preference: a trunk may land on a stable model surface only after it is deep
+    // enough for its canopy to have closed, or the mouth above it could never open fully. The
+    // plumb convergence depth for one gather spacing of reach, in layers.
+    size_t baobab_plant_min_depth = std::numeric_limits<size_t>::max();
+    if (config.settings.support_baobab_plant_on_model && config.support_rests_on_model)
+        if (const double g_nominal = unscaled<double>(config.layer_height) *
+                                     std::tan(config.settings.support_baobab_max_canopy_angle);
+            g_nominal > 0.)
+            baobab_plant_min_depth =
+                size_t(std::ceil(unscaled<double>(config.settings.support_tree_branch_distance) / g_nominal)) + 2;
+
     tbb::parallel_for(
         tbb::blocked_range<size_t>(0, merging_areas.size(), 1),
         [&](const tbb::blocked_range<size_t> &range)
@@ -2075,6 +2284,41 @@ static void increase_areas_one_layer(const TreeModelVolumes &volumes, const Tree
 
                 Polygons to_bp_data, to_model_data;
                 coord_t radius = support_element_collision_radius(config, elem);
+
+                // Baobab plant preference: land on a stable top surface of the model instead of
+                // descending further. Stable = placeable at this radius AND backed by model
+                // substance a foot-diameter below, so thin fins and small ledges never qualify.
+                // Ending the branch here (no offspring) hands it to the existing gracious rest
+                // machinery, which settles it on the best placeable layer and emits the bottom
+                // contact interface under the foot.
+                if (elem.distance_to_top >= baobab_plant_min_depth)
+                {
+                    const Polygons landing = intersection(parent.influence_area,
+                                                          volumes.getPlaceableAreas(radius, layer_idx,
+                                                                                    throw_on_cancel));
+                    if (!landing.empty())
+                    {
+                        const auto backing_layers = LayerIndex(
+                            2. * unscaled<double>(radius) / unscaled<double>(config.layer_height) + 1.);
+                        const LayerIndex backing_layer = std::max(LayerIndex(0), layer_idx - backing_layers);
+                        const Point landing_centre = get_extents(landing).center();
+                        if (!intersection(landing, volumes.getCollision(0, backing_layer, parent.state.use_min_xy_dist))
+                                 .empty())
+                        {
+                            parent.state.to_model_gracious = true;
+                            parent.state.to_buildplate = false;
+                            dbg_log(DBG_BAOBAB, 0., "BAOBAB-PLANT", "planted layer=%d x=%.2f y=%.2f r=%.2f",
+                                    int(layer_idx), unscaled<double>(landing_centre.x()),
+                                    unscaled<double>(landing_centre.y()), unscaled<double>(radius));
+                            continue;
+                        }
+                        // A landing existed but nothing under it: worth a line, because "why did
+                        // this trunk not plant" is otherwise unanswerable from the stream.
+                        dbg_log(DBG_BAOBAB, 0., "BAOBAB-PLANT", "refused_unbacked layer=%d x=%.2f y=%.2f r=%.2f",
+                                int(layer_idx), unscaled<double>(landing_centre.x()),
+                                unscaled<double>(landing_centre.y()), unscaled<double>(radius));
+                    }
+                }
 
                 // When the radius increases, the outer "support wall" of the branch will have been moved farther away from the center (as this is the definition of radius).
                 // As it is not specified that the support_tree_angle has to be one of the center of the branch, it is here seen as the smaller angle of the outer wall of the branch, to the outer wall of the same branch one layer above.
@@ -3079,8 +3323,31 @@ static void set_to_model_contact_to_model_gracious(const TreeModelVolumes &volum
                 elem->state.deleted = true;
             }
         }
-        // Guess a point inside the influence area, in which the branch will be placed in.
-        const Point best = move_inside_if_outside(last_successfull_layer->influence_area,
+        // Rest the branch fully on the model: the placeable area is already eroded by the branch
+        // radius, so any centre inside it keeps the whole foot on the surface - and the walk
+        // above guaranteed the intersection is non-empty here. Choosing from the influence area
+        // alone can hang the foot over a hole or an edge.
+        Polygons landing = intersection(
+            last_successfull_layer->influence_area,
+            volumes.getPlaceableAreas(support_element_collision_radius(config, last_successfull_layer->state),
+                                      last_successfull_layer->state.layer_idx, throw_on_cancel));
+        if (config.settings.support_baobab_plant_on_model && !landing.empty())
+        {
+            // A planted trunk prefers the backed subset, so its foot stands on substance rather
+            // than a shell edge; keep the plain landing when nothing backed remains.
+            const auto backing_layers = LayerIndex(
+                2. * unscaled<double>(support_element_collision_radius(config, last_successfull_layer->state)) /
+                    unscaled<double>(config.layer_height) +
+                1.);
+            const Polygons backed = intersection(
+                landing,
+                volumes.getCollision(0,
+                                     std::max(LayerIndex(0), last_successfull_layer->state.layer_idx - backing_layers),
+                                     last_successfull_layer->state.use_min_xy_dist));
+            if (!backed.empty())
+                landing = backed;
+        }
+        const Point best = move_inside_if_outside(landing.empty() ? last_successfull_layer->influence_area : landing,
                                                   last_successfull_layer->state.next_position);
         last_successfull_layer->state.result_on_layer = best;
         BOOST_LOG_TRIVIAL(debug) << "Added gracious Support On Model Point (" << best.x() << "," << best.y()
@@ -4128,6 +4395,9 @@ static void generate_support_areas(Print &print, const BuildVolume &build_volume
         SupportGeneratorLayersPtr interface_layers;
         SupportGeneratorLayersPtr base_interface_layers;
         SupportGeneratorLayersPtr intermediate_layers(num_support_layers, nullptr);
+        // Which layers hold a canopy, and its footprint there: the canopy-vs-trunk authority the
+        // toolpath generator uses to grow the fill only inside canopies.
+        BaobabCanopyFootprints baobab_canopy_footprints;
         // Organic tips route through top_contacts for width reduction, even when interface_layers == 0
         bool organic_support = (print_object.config().support_material_style != smsTree);
         if (support_params.has_top_contacts || has_raft || organic_support)
@@ -4170,6 +4440,7 @@ static void generate_support_areas(Print &print, const BuildVolume &build_volume
             for (size_t mesh_idx : processing.second)
                 generate_initial_areas(*print.get_object(mesh_idx), volumes, config, overhangs, move_bounds,
                                        interface_placer, throw_on_cancel);
+
             auto t_gen = std::chrono::high_resolution_clock::now();
             pf_tree.stage("  tree: generate_initial_areas");
 
@@ -4214,8 +4485,38 @@ static void generate_support_areas(Print &print, const BuildVolume &build_volume
                 // Organic style, OR mixed mode where we're generating organic supports for painted regions
                 organic_draw_branches(*print.get_object(processing.second.front()), volumes, config, move_bounds,
                                       bottom_contacts, top_contacts, interface_placer, intermediate_layers,
-                                      layer_storage, throw_on_cancel, additional_excluded_areas);
+                                      layer_storage, throw_on_cancel, additional_excluded_areas, overhangs,
+                                      &baobab_canopy_footprints);
                 pf_tree.stage("  tree: organic_draw_branches");
+            }
+
+            const bool baobab_object = is_baobab_object(print_object);
+            const bool baobab_census = baobab_object && debug_enabled(DBG_BAOBAB);
+            if (baobab_census)
+            {
+                baobab_debug_layer_census("BAOBAB-DRAW", "base", intermediate_layers, &print_object);
+                baobab_debug_layer_census("BAOBAB-DRAW", "contacts", top_contacts, &print_object);
+            }
+            else if (!baobab_object)
+            {
+                support_debug_layer_census("TREE-DRAW", "base", intermediate_layers, &print_object);
+                support_debug_layer_census("TREE-DRAW", "contacts", top_contacts, &print_object);
+            }
+
+            // Contact anchoring tally for this group: how many interface layers anchored to a real
+            // object surface versus the grid, the extreme anchor offsets, and clamp engagement.
+            // Nonzero offsets appear only when the object leaves the support grid (variable layer
+            // height); grid fallbacks only for stacks probing past the top of the object.
+            if (debug_enabled(DBG_SUPPORT))
+            {
+                const InterfaceAnchorStats &st = *interface_placer.anchor_stats;
+                dbg_log(DBG_SUPPORT, 0., "TREE-ANCHOR",
+                        "layers object=%zu grid_fallback=%zu raft=%zu offset_up_max_um=%lld "
+                        "offset_down_max_um=%lld height_clamped floor=%zu ceiling=%zu",
+                        st.anchor_object.load(), st.anchor_grid_fallback.load(), st.anchor_raft.load(),
+                        static_cast<long long>(st.offset_up_max_um.load()),
+                        static_cast<long long>(st.offset_down_max_um.load()), st.height_clamped_floor.load(),
+                        st.height_clamped_ceiling.load());
             }
 
             remove_undefined_layers();
@@ -4223,6 +4524,21 @@ static void generate_support_areas(Print &print, const BuildVolume &build_volume
                 generate_interface_layers(print_object.config(), support_params, bottom_contacts, top_contacts,
                                           interface_layers, base_interface_layers, intermediate_layers, layer_storage);
             pf_tree.stage("  tree: generate_interface_layers");
+
+            if (baobab_census)
+            {
+                baobab_debug_layer_census("BAOBAB-IFACE", "base", intermediate_layers, &print_object);
+                baobab_debug_layer_census("BAOBAB-IFACE", "contacts", top_contacts);
+                baobab_debug_layer_census("BAOBAB-IFACE", "interfaces", interface_layers);
+                baobab_debug_layer_census("BAOBAB-IFACE", "base_interfaces", base_interface_layers);
+            }
+            else if (!baobab_object)
+            {
+                support_debug_layer_census("TREE-IFACE", "base", intermediate_layers, &print_object);
+                support_debug_layer_census("TREE-IFACE", "contacts", top_contacts);
+                support_debug_layer_census("TREE-IFACE", "interfaces", interface_layers);
+                support_debug_layer_census("TREE-IFACE", "base_interfaces", base_interface_layers);
+            }
 
             // Morphological closing affects outer boundary. Instead, remove holes by area - this closes
             // small holes without changing the outer contour.
@@ -4257,6 +4573,27 @@ static void generate_support_areas(Print &print, const BuildVolume &build_volume
                 close_holes_in_layers(interface_layers);
                 close_holes_in_layers(base_interface_layers);
             }
+
+            // Baobab: the interface is the only authority on the structure below it, so base
+            // layers carry no holes at all. Holes here are either interface holes (already
+            // resolved above) or voids enclosed where canopy mouths merge; both print as useless
+            // walls around dead space. Fill them unconditionally - the object re-trim below is
+            // the only thing allowed to cut clearance back in.
+            if (baobab_object)
+                for (SupportGeneratorLayer *layer : intermediate_layers)
+                    if (layer != nullptr && !layer->polygons.empty())
+                    {
+                        ExPolygons expolys = union_ex(layer->polygons);
+                        bool holed = false;
+                        for (ExPolygon &expoly : expolys)
+                            if (!expoly.holes.empty())
+                            {
+                                expoly.holes.clear();
+                                holed = true;
+                            }
+                        if (holed)
+                            layer->polygons = to_polygons(expolys);
+                    }
 
             // The hole closing above may remove clearance holes around small object features.
             // Re-trim interface layers against object geometry to restore proper XY gap clearance.
@@ -4294,8 +4631,18 @@ static void generate_support_areas(Print &print, const BuildVolume &build_volume
                 trim_layers_by_object(top_contacts);
                 trim_layers_by_object(interface_layers);
                 trim_layers_by_object(base_interface_layers);
+                // Restores clearance around any object feature that pierces a filled base layer.
+                if (baobab_object)
+                    trim_layers_by_object(intermediate_layers);
             }
             pf_tree.stage("  tree: hole closing + trim_by_object");
+
+            if (baobab_census)
+            {
+                baobab_debug_layer_census("BAOBAB-TRIM", "base", intermediate_layers, &print_object);
+                baobab_debug_layer_census("BAOBAB-TRIM", "contacts", top_contacts);
+                baobab_debug_layer_census("BAOBAB-TRIM", "interfaces", interface_layers);
+            }
 
             auto t_draw = std::chrono::high_resolution_clock::now();
             auto dur_pre_gen = 0.001 *
@@ -4419,7 +4766,8 @@ static void generate_support_areas(Print &print, const BuildVolume &build_volume
         // Don't fill in the tree supports, make them hollow with just a single sheath line.
         generate_support_toolpaths(print_object.support_layers(), print_object.config(), support_params,
                                    print_object.slicing_parameters(), raft_layers, bottom_contacts, top_contacts,
-                                   intermediate_layers, interface_layers, base_interface_layers);
+                                   intermediate_layers, interface_layers, base_interface_layers,
+                                   is_baobab_object(print_object), &baobab_canopy_footprints);
         pf_tree.stage("  tree: generate_support_toolpaths");
 
 #if 0

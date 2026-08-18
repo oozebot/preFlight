@@ -31,7 +31,10 @@ public:
         coord_t innermost_spacing = 0,             // 0 = use perimeter_spacing
         coord_t actual_bead_count = 0,             // actual shells requested (not theoretical max)
         int layer_id = -1,                         // For debug output (-1 = unknown)
-        coord_t thin_wall_snap_precision = 10000   // Thin wall width snap grid (nanometers), default 0.01mm
+        coord_t thin_wall_snap_precision = 10000,  // Thin wall width snap grid (nanometers), default 0.01mm
+        coord_t nozzle_diameter = 0,               // Anchor for the zero-overlap bead count rule (0 = off)
+        coord_t max_bead_width_external = 0,       // Printable cap forcing a center-bead split above it (0 = none)
+        double debug_print_z = 0.                  // For debug output
     );
 };
 

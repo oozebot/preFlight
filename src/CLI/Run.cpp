@@ -41,7 +41,8 @@ static bool apply_debug_flags(const Data &cli)
             if (bit == 0)
             {
                 std::fprintf(stderr,
-                             "Unknown --debug category '%s'. Valid: fill, perimeters, interlock, serpentine, all.\n",
+                             "Unknown --debug category '%s'. Valid: fill, perimeters, interlock, serpentine, baobab, "
+                             "support, stability, all.\n",
                              token.c_str());
                 return false;
             }
@@ -52,7 +53,8 @@ static bool apply_debug_flags(const Data &cli)
 
     if (mask == 0)
     {
-        std::fprintf(stderr, "--debug requires at least one category: fill, perimeters, interlock, serpentine, all.\n");
+        std::fprintf(stderr, "--debug requires at least one category: fill, perimeters, interlock, serpentine, baobab, "
+                             "support, stability, all.\n");
         return false;
     }
 

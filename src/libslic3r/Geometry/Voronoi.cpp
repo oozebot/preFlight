@@ -30,6 +30,13 @@ template void VoronoiDiagram::construct_voronoi(PolygonsSegmentIndexConstIt, Pol
 template void VoronoiDiagram::construct_voronoi(AthenaPolygonsSegmentIndexConstIt, AthenaPolygonsSegmentIndexConstIt,
                                                 bool);
 
+// The skeletal trapezoidation retries a repair by rotation directly when its
+// half-edge graph comes out incomplete.
+template VoronoiDiagram::IssueType VoronoiDiagram::try_to_repair_degenerated_voronoi_diagram_by_rotation(
+    PolygonsSegmentIndexConstIt, PolygonsSegmentIndexConstIt, double);
+template VoronoiDiagram::IssueType VoronoiDiagram::try_to_repair_degenerated_voronoi_diagram_by_rotation(
+    AthenaPolygonsSegmentIndexConstIt, AthenaPolygonsSegmentIndexConstIt, double);
+
 template<typename SegmentIterator>
 typename boost::polygon::enable_if<
     typename boost::polygon::gtl_if<typename boost::polygon::is_segment_concept<typename boost::polygon::geometry_concept<

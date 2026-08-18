@@ -317,7 +317,8 @@ std::vector<Bridge> get_grouped_bridges(ExPolygons &&bridge_expolygons,
 }
 
 Surfaces merge_bridges(std::vector<Bridge> &bridges, const std::vector<Algorithm::RegionExpansionEx> &bridge_expansions,
-                       const float closing_radius)
+                       const float closing_radius, const bool use_air_floating = false,
+                       const ExPolygons *lower_slices = nullptr, const double dbg_print_z = 0.)
 {
     for (auto it = bridge_expansions.begin(); it != bridge_expansions.end();)
     {
@@ -328,6 +329,15 @@ Surfaces merge_bridges(std::vector<Bridge> &bridges, const std::vector<Algorithm
     }
 
     Surfaces result;
+    // The air-support reference is loop-invariant and the lower layer can be large; expand it
+    // once for every bridge group on this layer region.
+    std::optional<Polygons> lower_expanded_storage;
+    const Polygons *lower_expanded = nullptr;
+    if (use_air_floating && lower_slices != nullptr)
+    {
+        lower_expanded_storage = expand(to_polygons(*lower_slices), float(SCALED_EPSILON));
+        lower_expanded = &*lower_expanded_storage;
+    }
     for (uint32_t bridge_id = 0; bridge_id < uint32_t(bridges.size()); ++bridge_id)
     {
         if (group_id(bridges, bridge_id) == bridge_id)
@@ -358,11 +368,55 @@ Surfaces merge_bridges(std::vector<Bridge> &bridges, const std::vector<Algorithm
 
             for (ExPolygon &bridge_expolygon : merged_bridges)
             {
-                const Lines lines{
-                    to_lines(diff_pl(to_polylines(bridge_expolygon), expand(expansions, float(SCALED_EPSILON))))};
+                // Floating edges drive the direction vote. With interlocking the expansions can
+                // claim essentially the whole boundary (the shell band leaves no fill surfaces to
+                // stop at), reducing the floating set to orientation noise, so there the floating
+                // edges come from slice truth instead: boundary segments over air per the lower
+                // slices.
+                const bool air_input = use_air_floating && lower_expanded != nullptr;
+                const Lines lines{air_input ? to_lines(diff_pl(to_polylines(bridge_expolygon), *lower_expanded))
+                                            : to_lines(diff_pl(to_polylines(bridge_expolygon),
+                                                               expand(expansions, float(SCALED_EPSILON))))};
                 auto [bridging_dir, unsupported_dist] = detect_bridging_direction(lines, to_polygons(bridge_expolygon));
                 Surface surface{stBottomBridge, std::move(bridge_expolygon)};
                 surface.bridge_angle = M_PI + std::atan2(bridging_dir.y(), bridging_dir.x());
+                if (Slic3r::debug_enabled(Slic3r::DBG_FILL))
+                {
+                    double floating_len = 0;
+                    for (const Line &l : lines)
+                        floating_len += unscaled<double>(l.length());
+                    double boundary_len = unscaled<double>(surface.expolygon.contour.length());
+                    for (const Polygon &h : surface.expolygon.holes)
+                        boundary_len += unscaled<double>(h.length());
+                    const BoundingBox bb = get_extents(surface.expolygon);
+                    dbg_log(Slic3r::DBG_FILL, dbg_print_z, "FILL",
+                            "BRIDGE_DIR src=merge input=%s area=%.2fmm2 boundary=%.2fmm floating=%.2fmm "
+                            "floating_segs=%zu angle=%.3frad unsupported=%.2f bbox=(%.2f,%.2f)-(%.2f,%.2f)",
+                            air_input ? "air" : "expansion", std::abs(surface.expolygon.area()) * 1e-12, boundary_len,
+                            floating_len, lines.size(), surface.bridge_angle, unsupported_dist,
+                            unscaled<double>(bb.min.x()), unscaled<double>(bb.min.y()), unscaled<double>(bb.max.x()),
+                            unscaled<double>(bb.max.y()));
+                    // Shadow comparison on the paths still using expansion-based floating edges:
+                    // the air-based candidate is logged next to the production angle, so classic
+                    // slices provide the equivalence evidence.
+                    if (!air_input && lower_slices != nullptr)
+                    {
+                        const Lines air_lines{
+                            to_lines(diff_pl(to_polylines(surface.expolygon),
+                                             expand(to_polygons(*lower_slices), float(SCALED_EPSILON))))};
+                        double air_len = 0;
+                        for (const Line &l : air_lines)
+                            air_len += unscaled<double>(l.length());
+                        auto [cand_dir, cand_unsup] = detect_bridging_direction(air_lines,
+                                                                                to_polygons(surface.expolygon));
+                        dbg_log(Slic3r::DBG_FILL, dbg_print_z, "FILL",
+                                "BRIDGE_DIR_CAND air=%.2fmm air_segs=%zu cand_angle=%.3frad cand_unsupported=%.2f "
+                                "bbox=(%.2f,%.2f)-(%.2f,%.2f)",
+                                air_len, air_lines.size(), M_PI + std::atan2(cand_dir.y(), cand_dir.x()), cand_unsup,
+                                unscaled<double>(bb.min.x()), unscaled<double>(bb.min.y()),
+                                unscaled<double>(bb.max.x()), unscaled<double>(bb.max.y()));
+                    }
+                }
                 result.push_back(std::move(surface));
             }
         }
@@ -532,7 +586,8 @@ void expand_bridges_for_overlap(Surfaces &bridges, const LayerRegion *layer_regi
 // detect bridges.
 // Trim "shells" by the expanded bridges.
 Surfaces expand_bridges_detect_orientations(Surfaces &surfaces, std::vector<ExpansionZone> &expansion_zones,
-                                            const float closing_radius)
+                                            const float closing_radius, const bool use_air_floating,
+                                            const ExPolygons *lower_slices, const double dbg_print_z)
 {
     using namespace Slic3r::Algorithm;
 
@@ -552,7 +607,8 @@ Surfaces expand_bridges_detect_orientations(Surfaces &surfaces, std::vector<Expa
     // Merge the groups with the same group id, produce surfaces by merging source overhangs with their newly expanded anchors.
     std::sort(expansion_result.expansions.begin(), expansion_result.expansions.end(), [](auto &l, auto &r)
               { return l.src_id < r.src_id || (l.src_id == r.src_id && l.boundary_id < r.boundary_id); });
-    Surfaces out{merge_bridges(bridges, expansion_result.expansions, closing_radius)};
+    Surfaces out{merge_bridges(bridges, expansion_result.expansions, closing_radius, use_air_floating, lower_slices,
+                               dbg_print_z)};
 
     // Clip by the expanded bridges.
     for (ExpansionZone &expansion_zone : expansion_zones)
@@ -718,8 +774,11 @@ void LayerRegion::process_external_surfaces(const Layer *lower_layer, const Poly
         bridges.surfaces = custom_angle > 0
                                ? expand_merge_surfaces(m_fill_surfaces.surfaces, stBottomBridge, bridge_expansion_zones,
                                                        closing_radius, Geometry::deg2rad(custom_angle))
-                               : expand_bridges_detect_orientations(m_fill_surfaces.surfaces, bridge_expansion_zones,
-                                                                    closing_radius);
+                               : expand_bridges_detect_orientations(
+                                     m_fill_surfaces.surfaces, bridge_expansion_zones, closing_radius,
+                                     this->region().config().interlock_perimeters_enabled &&
+                                         this->num_interlocking_shells() > 0,
+                                     lower_layer != nullptr ? &lower_layer->lslices : nullptr, this->layer()->print_z);
         BOOST_LOG_TRIVIAL(trace) << "Processing external surface, detecting bridges - done";
 
         // For counterbore bridges, DON'T override bridge_angle here. Keeping the
@@ -1187,10 +1246,24 @@ void LayerRegion::process_external_surfaces(const Layer *lower_layer, const Poly
                 }
                 else
                 {
+                    // Legacy merge path; the telemetry below reveals if it ever runs live.
                     auto [bridging_dir,
                           unsupported_dist] = detect_bridging_direction(to_polygons(initial),
                                                                         to_polygons(lower_layer->lslices));
                     bridges[idx_last].bridge_angle = PI + std::atan2(bridging_dir.y(), bridging_dir.x());
+                    if (Slic3r::debug_enabled(Slic3r::DBG_FILL))
+                    {
+                        double init_a = 0;
+                        for (const ExPolygon &e : initial)
+                            init_a += std::abs(e.area());
+                        const BoundingBox db = get_extents(initial);
+                        dbg_log(Slic3r::DBG_FILL, this->layer()->print_z, "FILL",
+                                "BRIDGE_DIR src=legacy group=%zu initial=%.2fmm2 angle=%.3frad unsupported=%.2f "
+                                "bbox=(%.2f,%.2f)-(%.2f,%.2f)",
+                                group_id, init_a * 1e-12, bridges[idx_last].bridge_angle, unsupported_dist,
+                                unscaled<double>(db.min.x()), unscaled<double>(db.min.y()),
+                                unscaled<double>(db.max.x()), unscaled<double>(db.max.y()));
+                    }
 
                     // #if 1
                     //     coordf_t    stroke_width = scale_(0.06);

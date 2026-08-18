@@ -181,6 +181,12 @@ SupportParameters::SupportParameters(const PrintObject &object)
     this->tree_branch_diameter_double_wall_area_scaled =
         0.25 * sqr(scaled<double>(object_config.support_tree_branch_diameter_double_wall.value)) * M_PI;
 
+    // A section three quarters of a trunk wide is substantial enough for the full wall count;
+    // anything narrower gets a single loop.
+    this->baobab_double_wall_area_scaled =
+        0.25 * sqr(scaled<double>(0.75 * object_config.support_baobab_trunk_diameter.value)) * M_PI;
+    this->baobab_canopy_density_percent = object_config.support_baobab_canopy_density.value;
+
     this->prefer_clockwise_movements = print_config.prefer_clockwise_movements;
 }
 

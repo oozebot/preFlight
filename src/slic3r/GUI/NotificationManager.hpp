@@ -200,8 +200,11 @@ public:
     // Creates Slicing Error notification with a custom text and no fade out.
     void push_slicing_error_notification(const std::string &text);
     // Creates Slicing Warning notification with a custom text and no fade out.
+    // renew: the owning step re-ran and re-asserted this warning, so a user dismissal is
+    // cleared. Refresh re-pushes pass false and respect a standing dismissal.
     void push_slicing_warning_notification(
-        const std::string &text, bool gray, ObjectID oid, int warning_step, const std::string &hypertext = "",
+        const std::string &text, bool gray, ObjectID oid, int warning_step, bool renew = true,
+        const std::string &hypertext = "",
         std::function<bool(wxEvtHandler *)> callback = std::function<bool(wxEvtHandler *)>());
     // marks slicing errors as gray
     void set_all_slicing_errors_gray(bool g);
@@ -210,6 +213,9 @@ public:
     //	void set_slicing_warning_gray(const std::string& text, bool g);
     // immediately stops showing slicing errors
     void close_slicing_errors_and_warnings();
+    void close_slicing_warnings();
+    // A dismissal quiets a warning for the rest of the slicing run; the next run starts clean.
+    void clear_slicing_warning_dismissals() { m_dismissed_slicing_warnings.clear(); }
     void close_slicing_error_notification(const std::string &text);
     // Release those slicing warnings, which refer to an ObjectID, which is not in the list.
     // living_oids is expected to be sorted.
@@ -377,6 +383,14 @@ private:
                 m_id_provider.release_id(m_id);
         }
         virtual void render(GLCanvas3D &canvas, float initial_y, bool move_from_overlay, float overlay_width);
+        // Close from the user clicking the close button; only these record slicing-warning
+        // dismissals.
+        void user_close()
+        {
+            m_closed_by_user = true;
+            close();
+        }
+        bool closed_by_user() const { return m_closed_by_user; }
         // close will dissapear notification on next render
         virtual void close()
         {
@@ -493,6 +507,8 @@ private:
         std::vector<size_t> m_endlines2;
         // Gray are f.e. eorrors when its uknown if they are still valid
         bool m_is_gray{false};
+        // Set when the user clicks the close button.
+        bool m_closed_by_user{false};
         //if multiline = true, notification is showing all lines(>2)
         bool m_multiline{false};
         // True if minimized button is rendered, helps to decide where is area for invisible close button
@@ -1020,6 +1036,10 @@ private:
     // Cache of IDs to identify and reuse ImGUI windows.
     NotificationIDProvider m_id_provider;
     std::deque<std::unique_ptr<PopNotification>> m_pop_notifications;
+    // Slicing warnings (full composed text) the user clicked closed during the current
+    // slicing run. Refresh re-pushes skip these; a renew push from the owning step
+    // re-running clears the entry, and a new slicing run clears the whole set.
+    std::unordered_set<std::string> m_dismissed_slicing_warnings;
     // delayed waiting notifications, first is remaining time
     std::vector<DelayedNotification> m_waiting_notifications;
     //timestamps used for slicing finished - notification could be gone so it needs to be stored here

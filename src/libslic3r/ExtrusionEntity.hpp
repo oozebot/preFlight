@@ -136,8 +136,14 @@ struct ExtrusionFlow
     float width{-1.f};
     // Height of the extrusion, used for visualization purposes.
     float height{-1.f};
-    // For interlocking perimeters: ratio of actual flow to base flow (e.g., 1.5 = 150% flow)
-    // Used to adjust print speed to maintain constant volumetric flow rate
+    // Volumetric rate of this path relative to its feature's nominal flow (a width-widened bead
+    // carries a value above 1). When no max volumetric flow is configured, export divides the
+    // feature speed by it so the rate stays at what the speed implies at nominal width; with a
+    // configured limit, that ceiling governs instead. Not set on interlocking perimeters (own
+    // per-segment compensation) or bridge roles (bridge speed is tuned against sag, not flow);
+    // export re-checks the bridge exclusion because a role can gain the Bridge modifier after
+    // this ratio is set. Only the ratio is stored, not the nominal rate: a pass that rescales
+    // mm3_per_mm afterward must rescale flow_ratio by the same factor or the hold overshoots.
     float flow_ratio{1.0f};
 };
 

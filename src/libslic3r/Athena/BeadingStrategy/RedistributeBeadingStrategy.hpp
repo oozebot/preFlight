@@ -78,7 +78,14 @@ public:
 
     std::string toString() const override;
 
+    //! Anchor for the zero-overlap 1-vs-2 bead rule (0 = off). The 1-vs-2 thin-wall
+    //! count decision is made by this strategy, so the nozzle anchor lives here.
+    void set_nozzle_diameter(coord_t diameter) { nozzle_diameter = diameter; }
+
 protected:
+    //! Thickness above which a single bead gives way to a symmetric pair.
+    coord_t singleBeadUpperBoundary() const;
+
     BeadingStrategyPtr parent;
     coord_t ext_perimeter_spacing;         //! Spacing for external perimeter paths
     coord_t ext_perimeter_width;           //! Extrusion width for external perimeters
@@ -86,6 +93,7 @@ protected:
     coord_t innermost_spacing;             //! Spacing between second-innermost and innermost (0 = use bead_spacing)
     coord_t max_bead_count;                //! Maximum number of beads that will be used (determines which is innermost)
     int debug_layer_id;                    //! Layer ID for debug output (-1 = unknown)
+    coord_t nozzle_diameter = 0;           //! Anchor for the zero-overlap 1-vs-2 bead rule (0 = off)
 };
 
 } // namespace Slic3r::Athena

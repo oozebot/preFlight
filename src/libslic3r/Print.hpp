@@ -22,6 +22,8 @@
 #ifndef slic3r_Print_hpp_
 #define slic3r_Print_hpp_
 
+#include <atomic>
+
 #include "libslic3r/Fill/FillAdaptive.hpp"
 #include "libslic3r/Fill/FillLightning.hpp"
 #include "PrintBase.hpp"
@@ -333,6 +335,12 @@ public:
     // Size of an object: XYZ in scaled coordinates. The size might not be quite snug in XY plane.
     const Vec3crd &size() const { return m_size; }
     const PrintObjectConfig &config() const { return m_config; }
+
+    // Real-time check of generated extrusion widths against the width warning maximum. Fires
+    // one notification per slicing run across all objects, at the first path that trips the
+    // limit. Thread safe; called from the layer generation loops. The latch lives on the Print.
+    void warn_on_width_overrun(float width_mm, double nozzle_diameter, double warn_max_pct, double print_z);
+    bool width_overrun_tripped() const;
     auto layers() const
     {
         return SpanOfConstPtrs<Layer>(const_cast<const Layer *const *const>(m_layers.data()), m_layers.size());
@@ -431,6 +439,11 @@ public:
     bool has_support() const { return m_config.support_material; }
     bool has_raft() const { return m_config.raft_layers > 0; }
     bool has_support_material() const { return this->has_support() || this->has_raft(); }
+    // Supports generate everywhere with no user placement: master switch plus automatic
+    // placement. The stability alert skips only these objects. Painted enforcers and enforced
+    // first layers cover just parts of the object, so those objects are analyzed too and the
+    // covered trouble spots are filtered at the alert step.
+    bool has_automatic_support() const { return this->has_support() && m_config.support_material_auto; }
     // Checks if the model object is painted using the multi-material painting gizmo.
     bool is_mm_painted() const { return this->model_object()->is_mm_painted(); }
     // Checks if the model object is painted using the fuzzy skin painting gizmo.
@@ -461,6 +474,7 @@ public:
     bool has_snug_enforcers() const { return has_painted_enforcers(TriangleStateType::ENFORCER); }
     bool has_grid_enforcers() const { return has_painted_enforcers(TriangleStateType::GRID_ENFORCER); }
     bool has_organic_enforcers() const { return has_painted_enforcers(TriangleStateType::ORGANIC_ENFORCER); }
+    bool has_baobab_enforcers() const { return has_painted_enforcers(TriangleStateType::BAOBAB_ENFORCER); }
 
 private:
     // to be called from Print only.
@@ -693,6 +707,11 @@ public:
 
     PrinterTechnology technology() const noexcept override { return ptFFF; }
 
+    // First-trip latch for the generated-width warning, one per slicing run across all objects.
+    // trip returns true only for the call that wins the latch. Reset at process() entry.
+    bool trip_width_overrun() { return !m_width_warning_tripped.exchange(true, std::memory_order_relaxed); }
+    bool width_overrun_tripped() const { return m_width_warning_tripped.load(std::memory_order_relaxed); }
+
     // Methods, which change the state of Print / PrintObject / PrintRegion.
     // The following methods are synchronized with process() and export_gcode(),
     // so that process() and export_gcode() may be called from a background thread.
@@ -880,6 +899,9 @@ private:
 
     // Estimated print time, filament consumed.
     PrintStatistics m_print_statistics;
+
+    // First-trip latch for the generated-width warning; reset when a slicing run starts.
+    std::atomic<bool> m_width_warning_tripped{false};
 
     mutable bool m_force_invalidation = false;
 

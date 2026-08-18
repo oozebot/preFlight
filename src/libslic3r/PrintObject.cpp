@@ -41,11 +41,15 @@
 #include "BoundingBox.hpp"
 #include "Geometry.hpp"
 #include "I18N.hpp"
+#include "LocalesUtils.hpp"
+#include "format.hpp"
 #include "ProgressConfig.hpp"
 #include "Layer.hpp"
 #include "PrintBase.hpp"
 #include "PrintConfig.hpp"
 #include "Feature/FuzzySkin/FuzzySkin.hpp"
+#include "DebugOutput.hpp"
+#include "Support/BaobabSupport.hpp"
 #include "Support/SupportMaterial.hpp"
 #include "Support/TreeSupport.hpp"
 #include "ExtrusionEntity.hpp"
@@ -641,12 +645,13 @@ void PrintObject::generate_support_spots()
 {
     if (this->set_started(posSupportSpotsSearch))
     {
-        // The alert_when_supports_needed() function only processes objects WITHOUT support enabled,
-        // so if this object has support, we don't need to search for support spots.
+        // Objects covered by automatic supports skip the search. Everything else is analyzed,
+        // including manually painted objects: the alert step filters out the trouble spots the
+        // enforcers already cover and alerts on the rest.
         // The support painting gizmo can trigger a re-slice if it needs this data.
-        if (this->has_support())
+        if (this->has_automatic_support())
         {
-            BOOST_LOG_TRIVIAL(debug) << "Skipping support spots search - object has support enabled";
+            BOOST_LOG_TRIVIAL(debug) << "Skipping support spots search - automatic supports cover this object";
             this->set_done(posSupportSpotsSearch);
             return;
         }
@@ -731,6 +736,37 @@ void PrintObject::generate_support_material()
         }
         this->set_done(posSupportMaterial);
     }
+}
+
+// First-trip warning for a generated extrusion width above the width warning maximum, mirroring
+// the print stability alert: it appears while slicing, at the first path that trips the limit,
+// once per slicing run for the whole plate. The trip z is whichever offending layer wins the
+// parallel race, so it names an offender, not necessarily the lowest one. Thread safe; callers
+// run inside TBB layer loops. Geometric widths, not extrusion-rate derived ones, so deliberate
+// over-extrusion does not register. The width warning minimum is not checked against generated
+// beads: gap fill and thin walls are narrower by design. On a multi-object plate a partial
+// re-slice re-checks only the invalidated objects; a cached object's overrun stays current in
+// its stored step warning and the completion refresh re-pushes it. A user dismissal holds
+// for the rest of that slicing run.
+bool PrintObject::width_overrun_tripped() const
+{
+    return m_print->width_overrun_tripped();
+}
+
+void PrintObject::warn_on_width_overrun(float width_mm, double nozzle_diameter, double warn_max_pct, double print_z)
+{
+    if (!m_print->trip_width_overrun())
+        return;
+    dbg_log(DBG_PERIMETERS, print_z, "WIDTHWARN", "trip w=%.3f nozzle=%.3f pct=%d limit_pct=%d", double(width_mm),
+            nozzle_diameter, int(std::lround(100. * double(width_mm) / nozzle_diameter)),
+            int(std::lround(warn_max_pct)));
+    this->active_step_add_warning(
+        PrintStateBase::WarningLevel::NON_CRITICAL,
+        Slic3r::format(_u8L("An extrusion width of %1% mm (%2%%% of the nozzle diameter) exceeds the "
+                            "width warning maximum of %3%%%, at z = %4% mm."),
+                       float_to_string_decimal_point(double(width_mm), 2),
+                       int(std::lround(100. * double(width_mm) / nozzle_diameter)), int(std::lround(warn_max_pct)),
+                       float_to_string_decimal_point(print_z, 2)));
 }
 
 void PrintObject::estimate_curled_extrusions()
@@ -973,7 +1009,9 @@ bool PrintObject::invalidate_state_by_config_options(const ConfigOptionResolver 
                  opt_key == "serpentine_enabled" || opt_key == "serpentine_extrusion_width" ||
                  opt_key == "serpentine_overlap" || opt_key == "serpentine_max_bead" ||
                  opt_key == "serpentine_solid_surfaces" || opt_key == "serpentine_ridges" ||
-                 opt_key == "serpentine_aim" || opt_key == "serpentine_limit_depth" || opt_key == "serpentine_depth")
+                 opt_key == "serpentine_aim" || opt_key == "serpentine_limit_depth" || opt_key == "serpentine_depth" ||
+                 opt_key == "serpentine_relaxed" || opt_key == "serpentine_spacing" ||
+                 opt_key == "serpentine_outer_loop")
         {
             // The fuzzy skin segmentation depth depends on the perimeter count, so changing perimeters
             // requires re-running the segmentation in posSlice, not just posPerimeters.
@@ -995,20 +1033,26 @@ bool PrintObject::invalidate_state_by_config_options(const ConfigOptionResolver 
         {
             steps.emplace_back(posSlice);
         }
-        else if (opt_key == "support_material")
+        else if (opt_key == "support_material" || opt_key == "support_material_auto")
         {
             steps.emplace_back(posSupportMaterial);
+            // These flip the automatic-support predicate that decides whether the stability
+            // analysis runs; a skipped search is marked done with no data, so it must be
+            // reconsidered. Enforce-layers only feeds the alert-step filter and stays out:
+            // invalidating the search would throw away the cached analysis for nothing.
+            steps.emplace_back(posSupportSpotsSearch);
             // When bridge_no_gap is enabled, bridging is always on, so no re-slice needed
-            if (m_config.support_material_contact_distance == stcgNoGap && !m_config.support_material_bridge_no_gap)
+            if (opt_key == "support_material" && m_config.support_material_contact_distance == stcgNoGap &&
+                !m_config.support_material_bridge_no_gap)
             {
                 // Enabling / disabling supports while soluble support interface is enabled.
                 // This changes the bridging logic (bridging enabled without supports, disabled with supports).
                 steps.emplace_back(posSlice);
             }
         }
-        else if (opt_key == "support_material_auto" || opt_key == "support_material_angle" ||
-                 opt_key == "support_material_buildplate_only" || opt_key == "support_material_enforce_layers" ||
-                 opt_key == "support_material_extruder" || opt_key == "support_material_extrusion_width" ||
+        else if (opt_key == "support_material_angle" || opt_key == "support_material_buildplate_only" ||
+                 opt_key == "support_material_enforce_layers" || opt_key == "support_material_extruder" ||
+                 opt_key == "support_material_extrusion_width" ||
                  opt_key == "support_material_bottom_contact_distance" ||
                  opt_key == "support_material_interface_layers" ||
                  opt_key == "support_material_bottom_interface_layers" ||
@@ -1019,6 +1063,10 @@ bool PrintObject::invalidate_state_by_config_options(const ConfigOptionResolver 
                  opt_key == "support_material_xy_spacing" || opt_key == "support_material_spacing" ||
                  opt_key == "support_material_closing_radius" || opt_key == "support_material_synchronize_layers" ||
                  opt_key == "support_material_threshold" || opt_key == "support_material_with_sheath" ||
+                 opt_key == "support_baobab_angle" || opt_key == "support_baobab_angle_slow" ||
+                 opt_key == "support_baobab_canopy_density" || opt_key == "support_baobab_max_canopy_angle" ||
+                 opt_key == "support_baobab_plant_on_model" || opt_key == "support_baobab_trunk_diameter" ||
+                 opt_key == "support_baobab_trunk_diameter_angle" || opt_key == "support_baobab_trunk_distance" ||
                  opt_key == "support_tree_angle" || opt_key == "support_tree_angle_slow" ||
                  opt_key == "support_tree_branch_diameter" || opt_key == "support_tree_branch_diameter_angle" ||
                  opt_key == "support_tree_branch_diameter_double_wall" || opt_key == "support_tree_top_rate" ||
@@ -1222,7 +1270,8 @@ bool PrintObject::invalidate_step(PrintObjectStep step)
         m_slicing_params.valid = false;
     }
 
-    // invalidate alerts step always, since it depends on everything (except supports, but with supports enabled it is skipped anyway.)
+    // invalidate alerts step always: it depends on everything, including the paint and the
+    // support configuration that drive its skip decision and coverage filtering.
     invalidated |= m_print->invalidate_step(psAlertWhenSupportsNeeded);
     // Wipe tower depends on the ordering of extruders, which in turn depends on everything.
     // It also decides about what the wipe_into_infill / wipe_into_object features will do,
@@ -4272,11 +4321,37 @@ void PrintObject::_generate_support_material()
     bool has_snug_paint = this->has_snug_enforcers();
     bool has_grid_paint = this->has_grid_enforcers();
     bool has_organic_paint = this->has_organic_enforcers();
+    bool has_baobab_paint = this->has_baobab_enforcers();
 
     // Each enforcer type is processed with its native style in fill_contact_layer()
     // We only force style when a SINGLE type is painted (for non-enforcer regions)
     // IMPORTANT: Style override must happen BEFORE global_organic is calculated!
     SupportMaterialStyle original_style = m_config.support_material_style.value;
+
+    // Baobab work exists when painted or when it is the auto style. On a multi-type object
+    // it runs as the LAST engine pass, avoiding every support built before it.
+    const bool wants_baobab = has_baobab_paint || original_style == smsBaobab;
+
+    // Pure Baobab (no foreign support paint): a single tree pass. The style reads Baobab for
+    // the duration of the run - the tree pipeline treats it as organic-like wherever it
+    // branches on style - so is_baobab_object() holds under the rewrite for paint- and
+    // style-triggered objects alike.
+    if (this->has_support() && wants_baobab && !has_snug_paint && !has_grid_paint && !has_organic_paint)
+    {
+        const_cast<PrintObjectConfig &>(m_config).support_material_style.value = smsBaobab;
+        fff_tree_support_generate(*this, std::function<void()>([this]() { this->throw_if_canceled(); }));
+        PF_TIMER_STAGE("support: baobab generate (total)");
+        const_cast<PrintObjectConfig &>(m_config).support_material_style.value = original_style;
+        return;
+    }
+
+    // Foreign support paint is present (or a raft-only object): the classic branches below
+    // know the Baobab style only as organic-like. wants_baobab remembers the intent; the
+    // Baobab pass re-pins smsBaobab when its turn comes. The tail of this function restores
+    // the original style.
+    if (m_config.support_material_style.value == smsBaobab)
+        const_cast<PrintObjectConfig &>(m_config).support_material_style.value = smsOrganic;
+
     if (has_grid_paint && !has_snug_paint && !has_organic_paint)
     {
         // Only Grid painted - force Grid style for auto-detected overhangs too
@@ -4306,48 +4381,79 @@ void PrintObject::_generate_support_material()
 
     PF_TIMER_STAGE("support: style detection + override");
 
-    // Case 1: Both Snug/Grid and Organic painted - run Snug/Grid first, then Organic with collision
-    if ((has_snug_paint || has_grid_paint) && has_organic_paint)
+    // Supports already generated, bucketed onto the support layer grid: the consuming pass
+    // indexes these with raft-inclusive support layer indices, so each support layer lands
+    // in every grid slot its z span covers instead of being matched to an object layer it may
+    // not share a height with. A later tree pass subtracts these from the layers it assembles
+    // so nothing extrudes twice.
+    auto collect_prior_supports = [this]()
+    {
+        const std::vector<coordf_t> grid = generate_support_layer_zs(m_slicing_params);
+        const size_t num_raft = m_slicing_params.raft_layers();
+        std::vector<Polygons> out(grid.size() + num_raft);
+        size_t dbg_layers = 0, dbg_raft_skipped = 0, dbg_slots = 0;
+        for (const SupportLayer *sl : this->support_layers())
+        {
+            if (sl == nullptr || sl->support_islands.empty())
+                continue;
+            // Raft layers below the object are not exclusions; the tree pass builds above them.
+            if (sl->print_z < m_slicing_params.object_print_z_min + EPSILON)
+            {
+                ++dbg_raft_skipped;
+                continue;
+            }
+            ++dbg_layers;
+            // Every grid slot whose span intersects (bottom_z, print_z]; conservative in both
+            // directions so the exclusion never lands short of the printed material.
+            size_t i = std::upper_bound(grid.begin(), grid.end(), sl->bottom_z() + EPSILON) - grid.begin();
+            for (; i < grid.size() && (i == 0 || grid[i - 1] < sl->print_z - EPSILON); ++i)
+            {
+                append(out[i + num_raft], to_polygons(sl->support_islands));
+                ++dbg_slots;
+            }
+        }
+        dbg_log(DBG_SUPPORT, 0., "PRIOR-SUPPORTS", "layers=%zu grid_slots=%zu raft_skipped=%zu", dbg_layers, dbg_slots,
+                dbg_raft_skipped);
+        return out;
+    };
+
+    // Case 1: Snug/Grid paint mixed with tree-engine work (Organic paint and/or Baobab) -
+    // run Snug/Grid first, then each tree engine with the earlier supports as collision
+    if ((has_snug_paint || has_grid_paint) && (has_organic_paint || wants_baobab))
     {
         // Step 1: Generate Snug/Grid supports
         PrintObjectSupportMaterial support_material(this, m_slicing_params);
         support_material.generate(*this);
         PF_TIMER_STAGE("support: mixed snug/grid generate");
 
-        // Step 2: Extract support polygons for clipping organic support
-        // Use support_islands directly - these are the polygon boundaries of snug support
-        // Index by print_z matching to handle raft layers correctly
-        std::vector<Polygons> snug_support_polygons;
-        // Size to include raft layers (organic indexing includes rafts)
-        size_t num_raft_layers = m_slicing_params.raft_layers();
-        snug_support_polygons.resize(this->layer_count() + num_raft_layers);
-
-        for (const SupportLayer *sl : this->support_layers())
-        {
-            if (sl == nullptr || sl->support_islands.empty())
-                continue;
-            // Find the corresponding layer index (accounting for raft offset)
-            for (size_t i = 0; i < this->layer_count(); ++i)
-            {
-                if (std::abs(this->layers()[i]->print_z - sl->print_z) < EPSILON)
-                {
-                    // Use support_islands directly - these are the snug support boundaries
-                    append(snug_support_polygons[i + num_raft_layers], to_polygons(sl->support_islands));
-                    break;
-                }
-            }
-        }
+        // Step 2: Extract the generated support polygons for clipping the tree passes
+        std::vector<Polygons> prior_support_polygons = collect_prior_supports();
         PF_TIMER_STAGE("support: mixed extract snug polygons");
 
-        // PrintObjectSupportMaterial::generate() is done, snug/grid layers have their fills.
-        // Restore organic style so TreeSupport generates proper solid tree paths (not sparse infill).
-        const_cast<PrintObjectConfig &>(m_config).support_material_style.value = smsOrganic;
+        if (has_organic_paint)
+        {
+            // PrintObjectSupportMaterial::generate() is done, snug/grid layers have their fills.
+            // Restore organic style so TreeSupport generates proper solid tree paths (not sparse infill).
+            const_cast<PrintObjectConfig &>(m_config).support_material_style.value = smsOrganic;
 
-        // Step 3: Run Organic with Snug/Grid supports as collision
-        // Note: This will ADD to existing support layers, not replace them
-        fff_tree_support_generate(*this, std::function<void()>([this]() { this->throw_if_canceled(); }),
-                                  snug_support_polygons);
-        PF_TIMER_STAGE("support: mixed organic generate");
+            // Step 3: Run Organic with Snug/Grid supports as collision
+            // Note: This will ADD to existing support layers, not replace them
+            fff_tree_support_generate(*this, std::function<void()>([this]() { this->throw_if_canceled(); }),
+                                      prior_support_polygons);
+            PF_TIMER_STAGE("support: mixed organic generate");
+        }
+
+        if (wants_baobab)
+        {
+            // Baobab runs last, avoiding every support built before it; when an organic pass
+            // just ran, re-collect so its structures are part of the collision too.
+            if (has_organic_paint)
+                prior_support_polygons = collect_prior_supports();
+            const_cast<PrintObjectConfig &>(m_config).support_material_style.value = smsBaobab;
+            fff_tree_support_generate(*this, std::function<void()>([this]() { this->throw_if_canceled(); }),
+                                      prior_support_polygons);
+            PF_TIMER_STAGE("support: mixed baobab generate");
+        }
 
         // Step 4: Merge support layers at same print_z to avoid duplicate Z heights
         // Note: First layer base merging is handled in TreeSupport.cpp (MULTI-TYPE-SUPPORT-BASE-CLIP)
@@ -4363,6 +4469,18 @@ void PrintObject::_generate_support_material()
         {
             fff_tree_support_generate(*this, std::function<void()>([this]() { this->throw_if_canceled(); }));
             PF_TIMER_STAGE("support: organic generate (total)");
+
+            if (wants_baobab)
+            {
+                // Organic and Baobab share the object: the organic pass just ran, Baobab runs
+                // second with the organic supports as collision.
+                std::vector<Polygons> prior_support_polygons = collect_prior_supports();
+                const_cast<PrintObjectConfig &>(m_config).support_material_style.value = smsBaobab;
+                fff_tree_support_generate(*this, std::function<void()>([this]() { this->throw_if_canceled(); }),
+                                          prior_support_polygons);
+                PF_TIMER_STAGE("support: mixed baobab generate");
+                this->merge_duplicate_support_layers();
+            }
         }
     }
     // Case 3: Only snug paint OR global style is Snug/Grid
@@ -4611,13 +4729,11 @@ void PrintObject::project_and_append_custom_facets(bool seam, TriangleStateType 
 
 bool PrintObject::has_painted_enforcers(TriangleStateType type) const
 {
+    // Blob-only check; building the facet set via get_facets_strict would construct a
+    // TriangleSelector over the whole mesh just to answer yes or no.
     for (const ModelVolume *mv : this->model_object()->volumes)
-        if (mv->is_model_part())
-        {
-            const indexed_triangle_set custom_facets = mv->supported_facets.get_facets_strict(*mv, type);
-            if (!custom_facets.indices.empty())
-                return true;
-        }
+        if (mv->is_model_part() && mv->supported_facets.has_facets(*mv, type))
+            return true;
     return false;
 }
 

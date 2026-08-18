@@ -5531,6 +5531,14 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
         }
     }
 
+    // A bead wider than its feature's nominal width: with a max volumetric flow configured, that
+    // declared ceiling governs (cap_speed applies it against the actual flow); with none, the
+    // bead is slowed proportionally so its rate stays at what the feature speed implies at
+    // nominal width - the only safe reference without a declared extruder limit. Bridge roles
+    // are re-checked here because a path can gain the Bridge modifier after the ratio is set.
+    const bool flow_held = path_attr.flow_ratio > 1.f && !path_attr.role.is_bridge() &&
+                           effective_max_volumetric_flow(m_config, m_writer.extruder()->id()) <= 0.;
+
     // Bridge zone detection for over-bridge speed adjustment
     // For SolidInfill and TopSolidInfill, detect segments above bridge zones on the layer below
     // and apply over_bridge_speed to segments that pass over bridge areas.
@@ -5547,8 +5555,10 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
             const Layer::RoleIndex &index_below = m_layer->get_role_index_for_layer(m_layer->lower_layer);
             if (index_below.has_bridge_zone())
             {
-                // Cap over-bridge speed to respect volumetric flow limits
-                over_bridge_speed_value = cap_speed(obs, m_config, m_writer.extruder()->id(), path_attr);
+                // Same flow policy as the main speed, so a path does not jump to an unheld rate
+                // on entering the zone.
+                const double obs_held = flow_held ? obs / double(path_attr.flow_ratio) : obs;
+                over_bridge_speed_value = cap_speed(obs_held, m_config, m_writer.extruder()->id(), path_attr);
                 const ExPolygons &zone = index_below.bridge_zone;
                 segment_over_bridge.resize(path.size(), false);
 
@@ -5731,6 +5741,8 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
     // Instead, we call cap_speed() per-segment in the extrusion loop with the actual segment flow.
     if (path_attr.role != ExtrusionRole::InterlockingPerimeter)
     {
+        if (flow_held)
+            speed /= double(path_attr.flow_ratio);
         speed = cap_speed(speed, m_config, m_writer.extruder()->id(), path_attr, auto_calculated);
     }
 
@@ -5854,7 +5866,7 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
     // If the first emitted segment is over a bridge zone, use over_bridge_speed from the start
     if (over_bridge_speed_value > 0 && segment_over_bridge.size() > 1 && segment_over_bridge[1])
         F = std::round(over_bridge_speed_value * 60.0);
-    inject_feedrate(gcode, m_writer.set_speed(F, "", cooling_marker_setspeed_comments));
+    inject_feedrate(gcode, m_writer.set_speed(F, flow_held ? "flow hold" : "", cooling_marker_setspeed_comments));
 
     if (dynamic_print_and_fan_speeds.fan_speed >= 0 && !EXTRUDER_CONFIG(enable_manual_fan_speeds))
     {

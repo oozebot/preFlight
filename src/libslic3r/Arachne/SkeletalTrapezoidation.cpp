@@ -17,6 +17,7 @@
 #include <cassert>
 #include <cstdlib>
 
+#include "libslic3r/DebugOutput.hpp" // dbg_log / DBG_PERIMETERS
 #include "libslic3r/Geometry/VoronoiUtils.hpp"
 #include "ankerl/unordered_dense.h"
 #include "libslic3r/Arachne/SkeletalTrapezoidationEdge.hpp"
@@ -149,7 +150,7 @@ void SkeletalTrapezoidation::transferEdge(const Point &from, const Point &to, co
             if (!twin)
             {
                 BOOST_LOG_TRIVIAL(warning) << "Encountered a voronoi edge without twin.";
-                continue; //Prevent reading unallocated memory.
+                break; // The loop step dereferences twin, so continuing would read null.
             }
             assert(twin);
             graph.edges.emplace_front(SkeletalTrapezoidationEdge());
@@ -288,6 +289,10 @@ Points SkeletalTrapezoidation::discretize(const VD::edge_type &vd_edge, const st
         Point middle = (left_point + right_point) / coord_t(2);
         Point x_axis_dir = perp(Point(right_point - left_point));
         coord_t x_axis_length = x_axis_dir.cast<int64_t>().norm();
+        // Coincident source points leave no axis to project onto; the edge
+        // cannot vary its width, so keep just its endpoints.
+        if (x_axis_length == 0)
+            return Points({start, end});
 
         const auto projected_x = [x_axis_dir, x_axis_length, middle](Point from) //Project a point on the edge.
         {
@@ -388,10 +393,6 @@ SkeletalTrapezoidation::SkeletalTrapezoidation(const Polygons &polys, const Bead
 
 void SkeletalTrapezoidation::constructFromPolygons(const Polygons &polys)
 {
-#ifdef ARACHNE_DEBUG
-    this->outline = polys;
-#endif
-
     // Check self intersections.
     assert(
         [&polys]() -> bool
@@ -402,20 +403,59 @@ void SkeletalTrapezoidation::constructFromPolygons(const Polygons &polys)
             return !grid.has_intersecting_edges();
         }());
 
+    // Near-coincident consecutive vertices collapse their Voronoi point cells into
+    // degenerate cell ranges that are skipped during graph construction, leaving
+    // half-edges without twins. Drop such vertices (and any polygon degenerated
+    // below a triangle) before the diagram is built. The tolerance matches the
+    // snap distance of collapseSmallEdges().
+    constexpr int64_t squared_min_vertex_dist = int64_t(5) * int64_t(5);
+    Polygons clean_polys;
+    clean_polys.reserve(polys.size());
+    size_t dropped_vertices = 0;
+    size_t dropped_polys = 0;
+    for (const Polygon &poly : polys)
+    {
+        Polygon clean;
+        clean.points.reserve(poly.points.size());
+        for (const Point &p : poly.points)
+            if (clean.points.empty() ||
+                (p - clean.points.back()).cast<int64_t>().squaredNorm() > squared_min_vertex_dist)
+                clean.points.emplace_back(p);
+            else
+                ++dropped_vertices;
+        while (clean.points.size() > 2 &&
+               (clean.points.back() - clean.points.front()).cast<int64_t>().squaredNorm() <= squared_min_vertex_dist)
+        {
+            clean.points.pop_back();
+            ++dropped_vertices;
+        }
+        if (clean.points.size() >= 3)
+            clean_polys.emplace_back(std::move(clean));
+        else
+            ++dropped_polys;
+    }
+    if (dropped_vertices > 0 || dropped_polys > 0)
+        dbg_log(Slic3r::DBG_PERIMETERS, 0., "SKEL", "CLEAN dropped_vertices=%zu dropped_polys=%zu", dropped_vertices,
+                dropped_polys);
+
+#ifdef ARACHNE_DEBUG
+    this->outline = clean_polys;
+#endif
+
     vd_edge_to_he_edge.clear();
     vd_node_to_he_node.clear();
 
     std::vector<Segment> segments;
-    for (size_t poly_idx = 0; poly_idx < polys.size(); poly_idx++)
-        for (size_t point_idx = 0; point_idx < polys[poly_idx].size(); point_idx++)
-            segments.emplace_back(&polys, poly_idx, point_idx);
+    for (size_t poly_idx = 0; poly_idx < clean_polys.size(); poly_idx++)
+        for (size_t point_idx = 0; point_idx < clean_polys[poly_idx].size(); point_idx++)
+            segments.emplace_back(&clean_polys, poly_idx, point_idx);
 
 #ifdef ARACHNE_DEBUG
     {
         static int iRun = 0;
-        BoundingBox bbox = get_extents(polys);
+        BoundingBox bbox = get_extents(clean_polys);
         SVG svg(debug_out_path("arachne_voronoi-input-%d.svg", iRun++).c_str(), bbox);
-        svg.draw_outline(polys, "black", scaled<coordf_t>(0.03f));
+        svg.draw_outline(clean_polys, "black", scaled<coordf_t>(0.03f));
     }
 #endif
 
@@ -426,78 +466,149 @@ void SkeletalTrapezoidation::constructFromPolygons(const Polygons &polys)
     {
         static int iRun = 0;
         dump_voronoi_to_svg(debug_out_path("arachne_voronoi-diagram-%d.svg", iRun++).c_str(), voronoi_diagram,
-                            to_points(polys), to_lines(polys));
+                            to_points(clean_polys), to_lines(clean_polys));
     }
 #endif
 
     assert(this->graph.edges.empty() && this->graph.nodes.empty() && this->vd_edge_to_he_edge.empty() &&
            this->vd_node_to_he_node.empty());
-    for (const VD::cell_type &cell : voronoi_diagram.cells())
+
+    const auto build_graph = [&]()
     {
-        if (!cell.incident_edge())
-            continue; // There is no spoon
-
-        Point start_source_point;
-        Point end_source_point;
-        const VD::edge_type *starting_voronoi_edge = nullptr;
-        const VD::edge_type *ending_voronoi_edge = nullptr;
-        // Compute and store result in above variables
-
-        if (cell.contains_point())
+        for (const VD::cell_type &cell : voronoi_diagram.cells())
         {
-            Geometry::PointCellRange<Point> cell_range =
-                Geometry::VoronoiUtils::compute_point_cell_range(cell, segments.cbegin(), segments.cend());
-            start_source_point = cell_range.source_point;
-            end_source_point = cell_range.source_point;
-            starting_voronoi_edge = cell_range.edge_begin;
-            ending_voronoi_edge = cell_range.edge_end;
+            if (!cell.incident_edge())
+                continue; // There is no spoon
 
-            if (!cell_range.is_valid())
+            Point start_source_point;
+            Point end_source_point;
+            const VD::edge_type *starting_voronoi_edge = nullptr;
+            const VD::edge_type *ending_voronoi_edge = nullptr;
+            // Compute and store result in above variables
+
+            if (cell.contains_point())
+            {
+                Geometry::PointCellRange<Point> cell_range =
+                    Geometry::VoronoiUtils::compute_point_cell_range(cell, segments.cbegin(), segments.cend());
+                start_source_point = cell_range.source_point;
+                end_source_point = cell_range.source_point;
+                starting_voronoi_edge = cell_range.edge_begin;
+                ending_voronoi_edge = cell_range.edge_end;
+
+                if (!cell_range.is_valid())
+                    continue;
+            }
+            else
+            {
+                assert(cell.contains_segment());
+                Geometry::SegmentCellRange<Point> cell_range =
+                    Geometry::VoronoiUtils::compute_segment_cell_range(cell, segments.cbegin(), segments.cend());
+                assert(cell_range.is_valid());
+                start_source_point = cell_range.source_segment_start_point;
+                end_source_point = cell_range.source_segment_end_point;
+                starting_voronoi_edge = cell_range.edge_begin;
+                ending_voronoi_edge = cell_range.edge_end;
+            }
+
+            if (!starting_voronoi_edge || !ending_voronoi_edge)
+            {
+                assert(false && "Each cell should start / end in a polygon vertex");
                 continue;
+            }
+
+            // Copy start to end edge to graph
+            assert(Geometry::VoronoiUtils::is_in_range<coord_t>(*starting_voronoi_edge));
+            edge_t *prev_edge = nullptr;
+            transferEdge(start_source_point,
+                         Geometry::VoronoiUtils::to_point(starting_voronoi_edge->vertex1()).cast<coord_t>(),
+                         *starting_voronoi_edge, prev_edge, start_source_point, end_source_point, segments);
+            node_t *starting_node = vd_node_to_he_node[starting_voronoi_edge->vertex0()];
+            starting_node->data.distance_to_boundary = 0;
+
+            graph.makeRib(prev_edge, start_source_point, end_source_point);
+            for (const VD::edge_type *vd_edge = starting_voronoi_edge->next(); vd_edge != ending_voronoi_edge;
+                 vd_edge = vd_edge->next())
+            {
+                assert(vd_edge->is_finite());
+                assert(Geometry::VoronoiUtils::is_in_range<coord_t>(*vd_edge));
+
+                Point v1 = Geometry::VoronoiUtils::to_point(vd_edge->vertex0()).cast<coord_t>();
+                Point v2 = Geometry::VoronoiUtils::to_point(vd_edge->vertex1()).cast<coord_t>();
+                transferEdge(v1, v2, *vd_edge, prev_edge, start_source_point, end_source_point, segments);
+                graph.makeRib(prev_edge, start_source_point, end_source_point);
+            }
+
+            transferEdge(Geometry::VoronoiUtils::to_point(ending_voronoi_edge->vertex0()).cast<coord_t>(),
+                         end_source_point, *ending_voronoi_edge, prev_edge, start_source_point, end_source_point,
+                         segments);
+            prev_edge->to->data.distance_to_boundary = 0;
+        }
+    };
+
+    // The entire toolpath pipeline dereferences edge twins unchecked, so a
+    // complete graph is a hard requirement. A degenerate Voronoi cell (skipped
+    // above through its invalid cell range) leaves the half-edges of its
+    // neighbors without twins. When that happens, rebuild the Voronoi diagram
+    // from rotated input to perturb the floating-point evaluation, and if no
+    // rotation yields a complete graph, generate no walls for this region
+    // instead of handing a corrupt graph downstream.
+    const auto has_missing_twin = [this]() -> bool
+    {
+        for (const edge_t &edge : graph.edges)
+            if (!edge.twin)
+                return true;
+        return false;
+    };
+    const auto reset_graph = [this]()
+    {
+        graph.edges.clear();
+        graph.nodes.clear();
+        vd_edge_to_he_edge.clear();
+        vd_node_to_he_node.clear();
+    };
+
+    build_graph();
+    if (has_missing_twin())
+    {
+        bool repaired = false;
+        // The initial construction already ran these same rotation repairs internally;
+        // when it reports them unsuccessful, re-running them here cannot succeed.
+        if (voronoi_diagram.get_state() != VD::State::REPAIR_UNSUCCESSFUL)
+        {
+            constexpr double fix_angles[] = {M_PI / 6., M_PI / 5., M_PI / 7., M_PI / 11.};
+            for (const double fix_angle : fix_angles)
+            {
+                BOOST_LOG_TRIVIAL(warning) << "Skeletal trapezoidation graph has edges without twins; rebuilding the "
+                                              "Voronoi diagram with input rotated by "
+                                           << fix_angle << " radians.";
+                reset_graph();
+                const VD::IssueType issue = voronoi_diagram.try_to_repair_degenerated_voronoi_diagram_by_rotation(
+                    segments.cbegin(), segments.cend(), fix_angle);
+                build_graph();
+                // Accept a rotated diagram only when the library reports no remaining
+                // issue AND the graph is twin-complete: a twin-complete but invalid
+                // diagram would produce wrong walls, which is worse than none.
+                repaired = issue == VD::IssueType::NO_ISSUE_DETECTED && !has_missing_twin();
+                dbg_log(Slic3r::DBG_PERIMETERS, 0., "SKEL", "TWIN_REPAIR angle=%.4f issue=%d accepted=%d", fix_angle,
+                        int(issue), int(repaired));
+                if (repaired)
+                    break;
+            }
         }
         else
         {
-            assert(cell.contains_segment());
-            Geometry::SegmentCellRange<Point> cell_range =
-                Geometry::VoronoiUtils::compute_segment_cell_range(cell, segments.cbegin(), segments.cend());
-            assert(cell_range.is_valid());
-            start_source_point = cell_range.source_segment_start_point;
-            end_source_point = cell_range.source_segment_end_point;
-            starting_voronoi_edge = cell_range.edge_begin;
-            ending_voronoi_edge = cell_range.edge_end;
+            dbg_log(Slic3r::DBG_PERIMETERS, 0., "SKEL",
+                    "TWIN_REPAIR skipped: initial construction repair already unsuccessful");
         }
-
-        if (!starting_voronoi_edge || !ending_voronoi_edge)
+        if (!repaired)
         {
-            assert(false && "Each cell should start / end in a polygon vertex");
-            continue;
+            BOOST_LOG_TRIVIAL(error) << "Skeletal trapezoidation graph still has edges without twins after all repair "
+                                        "attempts; no walls will be generated for this region.";
+            dbg_log(Slic3r::DBG_PERIMETERS, 0., "SKEL", "TWIN_GIVEUP polys=%zu area_mm2=%.3f", clean_polys.size(),
+                    area(clean_polys) * SCALING_FACTOR * SCALING_FACTOR);
+            reset_graph();
+            return;
         }
-
-        // Copy start to end edge to graph
-        assert(Geometry::VoronoiUtils::is_in_range<coord_t>(*starting_voronoi_edge));
-        edge_t *prev_edge = nullptr;
-        transferEdge(start_source_point,
-                     Geometry::VoronoiUtils::to_point(starting_voronoi_edge->vertex1()).cast<coord_t>(),
-                     *starting_voronoi_edge, prev_edge, start_source_point, end_source_point, segments);
-        node_t *starting_node = vd_node_to_he_node[starting_voronoi_edge->vertex0()];
-        starting_node->data.distance_to_boundary = 0;
-
-        graph.makeRib(prev_edge, start_source_point, end_source_point);
-        for (const VD::edge_type *vd_edge = starting_voronoi_edge->next(); vd_edge != ending_voronoi_edge;
-             vd_edge = vd_edge->next())
-        {
-            assert(vd_edge->is_finite());
-            assert(Geometry::VoronoiUtils::is_in_range<coord_t>(*vd_edge));
-
-            Point v1 = Geometry::VoronoiUtils::to_point(vd_edge->vertex0()).cast<coord_t>();
-            Point v2 = Geometry::VoronoiUtils::to_point(vd_edge->vertex1()).cast<coord_t>();
-            transferEdge(v1, v2, *vd_edge, prev_edge, start_source_point, end_source_point, segments);
-            graph.makeRib(prev_edge, start_source_point, end_source_point);
-        }
-
-        transferEdge(Geometry::VoronoiUtils::to_point(ending_voronoi_edge->vertex0()).cast<coord_t>(), end_source_point,
-                     *ending_voronoi_edge, prev_edge, start_source_point, end_source_point, segments);
-        prev_edge->to->data.distance_to_boundary = 0;
     }
 
 #ifdef ARACHNE_DEBUG
@@ -560,6 +671,11 @@ void SkeletalTrapezoidation::generateToolpaths(std::vector<VariableWidthLines> &
 #endif
 
     p_generated_toolpaths = &generated_toolpaths;
+
+    // Construction leaves the graph empty when it rejects degenerate input;
+    // there is nothing to generate walls from in that case.
+    if (graph.edges.empty())
+        return;
 
     updateIsCentral();
 

@@ -787,11 +787,25 @@ private:
         bool in_highlight = false;
         size_t highlight_start = 0;
 
+        // marked_label is UTF-8: buffer text bytes and convert whole segments with from_u8();
+        // appending bytes to a wxString one at a time would decode each via the system codepage.
+        // Marker bytes are ASCII (< 0x80), so they never match UTF-8 continuation bytes.
+        std::string pending;
+        auto flush_pending = [&row, &pending]()
+        {
+            if (!pending.empty())
+            {
+                row.display_text += from_u8(pending);
+                pending.clear();
+            }
+        };
+
         for (size_t i = 1; i < marked_label.size(); ++i)
         {
             char c = marked_label[i];
             if (c == ImGui::ColorMarkerStart)
             {
+                flush_pending();
                 in_highlight = true;
                 highlight_start = row.display_text.length();
             }
@@ -799,6 +813,7 @@ private:
             {
                 if (in_highlight)
                 {
+                    flush_pending();
                     size_t len = row.display_text.length() - highlight_start;
                     if (len > 0)
                         row.highlight_ranges.emplace_back(highlight_start, len);
@@ -807,9 +822,10 @@ private:
             }
             else
             {
-                row.display_text += c;
+                pending += c;
             }
         }
+        flush_pending();
     }
 
     // --- Event handlers ---

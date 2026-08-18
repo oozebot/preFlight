@@ -153,7 +153,7 @@ void SkeletalTrapezoidation::transferEdge(const Point &from, const Point &to, co
             if (!twin)
             {
                 BOOST_LOG_TRIVIAL(warning) << "Encountered a voronoi edge without twin.";
-                continue; //Prevent reading unallocated memory.
+                break; // The loop step dereferences twin, so continuing would read null.
             }
             assert(twin);
             graph.edges.emplace_front(SkeletalTrapezoidationEdge());
@@ -292,6 +292,10 @@ Points SkeletalTrapezoidation::discretize(const VD::edge_type &vd_edge, const st
         Point middle = (left_point + right_point) / coord_t(2);
         Point x_axis_dir = perp(Point(right_point - left_point));
         coord_t x_axis_length = x_axis_dir.cast<int64_t>().norm();
+        // Coincident source points leave no axis to project onto; the edge
+        // cannot vary its width, so keep just its endpoints.
+        if (x_axis_length == 0)
+            return Points({start, end});
 
         const auto projected_x = [x_axis_dir, x_axis_length, middle](Point from) //Project a point on the edge.
         {
@@ -402,10 +406,6 @@ SkeletalTrapezoidation::SkeletalTrapezoidation(const Polygons &polys, const Bead
 
 void SkeletalTrapezoidation::constructFromPolygons(const Polygons &polys)
 {
-#ifdef ATHENA_DEBUG
-    this->outline = polys;
-#endif
-
     // Check self intersections.
     assert(
         [&polys]() -> bool
@@ -416,20 +416,59 @@ void SkeletalTrapezoidation::constructFromPolygons(const Polygons &polys)
             return !grid.has_intersecting_edges();
         }());
 
+    // Near-coincident consecutive vertices collapse their Voronoi point cells into
+    // degenerate cell ranges that are skipped during graph construction, leaving
+    // half-edges without twins. Drop such vertices (and any polygon degenerated
+    // below a triangle) before the diagram is built. The tolerance matches the
+    // snap distance of collapseSmallEdges().
+    constexpr int64_t squared_min_vertex_dist = int64_t(5) * int64_t(5);
+    Polygons clean_polys;
+    clean_polys.reserve(polys.size());
+    size_t dropped_vertices = 0;
+    size_t dropped_polys = 0;
+    for (const Polygon &poly : polys)
+    {
+        Polygon clean;
+        clean.points.reserve(poly.points.size());
+        for (const Point &p : poly.points)
+            if (clean.points.empty() ||
+                (p - clean.points.back()).cast<int64_t>().squaredNorm() > squared_min_vertex_dist)
+                clean.points.emplace_back(p);
+            else
+                ++dropped_vertices;
+        while (clean.points.size() > 2 &&
+               (clean.points.back() - clean.points.front()).cast<int64_t>().squaredNorm() <= squared_min_vertex_dist)
+        {
+            clean.points.pop_back();
+            ++dropped_vertices;
+        }
+        if (clean.points.size() >= 3)
+            clean_polys.emplace_back(std::move(clean));
+        else
+            ++dropped_polys;
+    }
+    if (dropped_vertices > 0 || dropped_polys > 0)
+        dbg_log(Slic3r::DBG_PERIMETERS, debug_print_z, "SKEL", "CLEAN dropped_vertices=%zu dropped_polys=%zu",
+                dropped_vertices, dropped_polys);
+
+#ifdef ATHENA_DEBUG
+    this->outline = clean_polys;
+#endif
+
     vd_edge_to_he_edge.clear();
     vd_node_to_he_node.clear();
 
     std::vector<Segment> segments;
-    for (size_t poly_idx = 0; poly_idx < polys.size(); poly_idx++)
-        for (size_t point_idx = 0; point_idx < polys[poly_idx].size(); point_idx++)
-            segments.emplace_back(&polys, poly_idx, point_idx);
+    for (size_t poly_idx = 0; poly_idx < clean_polys.size(); poly_idx++)
+        for (size_t point_idx = 0; point_idx < clean_polys[poly_idx].size(); point_idx++)
+            segments.emplace_back(&clean_polys, poly_idx, point_idx);
 
 #ifdef ATHENA_DEBUG
     {
         static int iRun = 0;
-        BoundingBox bbox = get_extents(polys);
+        BoundingBox bbox = get_extents(clean_polys);
         SVG svg(debug_out_path("athena_voronoi-input-%d.svg", iRun++).c_str(), bbox);
-        svg.draw_outline(polys, "black", scaled<coordf_t>(0.03f));
+        svg.draw_outline(clean_polys, "black", scaled<coordf_t>(0.03f));
     }
 #endif
 
@@ -440,85 +479,156 @@ void SkeletalTrapezoidation::constructFromPolygons(const Polygons &polys)
     {
         static int iRun = 0;
         dump_voronoi_to_svg(debug_out_path("athena_voronoi-diagram-%d.svg", iRun++).c_str(), voronoi_diagram,
-                            to_points(polys), to_lines(polys));
+                            to_points(clean_polys), to_lines(clean_polys));
     }
 #endif
 
     assert(this->graph.edges.empty() && this->graph.nodes.empty() && this->vd_edge_to_he_edge.empty() &&
            this->vd_node_to_he_node.empty());
-    for (const VD::cell_type &cell : voronoi_diagram.cells())
+
+    const auto build_graph = [&]()
     {
-        if (!cell.incident_edge())
-            continue; // There is no spoon
-
-        Point start_source_point;
-        Point end_source_point;
-        const VD::edge_type *starting_voronoi_edge = nullptr;
-        const VD::edge_type *ending_voronoi_edge = nullptr;
-        // Compute and store result in above variables
-
-        if (cell.contains_point())
+        for (const VD::cell_type &cell : voronoi_diagram.cells())
         {
-            Geometry::PointCellRange<Point> cell_range =
-                Geometry::VoronoiUtils::compute_point_cell_range(cell, segments.cbegin(), segments.cend());
-            start_source_point = cell_range.source_point;
-            end_source_point = cell_range.source_point;
-            starting_voronoi_edge = cell_range.edge_begin;
-            ending_voronoi_edge = cell_range.edge_end;
+            if (!cell.incident_edge())
+                continue; // There is no spoon
 
-            if (!cell_range.is_valid())
+            Point start_source_point;
+            Point end_source_point;
+            const VD::edge_type *starting_voronoi_edge = nullptr;
+            const VD::edge_type *ending_voronoi_edge = nullptr;
+            // Compute and store result in above variables
+
+            if (cell.contains_point())
+            {
+                Geometry::PointCellRange<Point> cell_range =
+                    Geometry::VoronoiUtils::compute_point_cell_range(cell, segments.cbegin(), segments.cend());
+                start_source_point = cell_range.source_point;
+                end_source_point = cell_range.source_point;
+                starting_voronoi_edge = cell_range.edge_begin;
+                ending_voronoi_edge = cell_range.edge_end;
+
+                if (!cell_range.is_valid())
+                    continue;
+            }
+            else
+            {
+                assert(cell.contains_segment());
+                Geometry::SegmentCellRange<Point> cell_range =
+                    Geometry::VoronoiUtils::compute_segment_cell_range(cell, segments.cbegin(), segments.cend());
+                assert(cell_range.is_valid());
+                start_source_point = cell_range.source_segment_start_point;
+                end_source_point = cell_range.source_segment_end_point;
+                starting_voronoi_edge = cell_range.edge_begin;
+                ending_voronoi_edge = cell_range.edge_end;
+            }
+
+            if (!starting_voronoi_edge || !ending_voronoi_edge)
+            {
+                assert(false && "Each cell should start / end in a polygon vertex");
                 continue;
+            }
+
+            // Copy start to end edge to graph
+            assert(Geometry::VoronoiUtils::is_in_range<coord_t>(*starting_voronoi_edge));
+            // Determine which input polygon this cell belongs to
+            int cell_source_poly_id = static_cast<int>(segments[cell.source_index()].poly_idx);
+
+            edge_t *prev_edge = nullptr;
+            transferEdge(start_source_point,
+                         Geometry::VoronoiUtils::to_point(starting_voronoi_edge->vertex1()).cast<coord_t>(),
+                         *starting_voronoi_edge, prev_edge, start_source_point, end_source_point, segments);
+            node_t *starting_node = vd_node_to_he_node[starting_voronoi_edge->vertex0()];
+            starting_node->data.distance_to_boundary = 0;
+            starting_node->data.source_poly_id = cell_source_poly_id;
+
+            graph.makeRib(prev_edge, start_source_point, end_source_point);
+            prev_edge->from->data.source_poly_id = cell_source_poly_id; // tag rib boundary node
+            for (const VD::edge_type *vd_edge = starting_voronoi_edge->next(); vd_edge != ending_voronoi_edge;
+                 vd_edge = vd_edge->next())
+            {
+                assert(vd_edge->is_finite());
+                assert(Geometry::VoronoiUtils::is_in_range<coord_t>(*vd_edge));
+
+                Point v1 = Geometry::VoronoiUtils::to_point(vd_edge->vertex0()).cast<coord_t>();
+                Point v2 = Geometry::VoronoiUtils::to_point(vd_edge->vertex1()).cast<coord_t>();
+                transferEdge(v1, v2, *vd_edge, prev_edge, start_source_point, end_source_point, segments);
+                graph.makeRib(prev_edge, start_source_point, end_source_point);
+                prev_edge->from->data.source_poly_id = cell_source_poly_id; // tag rib boundary node
+            }
+
+            transferEdge(Geometry::VoronoiUtils::to_point(ending_voronoi_edge->vertex0()).cast<coord_t>(),
+                         end_source_point, *ending_voronoi_edge, prev_edge, start_source_point, end_source_point,
+                         segments);
+            prev_edge->to->data.distance_to_boundary = 0;
+            prev_edge->to->data.source_poly_id = cell_source_poly_id;
+        }
+    };
+
+    // The entire toolpath pipeline dereferences edge twins unchecked, so a
+    // complete graph is a hard requirement. A degenerate Voronoi cell (skipped
+    // above through its invalid cell range) leaves the half-edges of its
+    // neighbors without twins. When that happens, rebuild the Voronoi diagram
+    // from rotated input to perturb the floating-point evaluation, and if no
+    // rotation yields a complete graph, generate no walls for this region
+    // instead of handing a corrupt graph downstream.
+    const auto has_missing_twin = [this]() -> bool
+    {
+        for (const edge_t &edge : graph.edges)
+            if (!edge.twin)
+                return true;
+        return false;
+    };
+    const auto reset_graph = [this]()
+    {
+        graph.edges.clear();
+        graph.nodes.clear();
+        vd_edge_to_he_edge.clear();
+        vd_node_to_he_node.clear();
+    };
+
+    build_graph();
+    if (has_missing_twin())
+    {
+        bool repaired = false;
+        // The initial construction already ran these same rotation repairs internally;
+        // when it reports them unsuccessful, re-running them here cannot succeed.
+        if (voronoi_diagram.get_state() != VD::State::REPAIR_UNSUCCESSFUL)
+        {
+            constexpr double fix_angles[] = {M_PI / 6., M_PI / 5., M_PI / 7., M_PI / 11.};
+            for (const double fix_angle : fix_angles)
+            {
+                BOOST_LOG_TRIVIAL(warning) << "Skeletal trapezoidation graph has edges without twins; rebuilding the "
+                                              "Voronoi diagram with input rotated by "
+                                           << fix_angle << " radians.";
+                reset_graph();
+                const VD::IssueType issue = voronoi_diagram.try_to_repair_degenerated_voronoi_diagram_by_rotation(
+                    segments.cbegin(), segments.cend(), fix_angle);
+                build_graph();
+                // Accept a rotated diagram only when the library reports no remaining
+                // issue AND the graph is twin-complete: a twin-complete but invalid
+                // diagram would produce wrong walls, which is worse than none.
+                repaired = issue == VD::IssueType::NO_ISSUE_DETECTED && !has_missing_twin();
+                dbg_log(Slic3r::DBG_PERIMETERS, debug_print_z, "SKEL", "TWIN_REPAIR angle=%.4f issue=%d accepted=%d",
+                        fix_angle, int(issue), int(repaired));
+                if (repaired)
+                    break;
+            }
         }
         else
         {
-            assert(cell.contains_segment());
-            Geometry::SegmentCellRange<Point> cell_range =
-                Geometry::VoronoiUtils::compute_segment_cell_range(cell, segments.cbegin(), segments.cend());
-            assert(cell_range.is_valid());
-            start_source_point = cell_range.source_segment_start_point;
-            end_source_point = cell_range.source_segment_end_point;
-            starting_voronoi_edge = cell_range.edge_begin;
-            ending_voronoi_edge = cell_range.edge_end;
+            dbg_log(Slic3r::DBG_PERIMETERS, debug_print_z, "SKEL",
+                    "TWIN_REPAIR skipped: initial construction repair already unsuccessful");
         }
-
-        if (!starting_voronoi_edge || !ending_voronoi_edge)
+        if (!repaired)
         {
-            assert(false && "Each cell should start / end in a polygon vertex");
-            continue;
+            BOOST_LOG_TRIVIAL(error) << "Skeletal trapezoidation graph still has edges without twins after all repair "
+                                        "attempts; no walls will be generated for this region.";
+            dbg_log(Slic3r::DBG_PERIMETERS, debug_print_z, "SKEL", "TWIN_GIVEUP polys=%zu area_mm2=%.3f",
+                    clean_polys.size(), area(clean_polys) * SCALING_FACTOR * SCALING_FACTOR);
+            reset_graph();
+            return;
         }
-
-        // Copy start to end edge to graph
-        assert(Geometry::VoronoiUtils::is_in_range<coord_t>(*starting_voronoi_edge));
-        // Determine which input polygon this cell belongs to
-        int cell_source_poly_id = static_cast<int>(segments[cell.source_index()].poly_idx);
-
-        edge_t *prev_edge = nullptr;
-        transferEdge(start_source_point,
-                     Geometry::VoronoiUtils::to_point(starting_voronoi_edge->vertex1()).cast<coord_t>(),
-                     *starting_voronoi_edge, prev_edge, start_source_point, end_source_point, segments);
-        node_t *starting_node = vd_node_to_he_node[starting_voronoi_edge->vertex0()];
-        starting_node->data.distance_to_boundary = 0;
-        starting_node->data.source_poly_id = cell_source_poly_id;
-
-        graph.makeRib(prev_edge, start_source_point, end_source_point);
-        prev_edge->from->data.source_poly_id = cell_source_poly_id; // tag rib boundary node
-        for (const VD::edge_type *vd_edge = starting_voronoi_edge->next(); vd_edge != ending_voronoi_edge;
-             vd_edge = vd_edge->next())
-        {
-            assert(vd_edge->is_finite());
-            assert(Geometry::VoronoiUtils::is_in_range<coord_t>(*vd_edge));
-
-            Point v1 = Geometry::VoronoiUtils::to_point(vd_edge->vertex0()).cast<coord_t>();
-            Point v2 = Geometry::VoronoiUtils::to_point(vd_edge->vertex1()).cast<coord_t>();
-            transferEdge(v1, v2, *vd_edge, prev_edge, start_source_point, end_source_point, segments);
-            graph.makeRib(prev_edge, start_source_point, end_source_point);
-            prev_edge->from->data.source_poly_id = cell_source_poly_id; // tag rib boundary node
-        }
-
-        transferEdge(Geometry::VoronoiUtils::to_point(ending_voronoi_edge->vertex0()).cast<coord_t>(), end_source_point,
-                     *ending_voronoi_edge, prev_edge, start_source_point, end_source_point, segments);
-        prev_edge->to->data.distance_to_boundary = 0;
-        prev_edge->to->data.source_poly_id = cell_source_poly_id;
     }
 
 #ifdef ATHENA_DEBUG
@@ -581,6 +691,11 @@ void SkeletalTrapezoidation::generateToolpaths(std::vector<VariableWidthLines> &
 #endif
 
     p_generated_toolpaths = &generated_toolpaths;
+
+    // Construction leaves the graph empty when it rejects degenerate input;
+    // there is nothing to generate walls from in that case.
+    if (graph.edges.empty())
+        return;
 
     updateIsCentral();
 
@@ -1723,6 +1838,13 @@ void SkeletalTrapezoidation::applyBeadWidthAdjustments(Beading &beading)
             coord_t overlap_distance = new_width - target_spacing;
             coord_t gap_to_close_per_bead = gap_per_bead - (overlap_distance / 2);
             centerline_adjustment = gap_to_close_per_bead / 2;
+            // Negative overlap: the leftover is the intended gap. Keep the beads at nominal
+            // width and position so the gap survives instead of being collapsed shut.
+            if (overlap_pct < 0)
+            {
+                new_width = current_width;
+                centerline_adjustment = 0;
+            }
         }
         else
         {
@@ -1737,10 +1859,12 @@ void SkeletalTrapezoidation::applyBeadWidthAdjustments(Beading &beading)
             new_width = current_width - width_reduction;
 
             // For multi-bead walls (>2 beads), don't contract internal beads below
-            // nominal spacing - they must remain wide enough to overlap with neighbors.
-            // Thin walls (2 beads) are exempt - both beads are external and legitimately narrow.
-            if (beading.bead_widths.size() > 2 && new_width < nominal_spacing)
-                new_width = nominal_spacing;
+            // min(spacing, width): positive overlap holds them at spacing to overlap
+            // neighbors, negative overlap holds them at the configured width so the gap
+            // survives. Thin walls (2 beads) are exempt - both beads are external.
+            const coord_t internal_floor = std::min(nominal_spacing, nominal_width);
+            if (beading.bead_widths.size() > 2 && new_width < internal_floor)
+                new_width = internal_floor;
 
             // Toolpath locations move outward (away from center)
             centerline_adjustment = reduction_per_bead / 2;
@@ -1835,6 +1959,13 @@ void SkeletalTrapezoidation::applyBeadWidthAdjustments(Beading &beading)
                 coord_t overlap_distance = new_width - target_spacing;
                 coord_t gap_to_close_per_bead = gap_per_bead - (overlap_distance / 2);
                 centerline_adjustment = gap_to_close_per_bead / 2;
+                // Negative overlap: the leftover is the intended gap. Keep the beads at nominal
+                // width and position so the gap survives instead of being collapsed shut.
+                if (overlap_pct < 0)
+                {
+                    new_width = current_width;
+                    centerline_adjustment = 0;
+                }
             }
             else
             {
@@ -1842,8 +1973,9 @@ void SkeletalTrapezoidation::applyBeadWidthAdjustments(Beading &beading)
                 coord_t reduction_per_bead = -beading.left_over / 2;
                 coord_t width_reduction = (coord_t) ((double) reduction_per_bead * adjustment_factor);
                 new_width = current_width - width_reduction;
-                if (new_width < nominal_spacing)
-                    new_width = nominal_spacing;
+                const coord_t internal_floor = std::min(nominal_spacing, nominal_width);
+                if (new_width < internal_floor)
+                    new_width = internal_floor;
                 centerline_adjustment = reduction_per_bead / 2;
             }
 
@@ -1912,143 +2044,9 @@ void SkeletalTrapezoidation::applyBeadWidthAdjustments(Beading &beading)
                     unscaled<double>(new_center_width), unscaled<double>(beading.left_over), adjustment_factor);
         }
 
-        // Decide whether to keep one wide bead or split into two beads based on deviation from nominal
-        // Option A: One wide bead - deviation = expanded_width - nominal
-        // Option B: Two beads - deviation = 2 × |split_width - nominal|
-        // Choose option with less total deviation
-        bool split_center_into_loop = false;
-
-        // Split when the center bead is wider than nominal - let the deviation
-        // comparison decide whether one fat bead or two normal beads is closer
-        // to the target width. For single-bead walls, use ext_perimeter_width as
-        // the threshold since the bead is external. Using internal nominal_width
-        // lets single beads grow far past the configured external width before
-        // splitting, causing overlap at zigzag U-turns where the thin wall meets
-        // thicker geometry.
-        coord_t split_threshold = nominal_width;
-        if (beading.bead_widths.size() <= 1 && ext_perimeter_width > 0 && ext_perimeter_width < nominal_width)
-            split_threshold = ext_perimeter_width;
-        if (beading.left_over > 0 && new_center_width > split_threshold)
-        {
-            // For single-bead walls, use ext/perimeter overlap for the split since both
-            // beads are external. For multi-bead walls, use the strategy's internal overlap.
-            double split_overlap = overlap_pct;
-            coord_t split_sp = (ext_split_spacing > 0) ? ext_split_spacing : ext_perimeter_spacing;
-            if (beading.bead_widths.size() <= 1 && ext_perimeter_width > 0 && split_sp > 0)
-                split_overlap = (double) (ext_perimeter_width - split_sp) / (double) ext_perimeter_width;
-
-            // For single-bead walls, size the split beads to fill the actual model wall,
-            // not the expanded bead width. For multi-bead walls, use the expanded width.
-            double loop_width_factor = 2.0 - split_overlap;
-            coord_t split_source = new_center_width;
-            if (beading.bead_widths.size() <= 1 && ext_perimeter_width > 0 && ext_perimeter_spacing > 0)
-                split_source = beading.total_thickness + (ext_perimeter_width - ext_perimeter_spacing);
-            coord_t split_width = (coord_t) ((double) split_source / loop_width_factor);
-
-            // Split bias: two beads win unless one bead deviates less than HALF
-            // as much as two beads (i.e., one bead must be dramatically better)
-            // For single-bead walls: if the wall exceeds max_bead_width, one bead can't
-            // fill it (it gets capped, leaving a gap). Split into two beads instead.
-            // Only reject if split beads would be below minimum printable width.
-            bool force_split = false;
-            if (beading.bead_widths.size() <= 1 && max_bead_width_external > 0 && ext_perimeter_width > 0 &&
-                ext_perimeter_spacing > 0)
-            {
-                coord_t actual_wall = beading.total_thickness + (ext_perimeter_width - ext_perimeter_spacing);
-                force_split = (actual_wall > max_bead_width_external + scaled<coord_t>(0.001));
-            }
-
-            // With perimeter overlap, block the split when each resulting bead would
-            // be too narrow to form continuous perimeters. Narrow split beads create
-            // fragmented diamond artifacts at skeleton transition zones because
-            // adjacent nodes disagree on whether to split, producing isolated loops.
-            // Floor is max(spacing, 90% nozzle width): spacing alone drops too low
-            // at high perimeter counts. 90% matches the default overlap spacing ratio
-            // (~89%), providing margin against boundary-straddling splits.
-            // Without overlap (nominal_spacing >= nominal_width), no guard needed.
-            // For multi-bead walls, require split beads >= 90% nominal to avoid diamond
-            // artifacts at transition zones. For single-bead walls (n==1), there are no
-            // adjacent beads to conflict with - any printable width works.
-            coord_t min_split_width = (beading.bead_widths.size() <= 1)
-                                          ? coord_t(1) // single bead: always split if printable
-                                          : std::max(nominal_spacing, nominal_width * 9 / 10);
-            bool split_viable = (nominal_spacing >= nominal_width) || (split_width >= min_split_width);
-
-            // Compare which is closer to target width: one fat bead or two split beads.
-            // Bias toward splitting - an over-wide bead prints worse than a slightly
-            // under-wide pair, so two beads win unless one bead is clearly better.
-            coord_t one_bead_deviation = new_center_width - split_threshold;
-            coord_t per_bead_deviation = (split_width > split_threshold) ? (split_width - split_threshold)
-                                                                         : (split_threshold - split_width);
-            coord_t two_bead_deviation = per_bead_deviation * 2;
-
-            if (Slic3r::debug_enabled(Slic3r::DBG_PERIMETERS))
-            {
-                dbg_log(Slic3r::DBG_PERIMETERS, debug_print_z, "SKEL",
-                        "SPLIT_EVAL layer=%d center_w=%.4fmm split_w=%.4fmm "
-                        "split_thresh=%.4fmm 1bead_dev=%.4fmm 2bead_dev=%.4fmm "
-                        "min_split_w=%.4fmm split_viable=%d force_split=%d",
-                        debug_layer_id, unscaled<double>(new_center_width), unscaled<double>(split_width),
-                        unscaled<double>(split_threshold), unscaled<double>(one_bead_deviation),
-                        unscaled<double>(two_bead_deviation), unscaled<double>(min_split_width), (int) split_viable,
-                        (int) force_split);
-            }
-
-            if (split_viable && (force_split || two_bead_deviation < one_bead_deviation * 2))
-            {
-                split_center_into_loop = true;
-
-                coord_t new_left_pos, new_right_pos;
-
-                if (beading.bead_widths.size() <= 1)
-                {
-                    // Single-bead wall: position using ext/perimeter overlap spacing
-                    coord_t split_center_spacing = (coord_t) ((double) split_width * (1.0 - split_overlap));
-                    coord_t center = beading.total_thickness / 2;
-                    new_left_pos = center - split_center_spacing / 2;
-                    new_right_pos = center + split_center_spacing / 2;
-                }
-                else
-                {
-                    // Multi-bead: position relative to center with overlap adjustment
-                    coord_t split_spacing = (coord_t) ((double) split_width * (1.0 - overlap_pct));
-                    coord_t current_center_pos = beading.toolpath_locations[center_idx];
-                    coord_t inward_adjustment = beading.left_over / 2;
-                    coord_t offset = split_spacing / 2;
-                    new_left_pos = current_center_pos - offset + inward_adjustment;
-                    new_right_pos = current_center_pos + offset - inward_adjustment;
-                }
-
-                // Modify arrays: Replace center bead with two beads
-                beading.bead_widths[center_idx] = split_width;
-                beading.toolpath_locations[center_idx] = new_left_pos;
-
-                // Insert new bead after the center
-                beading.bead_widths.insert(beading.bead_widths.begin() + center_idx + 1, split_width);
-                beading.toolpath_locations.insert(beading.toolpath_locations.begin() + center_idx + 1, new_right_pos);
-
-                beading.left_over = 0;
-
-                if (Slic3r::debug_enabled(Slic3r::DBG_PERIMETERS))
-                {
-                    dbg_log(Slic3r::DBG_PERIMETERS, debug_print_z, "SKEL",
-                            "SPLIT_OK layer=%d center_bead -> 2 beads @ %.4fmm "
-                            "pos=(%.4f,%.4f)",
-                            debug_layer_id, unscaled<double>(split_width), unscaled<double>(new_left_pos),
-                            unscaled<double>(new_right_pos));
-                }
-            }
-            else if (Slic3r::debug_enabled(Slic3r::DBG_PERIMETERS))
-            {
-                dbg_log(Slic3r::DBG_PERIMETERS, debug_print_z, "SKEL",
-                        "SPLIT_REJECTED layer=%d split_viable=%d force_split=%d "
-                        "2bead_dev=%.4fmm >= 1bead_dev*2=%.4fmm",
-                        debug_layer_id, (int) split_viable, (int) force_split, unscaled<double>(two_bead_deviation),
-                        unscaled<double>(one_bead_deviation * 2));
-            }
-        }
-
-        if (!split_center_into_loop)
+        // Center-bead splits are decided upstream as bead-count promotions by the
+        // beading strategy, so the skeleton smooths them as count transitions. Only
+        // continuous width absorption happens here.
         {
             // Normal ODD case processing (no split needed)
 
@@ -2065,7 +2063,10 @@ void SkeletalTrapezoidation::applyBeadWidthAdjustments(Beading &beading)
 
             if (new_center_width < min_safe_width)
             {
-                if (Slic3r::debug_enabled(Slic3r::DBG_PERIMETERS))
+                // Only log real abandonment: left_over != 0 means gap/overfill is being
+                // discarded. left_over == 0 is a thin center bead left untouched (a no-op),
+                // which would otherwise flood the counter with meaningless fires.
+                if (Slic3r::debug_enabled(Slic3r::DBG_PERIMETERS) && beading.left_over != 0)
                 {
                     dbg_log(Slic3r::DBG_PERIMETERS, debug_print_z, "SKEL",
                             "ADJUST_ODD_REJECT layer=%d new_center=%.4fmm < "
@@ -2098,7 +2099,7 @@ void SkeletalTrapezoidation::applyBeadWidthAdjustments(Beading &beading)
                 beading.toolpath_locations[center_idx] = new_toolpath_location;
                 beading.left_over = 0;
             }
-        } // End of if (!split_center_into_loop)
+        }
     }
 
     // Sanity check: a bead can never be wider than the wall itself (multi-bead only).
@@ -2458,13 +2459,14 @@ SkeletalTrapezoidation::Beading SkeletalTrapezoidation::interpolate(const Beadin
         {
             ret.bead_widths[inset_idx] = ratio_left_to_whole * left.bead_widths[inset_idx] +
                                          ratio_right_to_whole * right.bead_widths[inset_idx];
-            // Internal interpolated beads must stay wide enough to overlap with neighbors.
-            // External beads (first/last) are exempt - thin walls need narrow beads.
+            // Floor internal interpolated beads at min(spacing, width): positive overlap holds
+            // them at spacing to overlap neighbors, negative overlap holds them at the configured
+            // width so the intended gap survives. External beads (first/last) are exempt.
             size_t n = std::min(left.bead_widths.size(), right.bead_widths.size());
             bool is_external = (inset_idx == 0 || inset_idx == n - 1);
             if (!is_external && n > 2)
             {
-                coord_t min_w = beading_strategy.getBeadSpacing();
+                coord_t min_w = std::min(beading_strategy.getBeadSpacing(), beading_strategy.getExtrusionWidth());
                 if (ret.bead_widths[inset_idx] < min_w)
                     ret.bead_widths[inset_idx] = min_w;
             }
@@ -2570,18 +2572,16 @@ void SkeletalTrapezoidation::generateJunctions(ptr_vector_t<BeadingPropagation> 
             }
 
             coord_t w = beading->bead_widths[junction_idx];
-            // Internal beads must stay wide enough to overlap with neighbors.
-            // Various code paths (interpolation, even-case contraction, transition
-            // blending) can produce sub-spacing widths. Floor at spacing here as a
-            // catch-all so no internal junction emits a bead that breaks the overlap.
-            // External beads (first/last) are exempt - thin walls legitimately need
-            // narrow beads that would be below internal spacing.
+            // Floor internal beads at min(spacing, width). Positive overlap (width > spacing)
+            // holds them at spacing so they overlap neighbors; negative overlap (width < spacing)
+            // holds them at the configured width so the intended gap is preserved instead of
+            // filled in. External beads (first/last) are exempt - thin walls legitimately narrow.
             if (w > 0 && num_junctions > 2)
             {
                 bool is_external = (junction_idx == 0 || junction_idx == num_junctions - 1);
                 if (!is_external)
                 {
-                    coord_t min_w = beading_strategy.getBeadSpacing();
+                    coord_t min_w = std::min(beading_strategy.getBeadSpacing(), beading_strategy.getExtrusionWidth());
                     if (w < min_w)
                         w = min_w;
                 }

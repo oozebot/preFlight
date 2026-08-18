@@ -10,7 +10,13 @@
 #include "clipper2/clipper.h"
 #include "clipper2/clipper.offset.h"
 
+#include <atomic>
+
 namespace Clipper2Lib {
+
+// preFlight local patch: reject counter for the square-join clamp below, read
+// by the slicer's debug telemetry through an extern declaration.
+std::atomic<uint64_t> pf_square_join_clamps{0};
 
 const double floating_point_tolerance = 1e-12;
 
@@ -235,11 +241,22 @@ void ClipperOffset::DoSquare(const Path64& path, size_t j, size_t k)
 	PointD pt2 = TranslatePoint(ptQ, group_delta_ * -vec.y, group_delta_ * vec.x);
 	// get 2 vertices along one edge offset
 	PointD pt3 = GetPerpendicD(path[k], norms[k], group_delta_);
+	// preFlight local patch: for nearly parallel construction lines the
+	// unconstrained intersection can land arbitrarily far away, and a false
+	// result would leave pt at its fallback. A square join stays within a
+	// couple of deltas of the offset vertex, so clamp degenerate results
+	// back to it.
+	const double max_join_dist_sqrd = 100.0 * abs_delta * abs_delta;
 	if (j == k)
 	{
 		PointD pt4 = PointD(pt3.x + vec.x * group_delta_, pt3.y + vec.y * group_delta_);
 		PointD pt = ptQ;
 		GetLineIntersectPt(pt1, pt2, pt3, pt4, pt);
+		if ((pt.x - ptQ.x) * (pt.x - ptQ.x) + (pt.y - ptQ.y) * (pt.y - ptQ.y) > max_join_dist_sqrd)
+		{
+			++pf_square_join_clamps;
+			pt = ptQ;
+		}
 		//get the second intersect point through reflecion
         path_out.emplace_back(ReflectPoint(pt, ptQ));
         path_out.emplace_back(pt);
@@ -249,6 +266,11 @@ void ClipperOffset::DoSquare(const Path64& path, size_t j, size_t k)
 		PointD pt4 = GetPerpendicD(path[j], norms[k], group_delta_);
 		PointD pt = ptQ;
 		GetLineIntersectPt(pt1, pt2, pt3, pt4, pt);
+		if ((pt.x - ptQ.x) * (pt.x - ptQ.x) + (pt.y - ptQ.y) * (pt.y - ptQ.y) > max_join_dist_sqrd)
+		{
+			++pf_square_join_clamps;
+			pt = ptQ;
+		}
         path_out.emplace_back(pt);
 		//get the second intersect point through reflecion
         path_out.emplace_back(ReflectPoint(pt, ptQ));
@@ -373,7 +395,7 @@ void ClipperOffset::OffsetPolygon(Group& group, const Path64& path)
 {
 	path_out.clear();
 	for (Path64::size_type j = 0, k = path.size() - 1; j < path.size(); k = j, ++j)
-		OffsetPoint(group, path, j, k);	
+		OffsetPoint(group, path, j, k);
     solution->emplace_back(path_out);
 }
 

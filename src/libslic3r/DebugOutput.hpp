@@ -29,6 +29,13 @@ enum DebugCat : uint32_t
     DBG_PERIMETERS = 1u << 1,
     DBG_INTERLOCK = 1u << 2,
     DBG_SERPENTINE = 1u << 3,
+    DBG_BAOBAB = 1u << 4,
+    // Support generation telemetry common to every generator (layer grid, contact anchoring),
+    // as opposed to DBG_BAOBAB, which is the Baobab engine's own diagnostics.
+    DBG_SUPPORT = 1u << 5,
+    // Print stability analysis (SupportSpotsGenerator): per-line support points and the
+    // aggregated issues behind the "Detected print stability issues" alert.
+    DBG_STABILITY = 1u << 6,
     DBG_ALL = 0xFFFFFFFFu,
 };
 
@@ -50,6 +57,12 @@ inline uint32_t debug_category_from_name(std::string_view name)
         return DBG_INTERLOCK;
     if (name == "serpentine")
         return DBG_SERPENTINE;
+    if (name == "baobab")
+        return DBG_BAOBAB;
+    if (name == "support")
+        return DBG_SUPPORT;
+    if (name == "stability")
+        return DBG_STABILITY;
     if (name == "all")
         return DBG_ALL;
     return 0;
@@ -144,7 +157,11 @@ SLIC3R_DBG_PRINTF_FMT inline void dbg_log(uint32_t cat, double z, const char *ty
     line.resize(off + size_t(payload_len)); // drop the trailing NUL vsnprintf wrote
     line.push_back('\n');
     fwrite(line.data(), 1, line.size(), stdout);
-    // No per-line flush: g_dbg_flusher pushes stdout on a fixed cadence.
+    // No per-line flush: g_dbg_flusher pushes stdout on a fixed cadence. Started lazily here
+    // as well as by the CLI parser, so whichever process actually emits lines is guaranteed a
+    // live flusher next to its own stdout - GUI slicing sessions stream instead of buffering
+    // until exit.
+    g_dbg_flusher.start();
 }
 
 } // namespace Slic3r

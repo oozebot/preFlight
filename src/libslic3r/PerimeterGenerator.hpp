@@ -135,9 +135,13 @@ void process_athena(
     // Infills without the gap fills
     ExPolygons &out_fill_expolygons);
 
+// nominal_mm3_per_mm is the volumetric baseline for the flow-hold ratio; 0 derives it from
+// `flow`. Pass the configured feature flow when `flow` itself has already been width-adjusted
+// (fills at solver spacing), so the ratio measures against what the feature speed was tuned for.
 ExtrusionMultiPath thick_polyline_to_multi_path(const ThickPolyline &thick_polyline, ExtrusionRole role,
                                                 const Flow &flow, float tolerance, float merge_tolerance,
-                                                const std::optional<uint32_t> &perimeter_index = std::nullopt);
+                                                const std::optional<uint32_t> &perimeter_index = std::nullopt,
+                                                double nominal_mm3_per_mm = 0.);
 
 } // namespace Slic3r::PerimeterGenerator
 

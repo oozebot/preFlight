@@ -24,6 +24,15 @@
 
 #include "Exception.hpp"
 #include "Print.hpp"
+
+// Reject counters defined next to the preFlight local patches in the vendored
+// Clipper2 sources; declared here to keep those files free of slicer includes.
+namespace Clipper2Lib
+{
+extern std::atomic<uint64_t> pf_split_op_intersection_rejects;
+extern std::atomic<uint64_t> pf_intersect_node_corrections;
+extern std::atomic<uint64_t> pf_square_join_clamps;
+} // namespace Clipper2Lib
 #include "BoundingBox.hpp"
 #include "Brim.hpp"
 #include "ClipperUtils.hpp"
@@ -42,6 +51,7 @@
 #include "format.hpp"
 #include "ArrangeHelper.hpp"
 #include "CustomParametersHandling.hpp"
+#include "DebugOutput.hpp"
 
 #include <float.h>
 
@@ -283,6 +293,17 @@ bool Print::invalidate_state_by_config_options(const ConfigOptionResolver & /* n
         else if (opt_key == "automatic_extrusion_widths")
         {
             osteps.emplace_back(posPerimeters);
+        }
+        else if (opt_key == "nozzle_width_warning_max")
+        {
+            // The generated-width check runs while perimeters and fills are produced; re-run
+            // them so a changed threshold re-evaluates an already sliced plate.
+            osteps.emplace_back(posPerimeters);
+        }
+        else if (opt_key == "nozzle_width_warning_min")
+        {
+            // Editing-time check only; nothing generated depends on it.
+            steps.emplace_back(psGCodeExport);
         }
         else
         {
@@ -642,8 +663,7 @@ std::string Print::validate(std::vector<std::string> *warnings) const
 
     // Cache of layer height profiles for checking:
     // 1) Whether all layers are synchronized if printing with wipe tower and / or unsynchronized supports.
-    // 2) Whether layer height is constant for Organic supports.
-    // 3) Whether build volume Z is not violated.
+    // 2) Whether build volume Z is not violated.
     std::vector<std::vector<coordf_t>> layer_height_profiles;
     auto layer_height_profile = [this,
                                  &layer_height_profiles](const size_t print_object_idx) -> const std::vector<coordf_t> &
@@ -702,16 +722,52 @@ std::string Print::validate(std::vector<std::string> *warnings) const
                                             { return object->model_object()->has_custom_layering(); }) !=
                                m_objects.end();
 
-    // Custom layering is not allowed for tree supports as of now.
+    // Support contacts anchor to the real object surfaces. A variable layer height region thicker
+    // than the nominal layer height lowers those surfaces below the support grid, and past a
+    // limit the interface stack can no longer absorb the difference at a printable layer height.
+    // Refuse profiles beyond that limit when a tree support engine will run.
     for (size_t print_object_idx = 0; print_object_idx < m_objects.size(); ++print_object_idx)
-        if (const PrintObject &print_object = *m_objects[print_object_idx];
-            print_object.has_support_material() && print_object.config().support_material_style.value == smsOrganic &&
-            print_object.model_object()->has_custom_layering())
-        {
-            if (const std::vector<coordf_t> &layers = layer_height_profile(print_object_idx); !layers.empty())
-                if (!check_object_layers_fixed(print_object.slicing_parameters(), layers))
-                    return _u8L("Variable layer height is not supported with Organic supports.");
-        }
+    {
+        const PrintObject &print_object = *m_objects[print_object_idx];
+        const auto num_interface = coordf_t(print_object.config().support_material_interface_layers.value);
+        if (!print_object.has_support() || num_interface <= 0. || !print_object.model_object()->has_custom_layering())
+            continue;
+        // The painted-enforcer scans walk the whole mesh; validate runs on every plater change,
+        // so they stay behind the cheap predicates and the style test.
+        const SupportMaterialStyle style = print_object.config().support_material_style.value;
+        if (style != smsTree && style != smsOrganic && style != smsBaobab && !print_object.has_organic_enforcers() &&
+            !print_object.has_baobab_enforcers())
+            continue;
+        const std::vector<coordf_t> &profile = layer_height_profile(print_object_idx);
+        coordf_t max_profile_height = 0.;
+        for (size_t i = 1; i < profile.size(); i += 2)
+            max_profile_height = std::max(max_profile_height, profile[i]);
+        const SlicingParameters &slicing_params = print_object.slicing_parameters();
+        const coordf_t h = slicing_params.layer_height;
+        // The printable-height floor belongs to the nozzle that prints the interface layers:
+        // the interface extruder, or the support extruder when no dedicated interface extruder
+        // is set. When both are 0, any extruder may print them, so the largest nozzle bounds
+        // the floor.
+        coordf_t interface_nozzle = 0.;
+        int interface_extruder = print_object.config().support_material_interface_extruder.value;
+        if (interface_extruder == 0)
+            interface_extruder = print_object.config().support_material_extruder.value;
+        if (interface_extruder > 0)
+            interface_nozzle = m_config.nozzle_diameter.get_at(size_t(interface_extruder - 1));
+        else
+            for (const double d : m_config.nozzle_diameter.values)
+                interface_nozzle = std::max(interface_nozzle, coordf_t(d));
+        // Worst-case interface height h - r/n + (h - profile_max)/n must stay printable. The
+        // 0.02mm slack admits profiles grazing the boundary, where the height floor shifts the
+        // stack bottom by at most that much; anything past it produces a real overlap with the
+        // support body and is refused.
+        const coordf_t limit = h * (1. + num_interface) - std::fmod(slicing_params.gap_support_object, h) -
+                               num_interface * 0.25 * interface_nozzle;
+        if (const coordf_t allowed = std::max(h, limit) + 0.02; max_profile_height > allowed)
+            return format(_u8L("Variable layer height regions thicker than %1% mm are not supported with the "
+                               "current support settings."),
+                          float_to_string_decimal_point(allowed, 2));
+    }
 
     if (this->has_wipe_tower() && !m_objects.empty())
     {
@@ -753,6 +809,20 @@ std::string Print::validate(std::vector<std::string> *warnings) const
             return _u8L("The Wipe Tower currently does not support volumetric E (use_volumetric_e=0).");
         if (m_config.complete_objects && extruders.size() > 1)
             return _u8L("The Wipe Tower is currently not supported for multimaterial sequential prints.");
+
+        // Supports print on a fixed layer grid. Under a variable layer height profile their
+        // layers interleave with the object's at distinct heights, and the tower, which has to
+        // grow through every print level at one XY spot, would be asked to print sliver layers
+        // on top of itself. Refuse the combination.
+        // has_support() rather than has_support_material(): a raft-only object keeps all its
+        // support layers below the object and nothing interleaves with the profile.
+        for (size_t print_object_idx = 0; print_object_idx < m_objects.size(); ++print_object_idx)
+            if (const PrintObject &print_object = *m_objects[print_object_idx];
+                print_object.has_support() && print_object.model_object()->has_custom_layering())
+                if (const std::vector<coordf_t> &layers = layer_height_profile(print_object_idx); !layers.empty())
+                    if (!check_object_layers_fixed(print_object.slicing_parameters(), layers))
+                        return _u8L(
+                            "The Wipe Tower is not supported when supports are combined with variable layer height.");
 
         if (m_objects.size() > 1)
         {
@@ -879,7 +949,8 @@ std::string Print::validate(std::vector<std::string> *warnings) const
                     // Notify the user that printing supports with different nozzle diameters is experimental and requires caution.
                     warnings->emplace_back("_SUPPORT_NOZZLE_DIAMETER_DIFFER");
                 }
-                if (this->has_wipe_tower() && object->config().support_material_style != smsOrganic)
+                if (this->has_wipe_tower() && object->config().support_material_style != smsOrganic &&
+                    object->config().support_material_style != smsBaobab)
                 {
                     // preFlight: Removed soluble-support synchronize_layers check.
                     // preFlight always syncs sparse support layers to object layer heights.
@@ -893,19 +964,34 @@ std::string Print::validate(std::vector<std::string> *warnings) const
                                 "(both support_material_extruder and support_material_interface_extruder need to be set to 0).");
                     }
                 }
-                if (object->config().support_material_style == smsOrganic)
                 {
-                    float extrusion_width = std::min(support_material_flow(object).width(),
-                                                     support_material_interface_flow(object).width());
-                    if (object->config().support_tree_tip_diameter < extrusion_width - EPSILON)
-                        return _u8L(
-                            "Organic support tree tip diameter must not be smaller than support material extrusion width.");
-                    if (object->config().support_tree_branch_diameter < 2. * extrusion_width - EPSILON)
-                        return _u8L(
-                            "Organic support branch diameter must not be smaller than 2x support material extrusion width.");
-                    if (object->config().support_tree_branch_diameter < object->config().support_tree_tip_diameter)
+                    // Painted enforcers drive the tree engines regardless of the selected style,
+                    // so the diameter floors apply to them too. The mesh-walking enforcer scans
+                    // run only after a cheap config check has already failed.
+                    const SupportMaterialStyle style = object->config().support_material_style.value;
+                    const float extrusion_width = std::min(support_material_flow(object).width(),
+                                                           support_material_interface_flow(object).width());
+                    const bool bad_tip = object->config().support_tree_tip_diameter < extrusion_width - EPSILON;
+                    const bool bad_branch = object->config().support_tree_branch_diameter <
+                                            2. * extrusion_width - EPSILON;
+                    const bool bad_order = object->config().support_tree_branch_diameter <
+                                           object->config().support_tree_tip_diameter;
+                    if ((bad_tip || bad_branch || bad_order) &&
+                        (style == smsOrganic || object->has_organic_enforcers()))
+                    {
+                        if (bad_tip)
+                            return _u8L(
+                                "Organic support tree tip diameter must not be smaller than support material extrusion width.");
+                        if (bad_branch)
+                            return _u8L(
+                                "Organic support branch diameter must not be smaller than 2x support material extrusion width.");
                         return _u8L(
                             "Organic support branch diameter must not be smaller than support tree tip diameter.");
+                    }
+                    if (object->config().support_baobab_trunk_diameter < 2. * extrusion_width - EPSILON &&
+                        (style == smsBaobab || object->has_baobab_enforcers()))
+                        return _u8L(
+                            "Baobab support trunk diameter must not be smaller than 2x support material extrusion width.");
                 }
             }
 
@@ -1136,6 +1222,16 @@ void Print::process()
 
     BOOST_LOG_TRIVIAL(info) << "Starting the slicing process." << log_memory_info();
 
+    // One generated-width warning per slicing run across all objects
+    m_width_warning_tripped.store(false, std::memory_order_relaxed);
+    dbg_log(DBG_PERIMETERS, 0., "WIDTHWARN", "latch reset");
+    // Process-lifetime totals of the Clipper2 degenerate-intersection rejections;
+    // the delta between successive slices shows what the current slice hit.
+    dbg_log(DBG_PERIMETERS, 0., "CLIP2", "reject totals split=%llu isect=%llu square=%llu",
+            (unsigned long long) Clipper2Lib::pf_split_op_intersection_rejects.load(),
+            (unsigned long long) Clipper2Lib::pf_intersect_node_corrections.load(),
+            (unsigned long long) Clipper2Lib::pf_square_join_clamps.load());
+
     tbb::parallel_for(
         tbb::blocked_range<size_t>(0, m_objects.size(), 1),
         [this](const tbb::blocked_range<size_t> &range)
@@ -1149,16 +1245,20 @@ void Print::process()
         },
         tbb::simple_partitioner());
 
-    // The alert_when_supports_needed() function only processes objects WITHOUT support enabled,
-    // so if all objects have support, we can skip both the search and the alert step entirely.
+    // Objects covered by automatic supports are exempt from the stability alert; manually
+    // painted objects are still analyzed, with the painted areas filtered out at the alert
+    // step. Skip the search and the alert only when every object has automatic supports.
     bool any_object_needs_support_alerts = false;
     for (const PrintObject *obj : m_objects)
     {
-        if (!obj->has_support())
-        {
+        const bool automatic = obj->has_automatic_support();
+        dbg_log(DBG_STABILITY, 0., "STAB", "GATE %s master=%d auto=%d enforce=%d -> %s",
+                obj->model_object()->name.c_str(), int(obj->has_support()),
+                int(obj->config().support_material_auto.value),
+                int(obj->config().support_material_enforce_layers.value),
+                automatic ? "skip (automatic supports)" : "analyze");
+        if (!automatic)
             any_object_needs_support_alerts = true;
-            break;
-        }
     }
 
     if (any_object_needs_support_alerts)
@@ -1235,102 +1335,11 @@ void Print::process()
         if (this->has_brim())
         {
             Polygons islands_area;
+            // make_brim keeps every brim region clear of the first support layer's footprint,
+            // so the support extrusions never need trimming here.
             m_brim = make_brim(*this, this->make_try_cancel(), islands_area);
             for (Polygon &poly : union_(this->first_layer_islands(), islands_area))
                 append(m_first_layer_convex_hull.points, std::move(poly.points));
-
-            // After brim is generated, trim first layer support extrusions to avoid overlap
-            // Only process if brim exists and has actual geometry
-            if (!m_brim.empty())
-            {
-                // This prevents supports from filling tiny gaps in concentric brims
-                Polygons brim_polygons = islands_area;
-
-                if (!brim_polygons.empty())
-                {
-                    for (PrintObject *object : m_objects)
-                    {
-                        if (object->support_layers().empty())
-                            continue;
-
-                        SupportLayer *first_support_layer = object->support_layers().front();
-
-                        // Only process first layer support (within EPSILON tolerance)
-                        if (!first_support_layer ||
-                            first_support_layer->print_z > config().first_layer_height.value + EPSILON ||
-                            first_support_layer->support_fills.empty())
-                            continue;
-
-                        // Transform brim polygons to object's coordinate system
-                        // Support extrusions are in object-local coords, brim is in absolute bed coords
-                        Polygons brim_in_object_space = brim_polygons;
-                        Vec3d obj_offset = object->instances()[0].model_instance->get_offset();
-                        for (Polygon &poly : brim_in_object_space)
-                        {
-                            poly.translate(-scale_(obj_offset.x()), -scale_(obj_offset.y()));
-                        }
-
-                        // Check if there's actual overlap before processing
-                        Polygons support_polys = to_polygons(first_support_layer->support_islands);
-                        Polygons intersection_test = intersection(support_polys, brim_in_object_space);
-                        if (area(intersection_test) <= 0)
-                            continue; // No overlap, skip trimming
-
-                        // Convert brim polygons to ExPolygons for subtraction
-                        ExPolygons brim_expolygons = union_ex(brim_in_object_space);
-
-                        // Recursive function to trim extrusion entities
-                        size_t total_paths_trimmed = 0;
-                        std::function<void(ExtrusionEntitiesPtr &, const ExPolygons &)> trim_entities =
-                            [&trim_entities, &total_paths_trimmed](ExtrusionEntitiesPtr &entities,
-                                                                   const ExPolygons &clip_regions)
-                        {
-                            ExtrusionEntitiesPtr new_entities;
-                            new_entities.reserve(entities.size());
-
-                            for (ExtrusionEntity *entity : entities)
-                            {
-                                if (ExtrusionPath *path = dynamic_cast<ExtrusionPath *>(entity))
-                                {
-                                    // Subtract brim from this path
-                                    ExtrusionEntityCollection trimmed;
-                                    path->subtract_expolygons(clip_regions, &trimmed);
-
-                                    // If trimmed result is not empty, add the trimmed pieces
-                                    if (!trimmed.empty())
-                                    {
-                                        for (ExtrusionEntity *trimmed_entity : trimmed.entities)
-                                        {
-                                            new_entities.push_back(trimmed_entity);
-                                        }
-                                        trimmed.entities.clear();
-                                    }
-                                    total_paths_trimmed++;
-                                    delete path;
-                                }
-                                else if (ExtrusionEntityCollection *collection =
-                                             dynamic_cast<ExtrusionEntityCollection *>(entity))
-                                {
-                                    // Recursively process the collection's entities
-                                    trim_entities(collection->entities, clip_regions);
-                                    // Keep the (now modified) collection
-                                    new_entities.push_back(collection);
-                                }
-                                else
-                                {
-                                    // Keep loops and other types as-is
-                                    new_entities.push_back(entity);
-                                }
-                            }
-
-                            entities = std::move(new_entities);
-                        };
-
-                        // Process the support fills
-                        trim_entities(first_support_layer->support_fills.entities, brim_expolygons);
-                    }
-                }
-            }
         }
 
         if (has_skirt() && !draft_shield)
@@ -1761,10 +1770,10 @@ void Print::alert_when_supports_needed()
             std::pair<const PrintObject *, std::vector<std::pair<SupportSpotsGenerator::SupportPointCause, bool>>>>
             objects_isssues;
 
+        std::unordered_set<const ModelObject *> checked_model_objects;
         for (const PrintObject *object : m_objects)
         {
-            std::unordered_set<const ModelObject *> checked_model_objects;
-            if (!object->has_support() &&
+            if (!object->has_automatic_support() &&
                 checked_model_objects.find(object->model_object()) == checked_model_objects.end())
             {
                 if (object->m_shared_regions->generated_support_points.has_value())
@@ -1773,6 +1782,78 @@ void Print::alert_when_supports_needed()
                         object->m_shared_regions->generated_support_points->support_points;
                     SupportSpotsGenerator::PartialObjects partial_objects =
                         object->m_shared_regions->generated_support_points->partial_objects;
+                    // Partial supports: the analysis knows nothing about them, so drop the
+                    // trouble spots that enforcer volumes, painted enforcers or enforced first
+                    // layers cover, and alert only on the uncovered problem areas. A point is
+                    // covered when enforcer material projects within the XY margin at nearly
+                    // its own height. Floating parts are deliberately never filtered: a
+                    // centroid match cannot prove the part is held.
+                    if (object->has_support())
+                    {
+                        static constexpr double cover_xy_margin = 2.0; // mm
+                        static constexpr float cover_z_window = 0.5f;  // mm
+                        // Enforcer volumes plus every painted enforcer type, merged per layer.
+                        // The facet projections are gated by the cheap blob check so unpainted
+                        // objects never build a TriangleSelector.
+                        std::vector<Polygons> per_layer{object->slice_support_enforcers()};
+                        for (const TriangleStateType type :
+                             {TriangleStateType::ENFORCER, TriangleStateType::GRID_ENFORCER,
+                              TriangleStateType::ORGANIC_ENFORCER, TriangleStateType::BAOBAB_ENFORCER})
+                            if (object->has_painted_enforcers(type))
+                                object->project_and_append_custom_facets(false, type, per_layer);
+                        std::vector<std::pair<float, Polygons>> cover;
+                        for (size_t i = 0; i < per_layer.size() && i < object->layer_count(); ++i)
+                            if (!per_layer[i].empty())
+                                cover.emplace_back(float(object->layers()[i]->bottom_z()),
+                                                   offset(union_(per_layer[i]), scaled<float>(cover_xy_margin)));
+                        // Enforced first layers only generate when an engine honors them
+                        // without automatic placement: the tree engine does when the object
+                        // routes to it (organic or Baobab style or paint) and any enforcer
+                        // content exists; the classic engine requires auto. They cover only
+                        // extrusion-level causes: bed adhesion and weak parts are not fixed by
+                        // a few enforced layers, and the brim recommendation must survive them.
+                        const SupportMaterialStyle support_style = object->config().support_material_style.value;
+                        const bool tree_engine = support_style == smsOrganic || support_style == smsBaobab ||
+                                                 object->has_organic_enforcers() || object->has_baobab_enforcers();
+                        const int enforce_layers = object->config().support_material_enforce_layers.value;
+                        float enforced_top_z = 0.f;
+                        if (enforce_layers > 0 && object->layer_count() > 0 && tree_engine && !cover.empty())
+                            enforced_top_z = float(
+                                object->layers()[std::min(size_t(enforce_layers), object->layer_count()) - 1]->print_z);
+                        if (!cover.empty() || enforced_top_z > 0.f)
+                        {
+                            auto covered = [&cover](const Vec3f &pos)
+                            {
+                                const Point pt = Point::new_scale(pos.x(), pos.y());
+                                for (const auto &[z, polys] : cover)
+                                {
+                                    if (std::abs(z - pos.z()) > cover_z_window)
+                                        continue;
+                                    if (contains(polys, pt))
+                                        return true;
+                                }
+                                return false;
+                            };
+                            const size_t points_before = supp_points.size();
+                            supp_points.erase(
+                                std::remove_if(
+                                    supp_points.begin(), supp_points.end(),
+                                    [&covered, enforced_top_z](const SupportSpotsGenerator::SupportPoint &sp)
+                                    {
+                                        const bool extrusion_cause =
+                                            sp.is_local_extrusion_support() ||
+                                            sp.cause == SupportSpotsGenerator::SupportPointCause::FloatingBridgeAnchor;
+                                        if (extrusion_cause && sp.position.z() < enforced_top_z - float(EPSILON))
+                                            return true;
+                                        return covered(sp.position);
+                                    }),
+                                supp_points.end());
+                            dbg_log(DBG_STABILITY, 0., "STAB",
+                                    "COVER %s points %zu->%zu enforced_top=%.2f cover_layers=%zu",
+                                    object->model_object()->name.c_str(), points_before, supp_points.size(),
+                                    double(enforced_top_z), cover.size());
+                        }
+                    }
                     auto issues = SupportSpotsGenerator::gather_issues(supp_points, partial_objects);
                     if (issues.size() > 0)
                     {

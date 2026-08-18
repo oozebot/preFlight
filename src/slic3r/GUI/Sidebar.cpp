@@ -3,7 +3,12 @@
 ///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
 ///|/
 #include "Sidebar.hpp"
+#include <algorithm>
+#include <iterator>
+#include <boost/nowide/cstdio.hpp>
+#include <boost/nowide/fstream.hpp>
 #include "libslic3r/AppConfig.hpp"
+#include "libslic3r/Utils.hpp"
 #include "Widgets/CollapsibleSection.hpp"
 #include "Widgets/SwitchButton.hpp"
 #include "ConfigManipulation.hpp"
@@ -1733,6 +1738,9 @@ wxPanel *PrintSettingsPanel::BuildLayersContent()
         CreateSettingRow(content, serpentine_group, "serpentine_extrusion_width", _L("Extrusion width"));
         CreateSettingRow(content, serpentine_group, "serpentine_overlap", _L("Overlap"));
         CreateSettingRow(content, serpentine_group, "serpentine_max_bead", _L("Maximum bead width"));
+        CreateSettingRow(content, serpentine_group, "serpentine_relaxed", _L("Relaxed spacing"));
+        CreateSettingRow(content, serpentine_group, "serpentine_spacing", _L("Rib spacing"));
+        CreateSettingRow(content, serpentine_group, "serpentine_outer_loop", _L("Outer surface loop"));
         CreateSettingRow(content, serpentine_group, "serpentine_limit_depth", _L("Limit depth"));
         CreateSettingRow(content, serpentine_group, "serpentine_depth", _L("Depth"));
         CreateSettingRow(content, serpentine_group, "serpentine_solid_surfaces", _L("Solid top/bottom surfaces"));
@@ -1996,16 +2004,30 @@ wxPanel *PrintSettingsPanel::BuildSupportContent()
     // Organic supports group
     {
         auto *organic_group = CreateFlatStaticBoxSizer(content, _L("Organic supports"));
-        CreateSettingRow(content, organic_group, "support_tree_angle", _L("Branch angle"));
-        CreateSettingRow(content, organic_group, "support_tree_angle_slow", _L("Branch angle slow"));
+        CreateSettingRow(content, organic_group, "support_tree_angle", _L("Maximum branch angle"));
+        CreateSettingRow(content, organic_group, "support_tree_angle_slow", _L("Preferred branch angle"));
         CreateSettingRow(content, organic_group, "support_tree_branch_diameter", _L("Branch diameter"));
         CreateSettingRow(content, organic_group, "support_tree_branch_diameter_angle", _L("Branch diameter angle"));
         CreateSettingRow(content, organic_group, "support_tree_branch_diameter_double_wall",
-                         _L("Branch diameter double wall"));
+                         _L("Branch diameter with double walls"));
         CreateSettingRow(content, organic_group, "support_tree_tip_diameter", _L("Tip diameter"));
         CreateSettingRow(content, organic_group, "support_tree_branch_distance", _L("Branch distance"));
-        CreateSettingRow(content, organic_group, "support_tree_top_rate", _L("Top rate"));
+        CreateSettingRow(content, organic_group, "support_tree_top_rate", _L("Branch density"));
         sizer->Add(organic_group, 0, wxEXPAND | wxALL, em / 4);
+    }
+
+    // Baobab supports group
+    {
+        auto *baobab_group = CreateFlatStaticBoxSizer(content, _L("Baobab supports"));
+        CreateSettingRow(content, baobab_group, "support_baobab_angle", _L("Maximum trunk angle"));
+        CreateSettingRow(content, baobab_group, "support_baobab_angle_slow", _L("Preferred trunk angle"));
+        CreateSettingRow(content, baobab_group, "support_baobab_trunk_diameter", _L("Trunk diameter"));
+        CreateSettingRow(content, baobab_group, "support_baobab_trunk_diameter_angle", _L("Trunk diameter angle"));
+        CreateSettingRow(content, baobab_group, "support_baobab_trunk_distance", _L("Trunk distance"));
+        CreateSettingRow(content, baobab_group, "support_baobab_canopy_density", _L("Canopy density"));
+        CreateSettingRow(content, baobab_group, "support_baobab_max_canopy_angle", _L("Maximum canopy angle"));
+        CreateSettingRow(content, baobab_group, "support_baobab_plant_on_model", _L("Plant trunks on object"));
+        sizer->Add(baobab_group, 0, wxEXPAND | wxALL, em / 4);
     }
 
     content->SetSizer(sizer);
@@ -2293,7 +2315,7 @@ wxPanel *PrintSettingsPanel::BuildAdvancedContent()
         // settings); it must not be duplicated here.
         CreateSettingRow(content, arachne_group, "perimeter_compression", _L("Perimeter compression"));
         CreateSettingRow(content, arachne_group, "thin_wall_precision", _L("Thin wall width precision"));
-        CreateSettingRow(content, arachne_group, "max_perimeter_width", _L("Maximum perimeter width"));
+        CreateSettingRow(content, arachne_group, "max_perimeter_width", _L("Maximum width"));
         CreateSettingRow(content, arachne_group, "min_feature_size", _L("Min feature size"));
         CreateSettingRow(content, arachne_group, "wall_transition_angle", _L("Wall transition angle"));
         CreateSettingRow(content, arachne_group, "wall_transition_filter_deviation",
@@ -3132,11 +3154,22 @@ void PrintSettingsPanel::ApplyToggleLogic()
     ToggleOption("serpentine_extrusion_width", serpentine_enabled);
     ToggleOption("serpentine_overlap", serpentine_enabled);
     ToggleOption("serpentine_max_bead", serpentine_enabled);
-    ToggleOption("serpentine_limit_depth", serpentine_enabled);
-    ToggleOption("serpentine_depth", serpentine_enabled && config.opt_bool("serpentine_limit_depth"));
+    // Relaxed spacing overrides the depth limit; only relaxed stays live when both
+    // are ticked so the user can always untick it to get the depth options back.
+    bool serpentine_relaxed = serpentine_enabled && config.opt_bool("serpentine_relaxed");
+    ToggleOption("serpentine_relaxed", serpentine_enabled);
+    ToggleOption("serpentine_spacing", serpentine_relaxed);
+    ToggleOption("serpentine_outer_loop", serpentine_enabled);
+    ToggleOption("serpentine_limit_depth", serpentine_enabled && !serpentine_relaxed);
+    ToggleOption("serpentine_depth",
+                 serpentine_enabled && !serpentine_relaxed && config.opt_bool("serpentine_limit_depth"));
     ToggleOption("serpentine_solid_surfaces", serpentine_enabled);
-    ToggleOption("serpentine_ridges", serpentine_enabled);
-    ToggleOption("serpentine_aim", serpentine_enabled && config.opt_bool("serpentine_limit_depth"));
+    // The outer loop re-anchors the whole grid to the host rib, so ridging is
+    // forced aligned there too (the seam must stack into one column).
+    ToggleOption("serpentine_ridges",
+                 serpentine_enabled && !serpentine_relaxed && !config.opt_bool("serpentine_outer_loop"));
+    ToggleOption("serpentine_aim",
+                 serpentine_enabled && !serpentine_relaxed && config.opt_bool("serpentine_limit_depth"));
 
     // Interlocking perimeters dependencies
     bool interlock_enabled = config.opt_bool("interlock_perimeters_enabled");
@@ -3211,6 +3244,16 @@ void PrintSettingsPanel::ApplyToggleLogic()
                             "support_tree_branch_diameter_angle", "support_tree_branch_diameter_double_wall",
                             "support_tree_tip_diameter", "support_tree_branch_distance", "support_tree_top_rate"})
         ToggleOption(key, has_organic_supports);
+
+    // Baobab supports - same availability as organic; planting greys while an active
+    // buildplate-only contradicts it.
+    for (const char *key : {"support_baobab_angle", "support_baobab_angle_slow", "support_baobab_trunk_diameter",
+                            "support_baobab_trunk_diameter_angle", "support_baobab_trunk_distance",
+                            "support_baobab_canopy_density", "support_baobab_max_canopy_angle"})
+        ToggleOption(key, has_organic_supports);
+    bool buildplate_only_active = have_support_material && config.opt_bool("support_material_auto") &&
+                                  config.opt_bool("support_material_buildplate_only");
+    ToggleOption("support_baobab_plant_on_model", has_organic_supports && !buildplate_only_active);
 
     for (const char *el : {"support_material_bottom_interface_layers", "support_material_interface_spacing",
                            "support_material_interface_extruder", "support_material_interface_contact_loops"})
@@ -7517,13 +7560,8 @@ void FilamentSettingsPanel::CreateSettingRow(wxWindow *parent, wxSizer *sizer, c
                             default:
                                 if (opt_key == "filament_colour")
                                 {
-                                    // Write the original color string back into the config directly
-                                    DynamicPrintConfig &cfg =
-                                        wxGetApp().preset_bundle->filaments.get_edited_preset().config;
-                                    auto *opt = cfg.option<ConfigOptionStrings>(opt_key, true);
-                                    if (opt && !opt->values.empty())
-                                        opt->values[0] = it->second.original_value;
-                                    // Update the color panel visual
+                                    // Only restore the panel visual; the OnSettingChanged call
+                                    // below reads it back and performs the single commit.
                                     if (auto *panel = dynamic_cast<wxPanel *>(it->second.control))
                                     {
                                         wxColour clr(from_u8(it->second.original_value));
@@ -8427,17 +8465,21 @@ void FilamentSettingsPanel::OnSettingChanged(const std::string &opt_key)
     case coString:
     case coStrings:
     default:
-        // Special handling for filament_colour - get color from panel
+        // Special handling for filament_colour - the color commits straight to the preset instead
+        // of entering the dirty state, so this path bypasses the generic set_dirty tail below.
         if (opt_key == "filament_colour")
         {
             if (auto *panel = dynamic_cast<wxPanel *>(it->second.control))
             {
                 wxColour color = panel->GetBackgroundColour();
                 wxString color_str = wxString::Format("#%02X%02X%02X", color.Red(), color.Green(), color.Blue());
-                auto *opt = config.option<ConfigOptionStrings>(opt_key, true);
-                if (opt && !opt->values.empty())
-                    opt->values[0] = into_u8(color_str);
+                commit_filament_color_to_preset(wxGetApp().preset_bundle->filaments.get_edited_preset().name,
+                                                into_u8(color_str));
+                // The committed color is the new revert point; the undo arrow has nothing to offer.
+                it->second.original_value = into_u8(color_str);
+                UpdateUndoUI(opt_key);
             }
+            return;
         }
         else if (auto *combo = dynamic_cast<::ComboBox *>(it->second.control))
         {
@@ -10099,22 +10141,120 @@ void Sidebar::CreateObjectsSection()
         });
 }
 
-// Open a color picker for the filament assigned to the given extruder and push the
-// change through the preset/tab/plater pipeline so the 3D view updates immediately.
+// Parameters by value: callers pass references into the very config objects this function
+// mutates and the refresh chain rewrites.
+void commit_filament_color_to_preset(std::string preset_name, std::string color_hex)
+{
+    auto *preset_bundle = wxGetApp().preset_bundle;
+    if (!preset_bundle)
+        return;
+
+    // respect_active_preset=false: the true saved baseline is needed here. The default would hand
+    // back the active preset's working copy, and saving that would silently persist every
+    // unrelated unsaved edit along with the color.
+    // System presets are refused outright: they are rebuilt from the vendor bundle at startup,
+    // so a color written into one would silently revert. No filament preset ships as system.
+    Preset *preset = preset_bundle->filaments.find_preset(preset_name, false, false);
+    if (!preset || preset->is_default || preset->is_system)
+        return;
+
+    Preset &edited = preset_bundle->filaments.get_edited_preset();
+    const bool is_active = edited.name == preset->name;
+
+    // Confirming the picker on the unchanged color must not touch the disk or dirty the project.
+    if (boost::iequals(preset->config.opt_string("filament_colour", 0u), color_hex) &&
+        (!is_active || boost::iequals(edited.config.opt_string("filament_colour", 0u), color_hex)))
+        return;
+
+    auto set_color = [&color_hex](Preset &p)
+    {
+        auto *opt = p.config.option<ConfigOptionStrings>("filament_colour");
+        if (opt && !opt->values.empty())
+            opt->values[0] = color_hex;
+    };
+    set_color(*preset);
+    if (is_active)
+        set_color(edited);
+
+    // Persist user presets in place, through a temp file so a failed write cannot damage the
+    // preset. All path handling goes through the nowide-safe helpers (UTF-8 on Windows), and
+    // rename_file retries around transient locks from antivirus and indexers. The PID keeps two
+    // app instances from sharing a temp file. NEVER call save() on an external preset: its file
+    // member is the project (.3mf) path, and writing there would replace the project with an ini
+    // dump. External presets persist through the project save instead.
+    if (!preset->is_external && !preset->file.empty())
+    {
+        const std::string tmp_path = preset->file + "." + std::to_string(get_current_pid()) + ".tmp";
+        preset->config.save(tmp_path);
+        // ConfigBase::save emits one header line plus one line per key and cannot report
+        // failure, so the gate is a read-back: full line count and the new color both present.
+        bool written = false;
+        {
+            boost::nowide::ifstream in(tmp_path);
+            if (in)
+            {
+                const std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                const size_t lines = size_t(std::count(content.begin(), content.end(), '\n'));
+                written = lines == preset->config.keys().size() + 1 && content.find(color_hex) != std::string::npos;
+            }
+        }
+        if (written)
+            written = !Slic3r::rename_file(tmp_path, preset->file);
+        if (!written)
+        {
+            boost::nowide::remove(tmp_path.c_str());
+            MessageDialog dlg(wxGetApp().mainframe,
+                              format_wxstr(_L("Failed to write the filament preset file:\n%1%\n\n"
+                                              "The color change is kept for this session and will be included "
+                                              "in the project save, but the preset file was not updated."),
+                                           from_u8(preset->file)),
+                              _L("Filament color"), wxOK | wxICON_ERROR);
+            dlg.ShowModal();
+        }
+    }
+
+    // The color lands in the project's embedded config, so the project is modified regardless of
+    // which preset received it. For external presets this is also what guarantees persistence.
+    if (auto *plater = wxGetApp().plater())
+        plater->set_project_dirty();
+
+    // With baseline and working copy in agreement, this clears any stale dirty state on the
+    // color. update_dirty() runs on_presets_changed(), which also refreshes the sidebar combos
+    // and the filament panel.
+    if (auto *tab = wxGetApp().get_tab(Preset::TYPE_FILAMENT))
+    {
+        tab->reload_config();
+        tab->update_dirty();
+        tab->update_changed_ui();
+    }
+    else
+        wxGetApp().sidebar().update_presets(Preset::TYPE_FILAMENT);
+
+    if (auto *plater = wxGetApp().plater())
+        plater->on_config_change(preset_bundle->full_config());
+}
+
+// Open a color picker for the filament assigned to the given extruder. The color is a physical
+// property of the filament, so it is committed straight into that filament's preset.
 static void open_filament_color_picker(int extr_idx)
 {
     auto *preset_bundle = wxGetApp().preset_bundle;
     if (!preset_bundle)
         return;
 
-    // Read the current color from the extruder's selected filament preset
     const auto &extruders_filaments = preset_bundle->extruders_filaments;
     size_t eidx = (extr_idx >= 0 && extr_idx < static_cast<int>(extruders_filaments.size())) ? extr_idx : 0;
     const Preset *selected = extruders_filaments[eidx].get_selected_preset();
-    if (!selected)
+    if (!selected || selected->is_default)
         return;
+    // Copied out: the modal dialog below runs a nested event loop, and `selected` points into the
+    // preset container, which may reallocate before the dialog returns.
+    const std::string preset_name = selected->name;
 
-    std::string cur_color_str = selected->config.opt_string("filament_colour", 0);
+    // Show the effective color: the working copy may hold an unsaved color edit from the tab.
+    const Preset &edited = preset_bundle->filaments.get_edited_preset();
+    const Preset &shown = edited.name == preset_name ? edited : *selected;
+    std::string cur_color_str = shown.config.opt_string("filament_colour", 0u);
     wxColour current_color(from_u8(cur_color_str));
     if (!current_color.IsOk())
         current_color = *wxWHITE;
@@ -10130,28 +10270,7 @@ static void open_filament_color_picker(int extr_idx)
 
     wxColour new_color = dlg.GetColourData().GetColour();
     wxString color_str = wxString::Format("#%02X%02X%02X", new_color.Red(), new_color.Green(), new_color.Blue());
-
-    // Write the new color into the edited preset config
-    DynamicPrintConfig &config = preset_bundle->filaments.get_edited_preset().config;
-    auto *opt = config.option<ConfigOptionStrings>("filament_colour");
-    if (!opt || opt->values.empty())
-        return;
-    opt->values[0] = into_u8(color_str);
-
-    preset_bundle->filaments.get_edited_preset().set_dirty(true);
-
-    if (auto *tab = wxGetApp().get_tab(Preset::TYPE_FILAMENT))
-    {
-        tab->reload_config();
-        tab->update_dirty();
-        tab->update_changed_ui();
-    }
-
-    if (auto *plater = wxGetApp().plater())
-        plater->on_config_change(config);
-
-    // Refresh all filament combo icons so the swatch reflects the new color
-    wxGetApp().sidebar().update_presets(Preset::TYPE_FILAMENT);
+    commit_filament_color_to_preset(preset_name, into_u8(color_str));
 }
 
 void Sidebar::init_filament_combo(PlaterPresetComboBox **combo, int extr_idx)

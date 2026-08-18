@@ -55,6 +55,19 @@ public:
                        const std::function<void()> &throw_on_cancel_callback);
 
     /*!
+     * preFlight: create a generator over caller-supplied outlines instead of a PrintObject.
+     *
+     * Layer index 0 is the bottom-most layer, back() the top (seed) layer; the two vectors must
+     * be the same size. Reads no config; the five scalars are stored as-is. An empty outline set
+     * or an empty top layer produces a generator with zero trees, because the tree build derives
+     * its search grid from the top layer's extents.
+     */
+    explicit Generator(std::vector<Polygons> &&infill_outlines, std::vector<Polygons> &&overhang_per_layer,
+                       float infill_extrusion_width, coord_t supporting_radius, coord_t wall_supporting_radius,
+                       coord_t prune_length, coord_t straightening_max_distance,
+                       const std::function<void()> &throw_on_cancel_callback);
+
+    /*!
      * Get a tree of paths generated for a certain layer of the mesh.
      *
      * This tree represents the paths that must be traced to print the infill.
@@ -83,6 +96,13 @@ protected:
      * Calculate the tree structure of all layers.
      */
     void generateTrees(const PrintObject &print_object, const std::function<void()> &throw_on_cancel_callback);
+
+    /*!
+     * Shared tree-building core over explicit per-layer outlines (index 0 = bottom, back() = top).
+     * m_overhang_per_layer and m_lightning_layers must already be sized to match.
+     */
+    void generateTreesFromOutlines(const std::vector<Polygons> &infill_outlines,
+                                   const std::function<void()> &throw_on_cancel_callback);
 
     float m_infill_extrusion_width;
 

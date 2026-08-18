@@ -487,8 +487,11 @@ class Settings:
     serpentine_extrusion_width: str  # float or percentage
     serpentine_limit_depth: str  # bool (0/1)
     serpentine_max_bead: str  # percentage
+    serpentine_outer_loop: str  # bool (0/1)
     serpentine_overlap: str  # float or percentage
+    serpentine_relaxed: str  # bool (0/1)
     serpentine_solid_surfaces: str  # bool (0/1)
+    serpentine_spacing: str  # float
     silent_mode: str  # bool (0/1)
     single_extruder_multi_material: str  # bool (0/1)
     single_extruder_multi_material_priming: str  # bool (0/1)
@@ -509,6 +512,14 @@ class Settings:
     standby_temperature_delta: str  # int
     start_filament_gcode: str  # semicolon-separated
     start_gcode: str
+    support_baobab_angle: str  # float
+    support_baobab_angle_slow: str  # float
+    support_baobab_canopy_density: str  # percentage
+    support_baobab_max_canopy_angle: str  # float
+    support_baobab_plant_on_model: str  # bool (0/1)
+    support_baobab_trunk_diameter: str  # float
+    support_baobab_trunk_diameter_angle: str  # float
+    support_baobab_trunk_distance: str  # float
     support_material: str  # bool (0/1)
     support_material_angle: str  # float
     support_material_auto: str  # bool (0/1)

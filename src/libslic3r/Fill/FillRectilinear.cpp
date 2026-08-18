@@ -3767,12 +3767,28 @@ bool FillRectilinear::fill_surface_by_lines(const Surface *surface, const FillPa
             }
             ExPolygonWithOffset stretched_offset(fill_expoly, -rotate_vector.first, float(scale_(outer_offset)),
                                                  float(scale_(inner_offset)));
-            if (stretched_offset.n_contours_inner() > 0)
+            // Accept the stretch only if it does not FRAGMENT the inner boundary.
+            // Thinning or opening the inner boundary is fine (a single connected
+            // piece still links the scan columns), but on a band narrower than the
+            // stretch allows, the grown hole severs the inner boundary into separate
+            // pieces. Scan columns near the breaks lose their INNER intersections
+            // and whole chains of solid fill disappear around the stretch zones.
+            // A reduced piece count means the stretch consumed an entire inner piece,
+            // whose columns lose their INNER intersections the same way; holes cannot
+            // merge pieces, so any decrease is genuine loss and only an unchanged
+            // piece count is accepted. Falling back to the unstretched boundary keeps
+            // the fill complete at the cost of the hole-tangent overlap mitigation on
+            // that band.
+            if (stretched_offset.n_contours_inner() > 0 &&
+                stretched_offset.expolygons_inner.size() == poly_with_offset.expolygons_inner.size())
             {
                 poly_with_offset = std::move(stretched_offset);
                 bounding_box_src = poly_with_offset.bounding_box_src();
                 holes_stretched = true;
             }
+            else
+                dbg_log(Slic3r::DBG_FILL, this->z, "FILL", "STRETCH_REJECT inner ep=%zu->%zu",
+                        poly_with_offset.expolygons_inner.size(), stretched_offset.expolygons_inner.size());
         }
     }
     else

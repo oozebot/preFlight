@@ -91,6 +91,8 @@ public:
     bool is_project_dirty() const;
     bool is_presets_dirty() const;
     void update_project_dirty_from_presets();
+    // Mark the project dirty for an edit the preset-diff recompute cannot see
+    void set_project_dirty();
     int save_project_if_dirty(const wxString &reason);
     void reset_project_dirty_after_save();
     void reset_project_dirty_initial_presets();

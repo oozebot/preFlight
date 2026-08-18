@@ -365,6 +365,7 @@ struct Plater::priv
     bool is_project_dirty() const { return dirty_state.is_dirty(); }
     bool is_presets_dirty() const { return dirty_state.is_presets_dirty(); }
     void update_project_dirty_from_presets() { dirty_state.update_from_presets(); }
+    void set_project_dirty() { dirty_state.set_forced_dirty(); }
     int save_project_if_dirty(const wxString &reason)
     {
         int res = wxID_NO;
@@ -4498,22 +4499,44 @@ void Plater::priv::on_slicing_update(SlicingStatusEvent &evt)
         this->preview->reload_print();
     }
 
+    // Plain progress ticks carry no warning flags. Only warning events touch the notification
+    // lists (a new warning, or the deliberate warning_step == -1 full refresh sent on a bed
+    // switch and at process completion), so a warning is pushed once and a user's dismissal
+    // sticks; slice start closes the previous slice's warnings via clear_warnings().
+    if ((evt.status.flags & (PrintBase::SlicingStatus::UPDATE_PRINT_STEP_WARNINGS |
+                             PrintBase::SlicingStatus::UPDATE_PRINT_OBJECT_STEP_WARNINGS)) == 0)
+        return;
+
+    // Warnings belong to the print the background process is slicing, which under multi-bed
+    // autoslicing is not necessarily the active bed's print.
+    const Print *warning_print = this->background_process.fff_print();
+    if (warning_print == nullptr)
+        return;
+
     std::vector<ObjectID> object_ids = {evt.status.warning_object_id};
     std::vector<int> warning_steps = {evt.status.warning_step};
     std::vector<int> flagss = {int(evt.status.flags)};
 
-    if (warning_steps.front() == -1)
+    // A warning_step of -1 asks for a full refresh: close every slicing warning, then push
+    // again every warning that is still current, for both print and object steps.
+    const bool refresh_all_warnings = warning_steps.front() == -1;
+    if (refresh_all_warnings)
     {
         flagss = {PrintBase::SlicingStatus::UPDATE_PRINT_STEP_WARNINGS,
                   PrintBase::SlicingStatus::UPDATE_PRINT_OBJECT_STEP_WARNINGS};
-        notification_manager->close_slicing_errors_and_warnings();
+        // Warnings only: the loop below re-pushes warnings but never errors, which are pushed
+        // solely at process completion, so closing errors here would lose them for good.
+        notification_manager->close_slicing_warnings();
     }
 
     for (int flags : flagss)
     {
-        if (warning_steps.front() == -1)
+        // Rebuild the step and object lists for EACH pass: the print pass and the object pass
+        // enumerate different step counts, and the object pass needs the real object ids.
+        if (refresh_all_warnings)
         {
             warning_steps.clear();
+            object_ids.clear();
             if (flags == PrintBase::SlicingStatus::UPDATE_PRINT_STEP_WARNINGS)
             {
                 int i = 0;
@@ -4522,6 +4545,8 @@ void Plater::priv::on_slicing_update(SlicingStatusEvent &evt)
                     warning_steps.push_back(i);
                     ++i;
                 }
+                // The print pass reads the print state directly; one entry drives the loop.
+                object_ids.push_back(warning_print->id());
             }
             else
             {
@@ -4531,7 +4556,7 @@ void Plater::priv::on_slicing_update(SlicingStatusEvent &evt)
                     warning_steps.push_back(i);
                     ++i;
                 }
-                for (const PrintObject *po : wxGetApp().plater()->active_fff_print().objects())
+                for (const PrintObject *po : warning_print->objects())
                     object_ids.push_back(po->id());
             }
         }
@@ -4554,11 +4579,11 @@ void Plater::priv::on_slicing_update(SlicingStatusEvent &evt)
                     PrintStateBase::StateWithWarnings state;
                     if (flags & PrintBase::SlicingStatus::UPDATE_PRINT_STEP_WARNINGS)
                     {
-                        state = q->active_fff_print().step_state_with_warnings(static_cast<PrintStep>(warning_step));
+                        state = warning_print->step_state_with_warnings(static_cast<PrintStep>(warning_step));
                     }
                     else
                     {
-                        const PrintObject *print_object = q->active_fff_print().get_object(object_id);
+                        const PrintObject *print_object = warning_print->get_object(object_id);
                         if (print_object)
                             state = print_object->step_state_with_warnings(static_cast<PrintObjectStep>(warning_step));
                     }
@@ -4567,8 +4592,11 @@ void Plater::priv::on_slicing_update(SlicingStatusEvent &evt)
                     {
                         if (warning.current)
                         {
+                            // A step-event push re-asserts the warning over a user dismissal;
+                            // refresh re-pushes respect it.
                             notification_manager->push_slicing_warning_notification(warning.message, false, object_id,
-                                                                                    warning_step);
+                                                                                    warning_step,
+                                                                                    !refresh_all_warnings);
                             add_warning(warning, object_id.id);
                         }
                     }
@@ -4649,6 +4677,7 @@ void Plater::priv::actualize_object_warnings(const PrintBase &print)
 void Plater::priv::clear_warnings()
 {
     notification_manager->close_slicing_errors_and_warnings();
+    notification_manager->clear_slicing_warning_dismissals();
     this->current_warnings.clear();
 }
 bool Plater::priv::warnings_dialog()
@@ -4754,6 +4783,17 @@ void Plater::priv::on_process_completed(SlicingProcessCompletedEvent &evt)
         // preFlight: Sidebar collapse removed - user controls sidebar visibility manually.
         // The sidebar is hidden in Preview via set_current_panel() and restored
         // when returning to the Prepare view if is_collapsed is false.
+    }
+
+    // Reconcile warning notifications with the print state. A partial re-slice leaves cached
+    // steps' warnings current without any step event to re-push them, while slice start closed
+    // their toasts; one full refresh here restores them. Warnings the user dismissed stay
+    // dismissed until their owning step re-runs and re-asserts them.
+    if (this->printer_technology == ptFFF && this->background_process.fff_print() != nullptr)
+    {
+        PrintBase::SlicingStatus status(*this->background_process.fff_print(), -1);
+        SlicingStatusEvent warn_evt(EVT_SLICING_UPDATE, 0, status);
+        on_slicing_update(warn_evt);
     }
 
     // This updates the "Slice now", "Export G-code", "Arrange" buttons status.
@@ -5886,6 +5926,10 @@ bool Plater::is_presets_dirty() const
 void Plater::update_project_dirty_from_presets()
 {
     p->update_project_dirty_from_presets();
+}
+void Plater::set_project_dirty()
+{
+    p->set_project_dirty();
 }
 int Plater::save_project_if_dirty(const wxString &reason)
 {

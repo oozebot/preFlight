@@ -64,6 +64,13 @@ void ProjectDirtyStateManager::update_from_preview()
     }
 }
 
+void ProjectDirtyStateManager::set_forced_dirty()
+{
+    m_forced_dirty = true;
+    if (wxGetApp().mainframe != nullptr)
+        wxGetApp().mainframe->update_title();
+}
+
 void ProjectDirtyStateManager::reset_after_save()
 {
     this->reset_initial_presets();
@@ -76,6 +83,7 @@ void ProjectDirtyStateManager::reset_after_save()
 
 void ProjectDirtyStateManager::reset_initial_presets()
 {
+    m_forced_dirty = false;
     m_initial_presets.fill(std::string{});
     GUI_App &app = wxGetApp();
     for (const PresetCollection *preset_collection : app.get_active_preset_collections())

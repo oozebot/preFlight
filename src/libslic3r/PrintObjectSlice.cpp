@@ -70,13 +70,8 @@ LayerPtrs new_layers(PrintObject *print_object,
         coordf_t lo = object_layers[i_layer];
         coordf_t hi = object_layers[i_layer + 1];
         coordf_t slice_z = 0.5 * (lo + hi);
-        // preFlight: Snap to whole millimeters when very close (within 0.005mm) to prevent
-        // floating point accumulation errors with layer heights like 0.3333 (3 layers per mm)
-        // e.g., 21.9979 snaps to 22.0, but 4.3329 stays as 4.3329
-        coordf_t print_z = hi + zmin;
-        coordf_t nearest_mm = std::round(print_z);
-        if (std::abs(print_z - nearest_mm) < 0.005)
-            print_z = nearest_mm;
+        // Snap again after adding the raft offset; the boundaries were snapped based at z = 0.
+        coordf_t print_z = snap_print_z_whole_mm(hi + zmin);
         Layer *layer = new Layer(id++, print_object, hi - lo, print_z, slice_z);
         out.emplace_back(layer);
         if (prev != nullptr)

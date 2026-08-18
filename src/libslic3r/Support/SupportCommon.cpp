@@ -9,6 +9,7 @@
 #include <boost/log/trivial.hpp>
 #include <cmath>
 #include <initializer_list>
+#include <algorithm>
 #include <limits>
 #include <memory>
 #include <unordered_map>
@@ -35,7 +36,12 @@
 #include "libslic3r/MultiMaterialSegmentation.hpp"
 #include "libslic3r/Polygon.hpp"
 #include "libslic3r/Polyline.hpp"
+#include "libslic3r/Fill/Lightning/Generator.hpp"
+#include "libslic3r/Fill/Lightning/Layer.hpp"
+#include "libslic3r/ShortestPath.hpp"
 #include "libslic3r/Slicing.hpp"
+#include "libslic3r/DebugOutput.hpp"
+#include "libslic3r/Support/BaobabSupport.hpp"
 #include "libslic3r/Surface.hpp"
 #include "libslic3r/Utils.hpp"
 #include "libslic3r/libslic3r.h"
@@ -62,6 +68,103 @@ namespace Slic3r::FFFSupport
 //#define SUPPORT_SURFACES_OFFSET_PARAMETERS JoinType::Miter, 3.
 //#define SUPPORT_SURFACES_OFFSET_PARAMETERS JoinType::Miter, 1.5
 #define SUPPORT_SURFACES_OFFSET_PARAMETERS JoinType::Square, 0.
+
+// Debug census for --debug baobab. A hole in these polygons prints as a wall around a void, so
+// per-stage censuses pin which stage holes enter at. Serial and layer-ordered: deterministic.
+static void layer_census(const uint32_t dbg_cat, const char *tag, const char *cat,
+                         const SupportGeneratorLayersPtr &layers, const PrintObject *print_object)
+{
+    if (!debug_enabled(dbg_cat))
+        return;
+    constexpr size_t max_detail_lines = 50;
+    size_t n = 0, holed = 0, holes = 0, detail = 0;
+    double z_lo = std::numeric_limits<double>::max(), z_hi = -1.;
+    for (const SupportGeneratorLayer *l : layers)
+        if (l != nullptr && !l->polygons.empty())
+            ++n;
+    // Small categories (the interface stack) get one line per layer with z bookkeeping, area
+    // and geometry, so a stray or misplaced layer at the top of the stack is visible directly.
+    // Sloped faces turn the stack into a staircase of many narrow bands, hence the high cap.
+    if (n > 0 && n <= 128)
+        for (const SupportGeneratorLayer *l : layers)
+        {
+            if (l == nullptr || l->polygons.empty())
+                continue;
+            dbg_log(dbg_cat, l->print_z, tag, "%s z=%.3f bottom=%.3f h=%.3f polys=%zu holes=%zu area=%.1f %s", cat,
+                    l->print_z, l->bottom_z, l->height, l->polygons.size(), baobab_count_holes(l->polygons),
+                    area(l->polygons) * SCALING_FACTOR * SCALING_FACTOR, baobab_wkt(union_ex(l->polygons)).c_str());
+        }
+    n = 0;
+    for (const SupportGeneratorLayer *l : layers)
+    {
+        if (l == nullptr || l->polygons.empty())
+            continue;
+        ++n;
+        const size_t h = baobab_count_holes(l->polygons);
+        if (h == 0)
+            continue;
+        ++holed;
+        holes += h;
+        z_lo = std::min(z_lo, l->print_z);
+        z_hi = std::max(z_hi, l->print_z);
+        if (++detail > max_detail_lines)
+            continue;
+        // The first two holes' centroid and area locate the voids in XY.
+        double hx[2] = {0., 0.}, hy[2] = {0., 0.}, ha[2] = {0., 0.};
+        size_t found = 0;
+        for (const Polygon &p : l->polygons)
+            if (p.is_clockwise())
+            {
+                const Point c = p.centroid();
+                hx[found] = unscaled<double>(c.x());
+                hy[found] = unscaled<double>(c.y());
+                ha[found] = std::abs(p.area()) * SCALING_FACTOR * SCALING_FACTOR;
+                if (++found == 2)
+                    break;
+            }
+        // Small object islands at the same z: a feature protruding into the support zone
+        // registers here. -1 means the object has no layer at this z.
+        long long obj_small = -1;
+        if (print_object != nullptr)
+            for (const Layer *object_layer : print_object->layers())
+                if (std::abs(object_layer->print_z - l->print_z) < 0.05)
+                {
+                    obj_small = 0;
+                    for (const ExPolygon &ex : object_layer->lslices)
+                    {
+                        const BoundingBox bb = get_extents(ex.contour);
+                        if (bb.size().x() < scaled<coord_t>(12.) && bb.size().y() < scaled<coord_t>(12.))
+                            ++obj_small;
+                    }
+                    break;
+                }
+        dbg_log(dbg_cat, l->print_z, tag,
+                "%s z=%.2f polys=%zu holes=%zu h1=(%.2f,%.2f,%.1fmm2) h2=(%.2f,%.2f,%.1fmm2) obj_small=%lld", cat,
+                l->print_z, l->polygons.size(), h, hx[0], hy[0], ha[0], hx[1], hy[1], ha[1], obj_small);
+    }
+    if (detail > max_detail_lines)
+        dbg_log(dbg_cat, 0., tag, "%s detail truncated: %zu holed layers, %zu shown", cat, detail, max_detail_lines);
+    if (holed == 0)
+        z_lo = -1.;
+    double area_total = 0.;
+    for (const SupportGeneratorLayer *l : layers)
+        if (l != nullptr && !l->polygons.empty())
+            area_total += area(l->polygons) * SCALING_FACTOR * SCALING_FACTOR;
+    dbg_log(dbg_cat, 0., tag, "%s layers=%zu holed_layers=%zu holes=%zu holed_z=[%.2f..%.2f] area_total=%.1f", cat, n,
+            holed, holes, z_lo, z_hi, area_total);
+}
+
+void baobab_debug_layer_census(const char *tag, const char *cat, const SupportGeneratorLayersPtr &layers,
+                               const PrintObject *print_object)
+{
+    layer_census(DBG_BAOBAB, tag, cat, layers, print_object);
+}
+
+void support_debug_layer_census(const char *tag, const char *cat, const SupportGeneratorLayersPtr &layers,
+                                const PrintObject *print_object)
+{
+    layer_census(DBG_SUPPORT, tag, cat, layers, print_object);
+}
 
 void remove_bridges_from_contacts(const PrintConfig &print_config, const Layer &lower_layer, const LayerRegion &layerm,
                                   float fw, Polygons &contact_polygons)
@@ -616,12 +719,29 @@ SupportGeneratorLayersPtr generate_raft_base(const PrintObject &object, const Su
     return raft_layers;
 }
 
+// WKT (mm) of open toolpaths, same consumer as baobab_wkt: paste into shapely to inspect.
+static std::string support_wkt_lines(const Polylines &polylines)
+{
+    std::string s = "MULTILINESTRING(";
+    for (size_t i = 0; i < polylines.size(); ++i)
+    {
+        s += i ? ",(" : "(";
+        const Points &pts = polylines[i].points;
+        for (size_t k = 0; k < pts.size(); ++k)
+            s += (k ? "," : "") + std::to_string(unscaled<double>(pts[k].x())) + " " +
+                 std::to_string(unscaled<double>(pts[k].y()));
+        s += ")";
+    }
+    return s + ")";
+}
+
 static inline void fill_expolygon_generate_paths(ExtrusionEntitiesPtr &dst, ExPolygon &&expolygon, Fill *filler,
                                                  const FillParams &fill_params, float density, ExtrusionRole role,
-                                                 const Flow &flow)
+                                                 const Flow &flow, const double dbg_z, const bool dbg_wkt = false)
 {
     Surface surface(stInternal, std::move(expolygon));
     Polylines polylines;
+    bool infill_failed = false;
     try
     {
         assert(!fill_params.use_advanced_perimeters);
@@ -629,25 +749,58 @@ static inline void fill_expolygon_generate_paths(ExtrusionEntitiesPtr &dst, ExPo
     }
     catch (InfillFailedException &)
     {
+        // The filler bailed out: this island prints with no fill at all.
+        infill_failed = true;
+        dbg_log(DBG_SUPPORT, dbg_z, "SUPPORT-FILL-REJ", "reason=infill_exception area=%.1f density=%.2f",
+                surface.expolygon.area() * SCALING_FACTOR * SCALING_FACTOR, double(fill_params.density));
+    }
+    if (debug_enabled(DBG_SUPPORT))
+    {
+        // Coverage check: total path length vs the length the area and density demand.
+        // A shortfall means the filler dropped lines inside a region it was handed intact.
+        const double area_mm2 = surface.expolygon.area() * SCALING_FACTOR * SCALING_FACTOR;
+        if (!infill_failed && polylines.empty() && fill_params.density > 0.05f && area_mm2 > 1.)
+        {
+            const Point c = surface.expolygon.contour.centroid();
+            dbg_log(DBG_SUPPORT, dbg_z, "SUPPORT-FILL-REJ", "reason=empty_result at=(%.1f,%.1f) area=%.1f density=%.2f",
+                    unscaled<double>(c.x()), unscaled<double>(c.y()), area_mm2, double(fill_params.density));
+        }
+        else if (!polylines.empty())
+        {
+            double len_mm = 0.;
+            for (const Polyline &pl : polylines)
+                len_mm += unscaled<double>(pl.length());
+            const double expected_mm = filler->spacing > EPSILON
+                                           ? area_mm2 * double(fill_params.density) / filler->spacing
+                                           : 0.;
+            dbg_log(DBG_SUPPORT, dbg_z, "SUPPORT-FILL",
+                    "lines=%zu len=%.0f expected=%.0f area=%.1f density=%.2f spacing=%.3f angle=%.1f", polylines.size(),
+                    len_mm, expected_mm, area_mm2, double(fill_params.density), filler->spacing,
+                    double(filler->angle) * 180. / M_PI);
+            if (dbg_wkt)
+                dbg_log(DBG_SUPPORT, dbg_z, "SUPPORT-FILL-WKT", "%s", support_wkt_lines(polylines).c_str());
+        }
     }
     extrusion_entities_append_paths(dst, std::move(polylines), {role, flow});
 }
 
 static inline void fill_expolygons_generate_paths(ExtrusionEntitiesPtr &dst, ExPolygons &&expolygons, Fill *filler,
                                                   const FillParams &fill_params, float density, ExtrusionRole role,
-                                                  const Flow &flow)
+                                                  const Flow &flow, const double dbg_z, const bool dbg_wkt = false)
 {
     for (ExPolygon &expoly : expolygons)
-        fill_expolygon_generate_paths(dst, std::move(expoly), filler, fill_params, density, role, flow);
+        fill_expolygon_generate_paths(dst, std::move(expoly), filler, fill_params, density, role, flow, dbg_z, dbg_wkt);
 }
 
 static inline void fill_expolygons_generate_paths(ExtrusionEntitiesPtr &dst, ExPolygons &&expolygons, Fill *filler,
-                                                  float density, ExtrusionRole role, const Flow &flow)
+                                                  float density, ExtrusionRole role, const Flow &flow,
+                                                  const double dbg_z, const bool dbg_wkt = false)
 {
     FillParams fill_params;
     fill_params.density = density;
     fill_params.dont_adjust = true;
-    fill_expolygons_generate_paths(dst, std::move(expolygons), filler, fill_params, density, role, flow);
+    fill_expolygons_generate_paths(dst, std::move(expolygons), filler, fill_params, density, role, flow, dbg_z,
+                                   dbg_wkt);
 }
 
 static Polylines draw_perimeters(const ExPolygon &expoly, double clip_length, const bool prefer_clockwise_movements)
@@ -952,20 +1105,115 @@ static inline void tree_supports_generate_paths(ExtrusionEntitiesPtr &dst, const
     }
 }
 
+// Emit `wall_count` concentric loops inset from an outline, each opened at the vertex nearest the
+// seam direction so the seam never stacks into a weak vertical column. Unlike the stock organic
+// double wall this is unconditional: a wide concave mouth must not lose its second wall because an
+// offset probe split the island.
+static void baobab_emit_walls(ExtrusionEntitiesPtr &dst, const Polygons &outer, int wall_count, float seam_angle,
+                              const Point &centroid, const Flow &flow, const SupportParameters &support_params)
+{
+    const double spacing = flow.scaled_spacing();
+    const double clip_length = spacing * 0.15;
+    Polylines polylines;
+    const Vec2d seam_dir(cos(double(seam_angle)), sin(double(seam_angle)));
+    for (int wall = 0; wall < wall_count; ++wall)
+    {
+        const float inset = float(0.5 * flow.scaled_width() + wall * spacing);
+        for (Polygon &loop : offset(outer, -inset))
+        {
+            if (loop.size() < 3)
+                continue;
+            // A tapering island's last rings shrink below anything printable; a loop shorter than a
+            // few extrusion widths would deposit a floating dot.
+            if (loop.length() < coord_t(6. * flow.scaled_width()))
+                continue;
+            size_t seam_idx = 0;
+            double best = -std::numeric_limits<double>::max();
+            for (size_t i = 0; i < loop.points.size(); ++i)
+            {
+                Vec2d v = (loop.points[i] - centroid).cast<double>();
+                const double norm = v.norm();
+                if (norm < EPSILON)
+                    continue;
+                if (const double dot = v.dot(seam_dir) / norm; dot > best)
+                {
+                    best = dot;
+                    seam_idx = i;
+                }
+            }
+            std::rotate(loop.points.begin(), loop.points.begin() + seam_idx, loop.points.end());
+            Polyline pl(loop.points);
+            if (support_params.prefer_clockwise_movements == loop.is_counter_clockwise())
+                pl.reverse();
+            pl.points.emplace_back(pl.points.front());
+            pl.clip_end(clip_length);
+            if (pl.size() >= 2)
+                polylines.emplace_back(std::move(pl));
+        }
+    }
+    extrusion_entities_append_paths(dst, std::move(polylines), {ExtrusionRole::SupportMaterial, flow}, false);
+}
+
+// A Baobab base layer: hollow wall loops, plus the lightning fill that fills the canopy's interior.
+// Each island is emitted as one fixed-order unit - its boundary walls first, then the fill
+// inside them - so the toolpath finishes an island before travelling to the next, and the fill
+// always lands on walls that are already printed.
+static void baobab_generate_paths(ExtrusionEntitiesPtr &dst, const Polygons &polygons, const Flow &flow,
+                                  const SupportParameters &support_params, size_t support_layer_id,
+                                  const Polylines &fill)
+{
+    // Rotate the seam by a golden angle per layer: deterministic, and it never stacks.
+    const auto seam_angle = float(double(support_layer_id) * 2.399963229728653);
+    for (const ExPolygon &island : union_ex(polygons))
+    {
+        const int walls = island.area() > support_params.baobab_double_wall_area_scaled ? Baobab::wall_count : 1;
+        const Polygons island_polys = to_polygons(island);
+        auto unit = std::make_unique<ExtrusionEntityCollection>();
+        unit->no_sort = true;
+        baobab_emit_walls(unit->entities, island_polys, walls, seam_angle, island.contour.centroid(), flow,
+                          support_params);
+        if (!fill.empty())
+            if (Polylines island_fill = intersection_pl(fill, island_polys); !island_fill.empty())
+                extrusion_entities_append_paths(unit->entities, chain_polylines(std::move(island_fill)),
+                                                {ExtrusionRole::SupportMaterial, flow});
+        if (!unit->entities.empty())
+            dst.emplace_back(unit.release());
+    }
+}
+
 static inline void fill_expolygons_with_sheath_generate_paths(ExtrusionEntitiesPtr &dst, const Polygons &polygons,
                                                               Fill *filler, const float density,
                                                               const ExtrusionRole role, const Flow &flow,
                                                               const bool with_sheath, const bool no_sort,
-                                                              const bool prefer_clockwise_movements)
+                                                              const bool prefer_clockwise_movements, const double dbg_z,
+                                                              const bool dbg_wkt)
 {
     if (polygons.empty())
         return;
+
+    if (debug_enabled(DBG_SUPPORT))
+    {
+        dbg_log(DBG_SUPPORT, dbg_z, "SUPPORT-SHEATH", "in polys=%zu holes=%zu area=%.1f sheath=%d", polygons.size(),
+                baobab_count_holes(polygons), area(polygons) * SCALING_FACTOR * SCALING_FACTOR, int(with_sheath));
+        if (dbg_wkt)
+            dbg_log(DBG_SUPPORT, dbg_z, "SUPPORT-SHEATH-WKT", "in %s", baobab_wkt(union_ex(polygons)).c_str());
+    }
 
     if (!with_sheath)
     {
         ExPolygons closed = closing_ex(polygons, float(SCALED_EPSILON));
         closed = smooth_outward(std::move(closed), coord_t(flow.scaled_spacing()));
-        fill_expolygons_generate_paths(dst, std::move(closed), filler, density, role, flow);
+        if (debug_enabled(DBG_SUPPORT))
+        {
+            double area_mm2 = 0.;
+            for (const ExPolygon &e : closed)
+                area_mm2 += e.area();
+            area_mm2 *= SCALING_FACTOR * SCALING_FACTOR;
+            dbg_log(DBG_SUPPORT, dbg_z, "SUPPORT-SHEATH", "closed expolys=%zu area=%.1f", closed.size(), area_mm2);
+            if (dbg_wkt)
+                dbg_log(DBG_SUPPORT, dbg_z, "SUPPORT-SHEATH-WKT", "closed %s", baobab_wkt(closed).c_str());
+        }
+        fill_expolygons_generate_paths(dst, std::move(closed), filler, density, role, flow, dbg_z, dbg_wkt);
         return;
     }
 
@@ -980,6 +1228,16 @@ static inline void fill_expolygons_with_sheath_generate_paths(ExtrusionEntitiesP
     ExPolygons closed_expolys = closing_ex(polygons, float(SCALED_EPSILON),
                                            float(SCALED_EPSILON + 0.5 * flow.scaled_width()));
     closed_expolys = smooth_outward(std::move(closed_expolys), coord_t(spacing));
+    if (debug_enabled(DBG_SUPPORT))
+    {
+        double area_mm2 = 0.;
+        for (const ExPolygon &e : closed_expolys)
+            area_mm2 += e.area();
+        area_mm2 *= SCALING_FACTOR * SCALING_FACTOR;
+        dbg_log(DBG_SUPPORT, dbg_z, "SUPPORT-SHEATH", "closed expolys=%zu area=%.1f", closed_expolys.size(), area_mm2);
+        if (dbg_wkt)
+            dbg_log(DBG_SUPPORT, dbg_z, "SUPPORT-SHEATH-WKT", "closed %s", baobab_wkt(closed_expolys).c_str());
+    }
     for (ExPolygon &expoly : closed_expolys)
     {
         // Don't reorder the skirt and its infills.
@@ -990,11 +1248,40 @@ static inline void fill_expolygons_with_sheath_generate_paths(ExtrusionEntitiesP
             eec->no_sort = true;
         }
         ExtrusionEntitiesPtr &out = no_sort ? eec->entities : dst;
-        extrusion_entities_append_paths(out, draw_perimeters(expoly, clip_length, prefer_clockwise_movements),
-                                        {ExtrusionRole::SupportMaterial, flow}, false);
+        Polylines rings = draw_perimeters(expoly, clip_length, prefer_clockwise_movements);
+        if (debug_enabled(DBG_SUPPORT))
+        {
+            double len_mm = 0.;
+            for (const Polyline &pl : rings)
+                len_mm += unscaled<double>(pl.length());
+            dbg_log(DBG_SUPPORT, dbg_z, "SUPPORT-RING", "rings=%zu len=%.0f clip=%.2f", rings.size(), len_mm,
+                    unscaled<double>(clip_length));
+            if (dbg_wkt)
+                dbg_log(DBG_SUPPORT, dbg_z, "SUPPORT-RING-WKT", "%s", support_wkt_lines(rings).c_str());
+        }
+        extrusion_entities_append_paths(out, std::move(rings), {ExtrusionRole::SupportMaterial, flow}, false);
         // Fill in the rest.
-        fill_expolygons_generate_paths(out, offset_ex(expoly, float(-0.4 * spacing)), filler, fill_params, density,
-                                       role, flow);
+        ExPolygons fill_region = offset_ex(expoly, float(-0.4 * spacing));
+        if (debug_enabled(DBG_SUPPORT))
+        {
+            double area_mm2 = 0.;
+            for (const ExPolygon &e : fill_region)
+                area_mm2 += e.area();
+            area_mm2 *= SCALING_FACTOR * SCALING_FACTOR;
+            const Point c = expoly.contour.centroid();
+            dbg_log(DBG_SUPPORT, dbg_z, "SUPPORT-SHEATH",
+                    "island at=(%.1f,%.1f) rings=%zu fill_regions=%zu fill_area=%.1f", unscaled<double>(c.x()),
+                    unscaled<double>(c.y()), expoly.holes.size() + 1, fill_region.size(), area_mm2);
+            // A sheath ring with no fill inside prints as a hollow outline.
+            if (fill_region.empty())
+                dbg_log(DBG_SUPPORT, dbg_z, "SUPPORT-SHEATH-REJ", "reason=fill_region_empty at=(%.1f,%.1f) area=%.1f",
+                        unscaled<double>(c.x()), unscaled<double>(c.y()),
+                        expoly.area() * SCALING_FACTOR * SCALING_FACTOR);
+            if (dbg_wkt && !fill_region.empty())
+                dbg_log(DBG_SUPPORT, dbg_z, "SUPPORT-SHEATH-WKT", "fill %s", baobab_wkt(fill_region).c_str());
+        }
+        fill_expolygons_generate_paths(out, std::move(fill_region), filler, fill_params, density, role, flow, dbg_z,
+                                       dbg_wkt);
         if (no_sort && !eec->empty())
             dst.emplace_back(eec.release());
     }
@@ -1763,8 +2050,95 @@ void generate_support_toolpaths(SupportLayerPtrs &support_layers, const PrintObj
                                 const SupportGeneratorLayersPtr &top_contacts,
                                 const SupportGeneratorLayersPtr &intermediate_layers,
                                 const SupportGeneratorLayersPtr &interface_layers,
-                                const SupportGeneratorLayersPtr &base_interface_layers)
+                                const SupportGeneratorLayersPtr &base_interface_layers, const bool baobab,
+                                const BaobabCanopyFootprints *baobab_canopy_footprints)
 {
+    if (baobab && debug_enabled(DBG_BAOBAB))
+    {
+        // Hole census of what will PRINT, per layer category: a hole here becomes a wall
+        // around a void in the print. The canopy must agree with these polygons and with
+        // nothing upstream of them.
+        baobab_debug_layer_census("BAOBAB-PRINT", "contacts", top_contacts);
+        baobab_debug_layer_census("BAOBAB-PRINT", "interfaces", interface_layers);
+        baobab_debug_layer_census("BAOBAB-PRINT", "base_interfaces", base_interface_layers);
+        baobab_debug_layer_census("BAOBAB-PRINT", "base", intermediate_layers);
+        baobab_debug_layer_census("BAOBAB-PRINT", "bottom_contacts", bottom_contacts);
+    }
+    else
+    {
+        // The same census for every other generator, under the generic support category.
+        support_debug_layer_census("SUPPORT-PRINT", "contacts", top_contacts);
+        support_debug_layer_census("SUPPORT-PRINT", "interfaces", interface_layers);
+        support_debug_layer_census("SUPPORT-PRINT", "base_interfaces", base_interface_layers);
+        support_debug_layer_census("SUPPORT-PRINT", "base", intermediate_layers);
+        support_debug_layer_census("SUPPORT-PRINT", "bottom_contacts", bottom_contacts);
+    }
+
+    // Baobab fill. A lightning tree grown inside the hollow canopies: the interface sheet lands on
+    // it instead of bridging the whole mouth. Seeded only where a layer's interior has nothing
+    // above it - the canopy rims - so the slender trunks stay empty. Built once, read per layer.
+    std::unique_ptr<FillLightning::Generator> baobab_fill;
+    std::vector<Polygons> baobab_interiors;
+    std::unordered_map<const SupportGeneratorLayer *, size_t> baobab_layer_of;
+    size_t baobab_fill_layers = 0;
+    if (baobab)
+    {
+        const Flow &base_flow = support_params.support_material_flow;
+        // The fill region reaches half a spacing back into the wall band, so tree roots
+        // grounded on its boundary fuse with the innermost wall loop instead of stopping a
+        // half bead short of it.
+        const auto wall_band = coord_t(0.5 * base_flow.scaled_width() +
+                                       (double(Baobab::wall_count) - 0.5) * base_flow.scaled_spacing());
+        baobab_interiors.resize(intermediate_layers.size());
+        size_t fill_layers_nonempty = 0, fill_layers_in_canopy = 0;
+        for (size_t i = 0; i < intermediate_layers.size(); ++i)
+            if (const SupportGeneratorLayer *layer = intermediate_layers[i]; layer != nullptr)
+            {
+                baobab_layer_of[layer] = i;
+                baobab_interiors[i] = offset(union_(layer->polygons), -float(wall_band));
+                // A canopy gets a fill; a trunk bore stays empty. The canopy footprints are the
+                // authority on which is which.
+                if (baobab_canopy_footprints != nullptr && !baobab_interiors[i].empty())
+                {
+                    ++fill_layers_nonempty;
+                    const auto it = baobab_canopy_footprints->find(int64_t(std::llround(layer->print_z * 1000.)));
+                    if (it == baobab_canopy_footprints->end())
+                        baobab_interiors[i].clear();
+                    else
+                    {
+                        baobab_interiors[i] = intersection(baobab_interiors[i], it->second);
+                        fill_layers_in_canopy += !baobab_interiors[i].empty();
+                    }
+                }
+            }
+        if (baobab_canopy_footprints != nullptr)
+            dbg_log(DBG_BAOBAB, 0., "BAOBAB-FILL", "stack_layers=%zu in_canopy=%zu trunk_only=%zu",
+                    fill_layers_nonempty, fill_layers_in_canopy, fill_layers_nonempty - fill_layers_in_canopy);
+        // The tree build reads the top layer's extents, so it must not be empty.
+        baobab_fill_layers = baobab_interiors.size();
+        while (baobab_fill_layers > 0 && baobab_interiors[baobab_fill_layers - 1].empty())
+            --baobab_fill_layers;
+
+        if (baobab_fill_layers > 1)
+        {
+            const auto wall_supporting_radius = scaled<coord_t>(slicing_params.layer_height);
+            std::vector<Polygons> outlines(baobab_interiors.begin(), baobab_interiors.begin() + baobab_fill_layers);
+            std::vector<Polygons> overhang(baobab_fill_layers);
+            const Polygons nothing_above;
+            for (size_t i = 0; i < baobab_fill_layers; ++i)
+            {
+                const Polygons &above = i + 1 < baobab_fill_layers ? outlines[i + 1] : nothing_above;
+                overhang[i] = opening(diff(offset(outlines[i], -float(wall_supporting_radius)), above),
+                                      float(SCALED_EPSILON), float(SCALED_EPSILON));
+            }
+            const auto width = float(base_flow.scaled_width());
+            baobab_fill = std::make_unique<FillLightning::Generator>(
+                std::move(outlines), std::move(overhang), width,
+                coord_t(double(width) * 100. / support_params.baobab_canopy_density_percent), wall_supporting_radius,
+                wall_supporting_radius, wall_supporting_radius, []() {});
+        }
+    }
+
     // loop_interface_processor with a given circle radius.
     LoopInterfaceProcessor loop_interface_processor(1.5 *
                                                     support_params.support_material_interface_flow.scaled_width());
@@ -1842,7 +2216,7 @@ void generate_support_toolpaths(SupportLayerPtrs &support_layers, const PrintObj
                             filler, float(support_params.support_density),
                             // Extrusion parameters
                             ExtrusionRole::SupportMaterial, flow, support_params.with_sheath, false,
-                            support_params.prefer_clockwise_movements);
+                            support_params.prefer_clockwise_movements, support_layer.print_z, false);
                     }
                     if (!tree_polygons.empty())
                         tree_supports_generate_paths(support_layer.support_fills.entities, tree_polygons, flow,
@@ -1887,7 +2261,8 @@ void generate_support_toolpaths(SupportLayerPtrs &support_layers, const PrintObj
                                                                          : ExtrusionRole::SupportMaterialInterface,
                     flow,
                     // sheath at first layer
-                    support_layer_id == 0, support_layer_id == 0, support_params.prefer_clockwise_movements);
+                    support_layer_id == 0, support_layer_id == 0, support_params.prefer_clockwise_movements,
+                    support_layer.print_z, support_layer_id == 0);
             }
         });
 
@@ -1924,7 +2299,8 @@ void generate_support_toolpaths(SupportLayerPtrs &support_layers, const PrintObj
         tbb::blocked_range<size_t>(n_raft_layers, support_layers.size()),
         [&config, &slicing_params, &support_params, &support_layers, &bottom_contacts, &top_contacts,
          &intermediate_layers, &interface_layers, &base_interface_layers, &layer_caches, &loop_interface_processor,
-         &bbox_object, &angles, n_raft_layers, link_max_length_factor](const tbb::blocked_range<size_t> &range)
+         &bbox_object, &angles, n_raft_layers, link_max_length_factor, baobab, &baobab_fill, &baobab_interiors,
+         &baobab_layer_of, baobab_fill_layers](const tbb::blocked_range<size_t> &range)
         {
             // Indices of the 1st layer in their respective container at the support layer height.
             size_t idx_layer_bottom_contact = size_t(-1);
@@ -2174,7 +2550,7 @@ void generate_support_toolpaths(SupportLayerPtrs &support_layers, const PrintObj
                             // Extrusion parameters
                             interface_as_base ? ExtrusionRole::SupportMaterial
                                               : ExtrusionRole::SupportMaterialInterface,
-                            interface_flow);
+                            interface_flow, layer_ex.layer->print_z);
                     }
                 };
                 const bool top_interfaces = config.support_material_interface_layers.value != 0;
@@ -2224,7 +2600,7 @@ void generate_support_toolpaths(SupportLayerPtrs &support_layers, const PrintObj
                         // Filler and its parameters
                         filler, float(support_params.interface_density),
                         // Extrusion parameters
-                        ExtrusionRole::SupportMaterial, interface_flow);
+                        ExtrusionRole::SupportMaterial, interface_flow, base_interface_layer.layer->print_z);
                 }
 
                 // Base support or flange.
@@ -2260,6 +2636,62 @@ void generate_support_toolpaths(SupportLayerPtrs &support_layers, const PrintObj
                         sheath = true;
                         no_sort = true;
                     }
+                    else if (baobab)
+                    {
+                        // Hollow wall loops with a scattered seam, plus the fill filling the bore.
+                        Polylines fill;
+                        if (baobab_fill)
+                            if (const auto it = baobab_layer_of.find(base_layer.layer);
+                                it != baobab_layer_of.end() && it->second < baobab_fill_layers)
+                            {
+                                fill = baobab_fill->getTreesForLayer(it->second)
+                                           .convertToLines(baobab_interiors[it->second],
+                                                           coord_t(0.5 * flow.scaled_spacing()));
+                                if (debug_enabled(DBG_BAOBAB) && !fill.empty())
+                                {
+                                    // Anchored = an end lies on the fill region's boundary, so
+                                    // the line reaches into the wall band. Floating lines stand
+                                    // only on the fill below - normal at a mouth rim where the
+                                    // trees seed, a defect when widespread at depth.
+                                    const Polygons &region = baobab_interiors[it->second];
+                                    const double eps2 = sqr(double(scaled<coord_t>(0.05)));
+                                    size_t anchored = 0;
+                                    for (const Polyline &pl : fill)
+                                    {
+                                        bool hit = false;
+                                        for (const Point &e : {pl.points.front(), pl.points.back()})
+                                        {
+                                            for (const Polygon &contour : region)
+                                            {
+                                                Point prev = contour.points.back();
+                                                for (const Point &p2 : contour.points)
+                                                {
+                                                    Point closest;
+                                                    if (line_alg::distance_to_squared(Line{prev, p2}, e, &closest) <=
+                                                        eps2)
+                                                    {
+                                                        hit = true;
+                                                        break;
+                                                    }
+                                                    prev = p2;
+                                                }
+                                                if (hit)
+                                                    break;
+                                            }
+                                            if (hit)
+                                                break;
+                                        }
+                                        anchored += hit;
+                                    }
+                                    dbg_log(DBG_BAOBAB, base_layer.layer->print_z, "BAOBAB-FILL",
+                                            "lines=%zu anchored=%zu floating=%zu", fill.size(), anchored,
+                                            fill.size() - anchored);
+                                }
+                            }
+                        baobab_generate_paths(base_layer.extrusions, base_layer.polygons_to_extrude(), flow,
+                                              support_params, support_layer_id, fill);
+                        done = true;
+                    }
                     else if (config.support_material_style == SupportMaterialStyle::smsOrganic)
                     {
                         // in organic_draw_branches() via the tip_polygons tracking. The width reduction is
@@ -2271,15 +2703,30 @@ void generate_support_toolpaths(SupportLayerPtrs &support_layers, const PrintObj
                     }
                     if (!done)
                     {
+                        // The base flange gets full geometry dumps: it is a single layer, and toolpath
+                        // defects there are visible on the bed.
+                        const bool dbg_flange = base_layer.layer->bottom_z < EPSILON;
                         // Previous smoothing attempts failed because diff() in generate_base_layers() and
                         // trim_support_layers_by_object() re-introduces jagged vertices at intersection points.
                         // This is the last point before toolpath generation - smoothing here actually works.
                         Polygons polygons_for_fill = base_layer.polygons_to_extrude();
+                        if (debug_enabled(DBG_SUPPORT) && dbg_flange)
+                            dbg_log(DBG_SUPPORT, base_layer.layer->print_z, "SUPPORT-FLANGE",
+                                    "in polys=%zu holes=%zu area=%.1f %s", polygons_for_fill.size(),
+                                    baobab_count_holes(polygons_for_fill),
+                                    area(polygons_for_fill) * SCALING_FACTOR * SCALING_FACTOR,
+                                    baobab_wkt(union_ex(polygons_for_fill)).c_str());
                         if (config.support_material_style == SupportMaterialStyle::smsSnug)
                         {
                             // Use 2x spacing for more aggressive smoothing of jagged edges
                             polygons_for_fill = to_polygons(
                                 smooth_outward(union_ex(polygons_for_fill), scaled<coord_t>(2.0 * flow.spacing())));
+                            if (debug_enabled(DBG_SUPPORT) && dbg_flange)
+                                dbg_log(DBG_SUPPORT, base_layer.layer->print_z, "SUPPORT-FLANGE",
+                                        "smoothed polys=%zu holes=%zu area=%.1f %s", polygons_for_fill.size(),
+                                        baobab_count_holes(polygons_for_fill),
+                                        area(polygons_for_fill) * SCALING_FACTOR * SCALING_FACTOR,
+                                        baobab_wkt(union_ex(polygons_for_fill)).c_str());
                         }
                         fill_expolygons_with_sheath_generate_paths(
                             // Destination
@@ -2290,7 +2737,7 @@ void generate_support_toolpaths(SupportLayerPtrs &support_layers, const PrintObj
                             filler, density,
                             // Extrusion parameters
                             ExtrusionRole::SupportMaterial, flow, sheath, no_sort,
-                            support_params.prefer_clockwise_movements);
+                            support_params.prefer_clockwise_movements, base_layer.layer->print_z, dbg_flange);
                     }
                 }
 

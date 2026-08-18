@@ -28,6 +28,7 @@
 #include <string_view>
 
 #include "TreeSupportCommon.hpp"
+#include "libslic3r/DebugOutput.hpp"
 #include "../BuildVolume.hpp"
 #include "../Layer.hpp"
 #include "../Point.hpp"
@@ -109,7 +110,7 @@ TreeModelVolumes::TreeModelVolumes(const PrintObject &print_object, const BuildV
     {
         m_anti_overhang = print_object.slice_support_blockers();
         TreeSupportMeshGroupSettings mesh_settings(print_object);
-        const TreeSupportSettings config{mesh_settings, print_object.slicing_parameters()};
+        const TreeSupportSettings config{mesh_settings, print_object.slicing_parameters(), &print_object};
         m_current_min_xy_dist = config.xy_min_distance;
         m_current_min_xy_dist_delta = config.xy_distance - m_current_min_xy_dist;
         assert(m_current_min_xy_dist_delta >= 0);
@@ -118,10 +119,57 @@ TreeModelVolumes::TreeModelVolumes(const PrintObject &print_object, const BuildV
         m_raft_layers = config.raft_layers;
         m_current_outline_idx = 0;
 
+        // Blocker volumes are sliced per object layer. Carry them onto the support grid by z
+        // span: every object layer overlapping a support layer's span contributes, so a blocker
+        // covering only layers the grid skips still blocks, and one spanning several grid layers
+        // blocks them all. Indexed with the raft offset, matching every consumer below.
+        if (!m_anti_overhang.empty())
+        {
+            const size_t num_raft = config.raft_layers.size();
+            std::vector<Polygons> remapped(config.support_layer_zs.size() + num_raft, Polygons{});
+            size_t dbg_blocked_slots = 0, dbg_multi_layer_slots = 0;
+            if (!config.grid_matches_object && !config.object_layer_of.empty())
+            {
+                for (size_t i = 0; i < config.support_layer_zs.size(); ++i)
+                {
+                    const size_t j_hi = std::min(config.object_layer_of[i], m_anti_overhang.size() - 1);
+                    size_t j_lo = i > 0 ? config.object_layer_of[i - 1] : 0;
+                    // A layer whose top sits on the slot's bottom boundary belongs to the slot
+                    // below, not this one.
+                    if (i > 0 && j_lo < print_object.layer_count() &&
+                        print_object.get_layer(j_lo)->print_z <= config.support_layer_zs[i - 1] + EPSILON)
+                        ++j_lo;
+                    j_lo = std::min(j_lo, j_hi);
+                    Polygons &dst = remapped[i + num_raft];
+                    for (size_t j = j_lo; j <= j_hi; ++j)
+                        polygons_append(dst, m_anti_overhang[j]);
+                    if (!dst.empty())
+                    {
+                        ++dbg_blocked_slots;
+                        if (j_hi > j_lo)
+                        {
+                            dst = union_(dst);
+                            ++dbg_multi_layer_slots;
+                        }
+                    }
+                }
+            }
+            else
+                for (size_t i = 0; i < config.support_layer_zs.size() && i < m_anti_overhang.size(); ++i)
+                {
+                    remapped[i + num_raft] = std::move(m_anti_overhang[i]);
+                    if (!remapped[i + num_raft].empty())
+                        ++dbg_blocked_slots;
+                }
+            m_anti_overhang = std::move(remapped);
+            dbg_log(DBG_SUPPORT, 0., "TREE-BLOCKER", "blocked_slots=%zu multi_layer_slots=%zu raft_offset=%zu",
+                    dbg_blocked_slots, dbg_multi_layer_slots, num_raft);
+        }
+
         m_layer_outlines.emplace_back(mesh_settings, std::vector<Polygons>{});
         std::vector<Polygons> &outlines = m_layer_outlines.front().second;
         size_t num_raft_layers = m_raft_layers.size();
-        size_t num_layers = print_object.layer_count() + num_raft_layers;
+        size_t num_layers = config.support_layer_zs.size() + num_raft_layers;
         outlines.assign(num_layers, Polygons{});
         tbb::parallel_for(
             tbb::blocked_range<size_t>(
@@ -133,20 +181,51 @@ TreeModelVolumes::TreeModelVolumes(const PrintObject &print_object, const BuildV
                 {
                     // Ensure correct winding (CCW contours, CW holes) so that
                     // downstream union/offset operations preserve holes correctly.
-                    const ExPolygons &lslices = print_object.get_layer(layer_idx - num_raft_layers)->lslices;
-                    Polygons polys;
-                    for (const ExPolygon &expoly : lslices)
+                    const auto append_wound = [&print_object](Polygons &polys, const size_t object_idx)
                     {
-                        Polygon contour = expoly.contour;
-                        if (!contour.is_counter_clockwise())
-                            contour.reverse();
-                        polys.emplace_back(std::move(contour));
-                        for (Polygon hole : expoly.holes)
+                        for (const ExPolygon &expoly : print_object.get_layer(object_idx)->lslices)
                         {
-                            if (hole.is_counter_clockwise())
-                                hole.reverse();
-                            polys.emplace_back(std::move(hole));
+                            Polygon contour = expoly.contour;
+                            if (!contour.is_counter_clockwise())
+                                contour.reverse();
+                            polys.emplace_back(std::move(contour));
+                            for (Polygon hole : expoly.holes)
+                            {
+                                if (hole.is_counter_clockwise())
+                                    hole.reverse();
+                                polys.emplace_back(std::move(hole));
+                            }
                         }
+                    };
+                    // The support grid is its own stack: the collision at this layer is the union
+                    // of every object slice overlapping its span. The union is the conservative
+                    // direction, it can only keep branches farther from the model, never route
+                    // one through geometry that exists between two grid samples.
+                    const size_t support_idx = layer_idx - num_raft_layers;
+                    Polygons polys;
+                    if (config.grid_matches_object || support_idx >= config.object_layer_of.size())
+                        append_wound(polys, std::min(support_idx, print_object.layer_count() - 1));
+                    else
+                    {
+                        size_t j_hi = std::min<size_t>(config.object_layer_of[support_idx],
+                                                       print_object.layer_count() - 1);
+                        // A covering layer overlapping the slot's top by less than the snap
+                        // tolerance is arithmetic noise. Including it would put the object slice
+                        // above into this slot's collision, and roofs below would then fail the
+                        // avoidance test.
+                        if (j_hi > 0 && support_idx < config.support_layer_zs.size() &&
+                            print_object.get_layer(j_hi - 1)->print_z >= config.support_layer_zs[support_idx] - 0.002)
+                            --j_hi;
+                        size_t j_lo = support_idx > 0 ? config.object_layer_of[support_idx - 1] : 0;
+                        // A layer whose top sits on the slot's bottom boundary belongs below.
+                        if (support_idx > 0 && j_lo < print_object.layer_count() &&
+                            print_object.get_layer(j_lo)->print_z <= config.support_layer_zs[support_idx - 1] + EPSILON)
+                            ++j_lo;
+                        j_lo = std::min(j_lo, j_hi);
+                        for (size_t j = j_lo; j <= j_hi; ++j)
+                            append_wound(polys, j);
+                        if (j_hi > j_lo)
+                            polys = union_(polys);
                     }
                     outlines[layer_idx] = polygons_simplify(polys, mesh_settings.resolution, polygons_strictly_simple);
                 }
@@ -201,7 +280,8 @@ void TreeModelVolumes::precalculate(const PrintObject &print_object, const coord
     // Get the config corresponding to one mesh that is in the current group. Which one has to be irrelevant.
     // Not the prettiest way to do this, but it ensures some calculations that may be a bit more complex
     // like inital layer diameter are only done in once.
-    TreeSupportSettings config(m_layer_outlines[m_current_outline_idx].first, print_object.slicing_parameters());
+    TreeSupportSettings config(m_layer_outlines[m_current_outline_idx].first, print_object.slicing_parameters(),
+                               &print_object);
 
     {
         // calculate which radius each layer in the tip may have.

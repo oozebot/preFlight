@@ -691,7 +691,7 @@ void NotificationManager::PopNotification::render_close_button(const float win_s
     ImGui::SetCursorPosY(win_size.y / 2 - button_size.y);
     if (ImGuiPureWrap::button(button_text.c_str(), button_size.x, button_size.y))
     {
-        close();
+        user_close();
     }
 
     //invisible large button
@@ -699,7 +699,7 @@ void NotificationManager::PopNotification::render_close_button(const float win_s
     ImGui::SetCursorPosY(0);
     if (ImGuiPureWrap::button(" ", m_line_height * 2.125, win_size.y - (m_minimize_b_visible ? 2 * m_line_height : 0)))
     {
-        close();
+        user_close();
     }
     ImGui::PopStyleColor(5);
 }
@@ -1172,7 +1172,7 @@ void NotificationManager::ProgressBarWithCancelNotification::render_close_button
     ImGui::SetCursorPosY(win_size.y / 2 - button_size.y);
     if (ImGuiPureWrap::button(button_text.c_str(), button_size.x, button_size.y))
     {
-        close();
+        user_close();
     }
 
     //invisible large button
@@ -1180,7 +1180,7 @@ void NotificationManager::ProgressBarWithCancelNotification::render_close_button
     ImGui::SetCursorPosY(0);
     if (ImGuiPureWrap::button(" ", m_line_height * 2.125, win_size.y - (m_minimize_b_visible ? 2 * m_line_height : 0)))
     {
-        close();
+        user_close();
     }
     ImGui::PopStyleColor(5);
 }
@@ -1358,7 +1358,7 @@ void NotificationManager::URLDownloadNotification::render_close_button_inner(con
     ImGui::SetCursorPosY(win_size.y / 2 - button_size.y);
     if (ImGuiPureWrap::button(button_text.c_str(), button_size.x, button_size.y))
     {
-        close();
+        user_close();
     }
 
     //invisible large button
@@ -1366,7 +1366,7 @@ void NotificationManager::URLDownloadNotification::render_close_button_inner(con
     ImGui::SetCursorPosY(0);
     if (ImGuiPureWrap::button(" ", m_line_height * 2.125, win_size.y - (m_minimize_b_visible ? 2 * m_line_height : 0)))
     {
-        close();
+        user_close();
     }
     ImGui::PopStyleColor(5);
 }
@@ -2587,13 +2587,20 @@ void NotificationManager::push_slicing_error_notification(const std::string &tex
     set_slicing_progress_hidden();
 }
 void NotificationManager::push_slicing_warning_notification(const std::string &text, bool gray, ObjectID oid,
-                                                            int warning_step, const std::string &hypertext,
+                                                            int warning_step, bool renew, const std::string &hypertext,
                                                             std::function<bool(wxEvtHandler *)> callback)
 {
+    const std::string composed = _u8L("WARNING:") + "\n" + text;
+    // A dismissal holds through refresh re-pushes; a push from the owning step re-running
+    // re-asserts the warning and clears the dismissal.
+    if (renew)
+        m_dismissed_slicing_warnings.erase(composed);
+    else if (m_dismissed_slicing_warnings.find(composed) != m_dismissed_slicing_warnings.end())
+        return;
     NotificationData data{NotificationType::SlicingWarning,
                           NotificationLevel::WarningNotificationLevel,
                           0,
-                          _u8L("WARNING:") + "\n" + text,
+                          composed,
                           hypertext,
                           callback};
 
@@ -2697,6 +2704,16 @@ void NotificationManager::close_slicing_errors_and_warnings()
     {
         if (notification->get_type() == NotificationType::SlicingError ||
             notification->get_type() == NotificationType::SlicingWarning)
+        {
+            notification->close();
+        }
+    }
+}
+void NotificationManager::close_slicing_warnings()
+{
+    for (std::unique_ptr<PopNotification> &notification : m_pop_notifications)
+    {
+        if (notification->get_type() == NotificationType::SlicingWarning)
         {
             notification->close();
         }
@@ -3607,7 +3624,12 @@ bool NotificationManager::update_notifications(GLCanvas3D &canvas)
         request_render |= notification->update_state(hover, time_since_render);
         next_render = std::min<int64_t>(next_render, notification->next_render());
         if (notification->get_state() == PopNotification::EState::Finished)
+        {
+            // Record slicing warnings the user clicked closed so refresh re-pushes skip them.
+            if (notification->get_type() == NotificationType::SlicingWarning && notification->closed_by_user())
+                m_dismissed_slicing_warnings.insert(notification->get_data().text1);
             it = m_pop_notifications.erase(it);
+        }
         else
             ++it;
     }

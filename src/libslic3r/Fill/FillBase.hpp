@@ -90,6 +90,11 @@ struct FillParams
     // Prevents doubled-up extrusion where fill routes along obstacle boundaries.
     bool bridge{false};
 
+    // Bead width ceiling for Athena-generated fills, from max_perimeter_width; 0 keeps the
+    // generator default. Classic fills are not capped: their solid-spacing stretch carries its
+    // own internal maximum and is speed-compensated instead.
+    coord_t max_bead_width{0};
+
     // For Honeycomb.
     // we were requested to complete each loop;
     // in this case we don't try to make more continuous paths

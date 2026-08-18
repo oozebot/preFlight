@@ -82,6 +82,27 @@ coord_t RedistributeBeadingStrategy::getOptimalThickness(coord_t bead_count) con
     return thickness;
 }
 
+coord_t RedistributeBeadingStrategy::singleBeadUpperBoundary() const
+{
+    coord_t boundary = coord_t((1.0 + parent->getSplitMiddleThreshold()) * ext_perimeter_spacing);
+    // Zero-overlap configuration (width == spacing, the narrow-solid fill path): a lone
+    // bead widens only while it is the closer fit to the nozzle diameter. Above 4/3 of
+    // the nozzle a pair of half-thickness beads is the closer fit, so the count switches
+    // there instead of at the spacing threshold. The floor keeps the single-bead range
+    // non-empty when the nozzle boundary would undercut the zero-bead threshold.
+    // Interlocking (innermost_spacing set) is exempt: its gapped pattern has spacing far
+    // above the bead width by design, not because overlap is zero, and the lowered
+    // boundary splits narrow bands into thickness-proportional bead pairs that pinch away
+    // from the boundary walls.
+    if (bead_spacing >= extrusion_width && nozzle_diameter > 0 && innermost_spacing <= 0)
+    {
+        const coord_t nozzle_boundary = std::max(coord_t(int64_t(nozzle_diameter) * 4 / 3),
+                                                 coord_t(bead_spacing * 0.5) + 1);
+        boundary = std::min(boundary, nozzle_boundary);
+    }
+    return boundary;
+}
+
 coord_t RedistributeBeadingStrategy::getTransitionThickness(coord_t lower_bead_count) const
 {
     switch (lower_bead_count)
@@ -89,7 +110,7 @@ coord_t RedistributeBeadingStrategy::getTransitionThickness(coord_t lower_bead_c
     case 0:
         return bead_spacing * 0.5; // Athena: Use parent's bead_spacing with 50% threshold
     case 1:
-        return (1.0 + parent->getSplitMiddleThreshold()) * ext_perimeter_spacing;
+        return singleBeadUpperBoundary();
     default:
         return parent->getTransitionThickness(lower_bead_count - 2) + 2 * ext_perimeter_spacing;
     }
@@ -100,7 +121,7 @@ coord_t RedistributeBeadingStrategy::getOptimalBeadCount(coord_t thickness) cons
     if (thickness < bead_spacing * 0.5) // Athena: Minimum 50% of spacing
         return 0;
     if (thickness <= 2 * ext_perimeter_spacing)
-        return thickness > (1.0 + parent->getSplitMiddleThreshold()) * ext_perimeter_spacing ? 2 : 1;
+        return thickness > singleBeadUpperBoundary() ? 2 : 1;
 
     return parent->getOptimalBeadCount(thickness - 2 * ext_perimeter_spacing) + 2;
 }
@@ -141,6 +162,26 @@ BeadingStrategy::Beading RedistributeBeadingStrategy::compute(coord_t thickness,
         // Compute contracted widths directly to maintain the configured overlap ratio.
         if (bead_count == 2)
         {
+            // Interlocking (innermost_spacing set): each bead sits at the same fixed
+            // boundary offset the wide-band branch uses, and the pattern's middle gap
+            // absorbs the width variation. Thickness-proportional placement would drag
+            // both beads with every skeleton width change, pulling them off the boundary
+            // walls at pinch points and opening gaps against the external perimeter.
+            // Below two spacings the full-width beads would overlap each other, and the
+            // contracted layout below takes over (identical positions at the crossover;
+            // its bead edges stay on the boundary because width contracts with thickness).
+            if (innermost_spacing > 0 && thickness >= 2 * ext_perimeter_spacing)
+            {
+                ret.bead_widths.push_back(ext_perimeter_width);
+                ret.toolpath_locations.push_back(ext_perimeter_spacing / 2);
+                ret.bead_widths.push_back(ext_perimeter_width);
+                ret.toolpath_locations.push_back(thickness - ext_perimeter_spacing / 2);
+                ret.left_over = thickness - 2 * ext_perimeter_spacing;
+                ret.total_thickness = thickness;
+                ret.preserve_innermost_position = true;
+                return ret;
+            }
+
             const coord_t half_thickness = thickness / 2;
             coord_t bead_w = ext_perimeter_width;
             if (half_thickness < ext_perimeter_spacing)

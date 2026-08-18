@@ -198,10 +198,27 @@ void adjust_layer_height_profile(const SlicingParameters &slicing_params, std::v
                                  coordf_t z, coordf_t layer_thickness_delta, coordf_t band_width,
                                  LayerHeightEditActionType action);
 
+// Snap a layer print_z to a whole millimetre when it lands within 0.005mm, preventing floating
+// point accumulation errors with layer heights like 0.3333 (3 layers per mm), e.g. 21.9979 snaps
+// to 22.0 while 4.3329 stays as 4.3329. Every producer of layer print_z values applies this same
+// rule so all layer stacks land on the identical grid.
+inline coordf_t snap_print_z_whole_mm(const coordf_t print_z)
+{
+    const coordf_t nearest_mm = std::round(print_z);
+    return std::abs(print_z - nearest_mm) < 0.005 ? nearest_mm : print_z;
+}
+
 // Produce object layers as pairs of low / high layer boundaries, stored into a linear vector.
 // The object layers are based at z=0, ignoring the raft layers.
 std::vector<coordf_t> generate_object_layers(const SlicingParameters &slicing_params,
                                              const std::vector<coordf_t> &layer_height_profile);
+
+// Print z of every support layer above the raft: the object's own layer generator run at a fixed
+// layer height, so it carries the whole-millimetre snapping, with the raft offset snapped the
+// same way the object's layers get it. Every support generator holds this grid regardless of a
+// variable layer height profile on the object; at a fixed layer height it is the object's own
+// layer stack. The one authority on where support layers print.
+std::vector<coordf_t> generate_support_layer_zs(const SlicingParameters &slicing_params);
 
 // Check whether the layer height profile describes a fixed layer height profile.
 bool check_object_layers_fixed(const SlicingParameters &slicing_params,

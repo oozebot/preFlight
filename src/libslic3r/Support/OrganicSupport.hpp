@@ -9,6 +9,7 @@
 #include <functional>
 #include <vector>
 
+#include "BaobabSupport.hpp"
 #include "SupportCommon.hpp"
 #include "TreeSupport.hpp"
 #include "libslic3r/Support/SupportLayer.hpp"
@@ -38,7 +39,13 @@ void organic_draw_branches(PrintObject &print_object, TreeModelVolumes &volumes,
 
                            std::function<void()> throw_on_cancel,
                            // Areas to exclude from organic support (e.g., snug/grid support regions)
-                           const std::vector<Polygons> &excluded_areas = {});
+                           const std::vector<Polygons> &excluded_areas = {},
+                           // Per-layer overhang areas: the canopy's authority when interface layers
+                           // are disabled and no contact layer exists to clip against.
+                           const std::vector<Polygons> &baobab_overhangs = {},
+                           // Out: per-layer canopy ring footprints keyed by print z in microns, so
+                           // the toolpath generator can tell a canopy from a trunk.
+                           BaobabCanopyFootprints *baobab_canopy_footprints = nullptr);
 
 } // namespace FFFTreeSupport
 

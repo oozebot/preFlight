@@ -133,8 +133,9 @@ protected:
 
     /*!
      * Remove polylines shorter than half the smallest line width along that polyline.
+     * Non-static: reports dropped orphan specks through the debug context.
      */
-    static void removeSmallLines(std::vector<VariableWidthLines> &toolpaths);
+    void removeSmallLines(std::vector<VariableWidthLines> &toolpaths);
 
     /*!
      * Simplifies the variable-width toolpaths by calling the simplify on every line in the toolpath using the provided
@@ -145,10 +146,12 @@ protected:
     static void simplifyToolPaths(std::vector<VariableWidthLines> &toolpaths);
 
 private:
-    const Polygons &outline; //<! A reference to the outline polygon that is the designated area
-    coord_t bead_width_0;    //<! The nominal or first extrusion line width for wall generation
-    coord_t bead_width_x;    //<! The subsequent extrusion line width for wall generation
-    size_t inset_count;      //<! The maximum number of walls to generate
+    // Owned copy of the designated outline area. The constructor may receive a
+    // temporary, so the instance must not keep a reference to caller storage.
+    Polygons outline;
+    coord_t bead_width_0; //<! The nominal or first extrusion line width for wall generation
+    coord_t bead_width_x; //<! The subsequent extrusion line width for wall generation
+    size_t inset_count;   //<! The maximum number of walls to generate
     coord_t
         wall_0_inset; //<! How far to inset the outer wall. Should only be applied when printing the actual walls, not extra infill/skin/support walls.
     coordf_t layer_height;

@@ -86,8 +86,7 @@ private:
                                               SupportGeneratorLayersPtr &top_contacts) const;
 
     // Generate raft layers and the intermediate support layers between the bottom contact and top contact surfaces.
-    SupportGeneratorLayersPtr raft_and_intermediate_support_layers(const PrintObject &object,
-                                                                   const SupportGeneratorLayersPtr &bottom_contacts,
+    SupportGeneratorLayersPtr raft_and_intermediate_support_layers(const SupportGeneratorLayersPtr &bottom_contacts,
                                                                    const SupportGeneratorLayersPtr &top_contacts,
                                                                    SupportGeneratorLayerStorage &layer_storage) const;
 

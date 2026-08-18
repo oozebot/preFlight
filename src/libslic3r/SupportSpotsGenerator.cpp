@@ -40,6 +40,7 @@
 #include "libslic3r/Layer.hpp"
 #include "libslic3r/ClipperUtils.hpp"
 #include "Geometry/ConvexHull.hpp"
+#include "libslic3r/DebugOutput.hpp"
 #include "libslic3r/ExtrusionRole.hpp"
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/LayerRegion.hpp"
@@ -77,6 +78,44 @@ bool ExtrusionLine::is_external_perimeter() const
 }
 
 using LD = AABBTreeLines::LinesDistancer<ExtrusionLine>;
+
+// Compact labels for --debug stability lines.
+static const char *dbg_cause_name(SupportPointCause cause)
+{
+    switch (cause)
+    {
+    case SupportPointCause::LongBridge:
+        return "long_bridge";
+    case SupportPointCause::FloatingBridgeAnchor:
+        return "floating_bridge_anchor";
+    case SupportPointCause::FloatingExtrusion:
+        return "floating_extrusion";
+    case SupportPointCause::SeparationFromBed:
+        return "separation_from_bed";
+    case SupportPointCause::UnstableFloatingPart:
+        return "unstable_floating_part";
+    case SupportPointCause::WeakObjectPart:
+        return "weak_object_part";
+    }
+    return "unknown";
+}
+
+static const char *dbg_role_name(ExtrusionRole role)
+{
+    if (role.has(ExtrusionRoleModifier::Interlocking))
+        return "interlocking";
+    // Check bridge before the perimeter classes so a bridging perimeter reports "bridge" instead
+    // of hiding the modifier behind ext_perimeter/perimeter.
+    if (role.is_bridge())
+        return "bridge";
+    if (role.is_external_perimeter())
+        return "ext_perimeter";
+    if (role.is_perimeter())
+        return "perimeter";
+    if (role.is_infill())
+        return "infill";
+    return "other";
+}
 
 struct SupportGridFilter
 {
@@ -432,6 +471,10 @@ std::vector<ExtrusionLine> check_extrusion_entity_stability(
                 bridged_distance += line_len;
                 if (bridged_distance > max_bridge_len)
                 {
+                    dbg_log(Slic3r::DBG_STABILITY, layer_region->layer()->print_z, "STAB",
+                            "FLAG cause=%s role=%s reason=bridge pos=(%.2f,%.2f) dist=%.3f fw=%.3f run=%.2f",
+                            dbg_cause_name(potential_cause), dbg_role_name(entity->role()), curr_point.position.x(),
+                            curr_point.position.y(), curr_point.distance, flow_width, bridged_distance);
                     bridged_distance = 0.0f;
                     line_out.support_point_generated = potential_cause;
                 }
@@ -504,6 +547,10 @@ std::vector<ExtrusionLine> check_extrusion_entity_stability(
                 bridged_distance += line_len;
                 if (bridged_distance > max_bridge_len)
                 {
+                    dbg_log(Slic3r::DBG_STABILITY, layer_region->layer()->print_z, "STAB",
+                            "FLAG cause=%s role=%s reason=overhang pos=(%.2f,%.2f) dist=%.3f fw=%.3f run=%.2f",
+                            dbg_cause_name(potential_cause), dbg_role_name(entity->role()), curr_point.position.x(),
+                            curr_point.position.y(), curr_point.distance, flow_width, bridged_distance);
                     line_out.support_point_generated = potential_cause;
                     bridged_distance = 0.0f;
                 }
@@ -514,6 +561,11 @@ std::vector<ExtrusionLine> check_extrusion_entity_stability(
                 line_out.form_quality = bottom_line.form_quality - 0.3f;
                 if (line_out.form_quality < 0 && bridged_distance > max_bridge_len)
                 {
+                    dbg_log(Slic3r::DBG_STABILITY, layer_region->layer()->print_z, "STAB",
+                            "FLAG cause=%s role=%s reason=quality pos=(%.2f,%.2f) dist=%.3f fw=%.3f run=%.2f formq=%.2f",
+                            dbg_cause_name(potential_cause), dbg_role_name(entity->role()), curr_point.position.x(),
+                            curr_point.position.y(), curr_point.distance, flow_width, bridged_distance,
+                            bottom_line.form_quality - 0.3f);
                     line_out.support_point_generated = potential_cause;
                     line_out.form_quality = 0.5f;
                     bridged_distance = 0.0f;
@@ -1605,6 +1657,12 @@ void estimate_malformations(LayerPtrs &layers, const Params &params)
 std::vector<std::pair<SupportPointCause, bool>> gather_issues(const SupportPoints &support_points,
                                                               PartialObjects &partial_objects)
 {
+    if (Slic3r::debug_enabled(Slic3r::DBG_STABILITY))
+    {
+        for (const SupportPoint &sp : support_points)
+            dbg_log(Slic3r::DBG_STABILITY, sp.position.z(), "STAB", "POINT cause=%s pos=(%.2f,%.2f) radius=%.2f",
+                    dbg_cause_name(sp.cause), sp.position.x(), sp.position.y(), sp.spot_radius);
+    }
     std::vector<std::pair<SupportPointCause, bool>> result;
     // The partial object are most likely sorted from smaller to larger as the print continues, so this should save some sorting time
     std::reverse(partial_objects.begin(), partial_objects.end());
@@ -1706,6 +1764,15 @@ std::vector<std::pair<SupportPointCause, bool>> gather_issues(const SupportPoint
             result.emplace_back(SupportPointCause::LongBridge, false);
             break;
         }
+    }
+
+    if (Slic3r::debug_enabled(Slic3r::DBG_STABILITY))
+    {
+        dbg_log(Slic3r::DBG_STABILITY, 0.0, "STAB", "ISSUES total_points=%zu issues=%zu", support_points.size(),
+                result.size());
+        for (const auto &[cause, critical] : result)
+            dbg_log(Slic3r::DBG_STABILITY, 0.0, "STAB", "ISSUE cause=%s critical=%d", dbg_cause_name(cause),
+                    int(critical));
     }
 
     return result;

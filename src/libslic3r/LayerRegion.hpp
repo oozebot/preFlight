@@ -265,7 +265,8 @@ struct ExpansionZone
 * Trim "shells" by the expanded bridges.
 */
 Surfaces expand_bridges_detect_orientations(Surfaces &surfaces, std::vector<ExpansionZone> &expansion_zones,
-                                            const float closing_radius);
+                                            const float closing_radius, const bool use_air_floating = false,
+                                            const ExPolygons *lower_slices = nullptr, const double dbg_print_z = 0.);
 
 /**
 * Extract bridging surfaces from "surfaces", expand them into "shells" using expansion_params.

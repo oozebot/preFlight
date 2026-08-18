@@ -13,6 +13,7 @@
 #include "../Layer.hpp"
 #include "../Polygon.hpp"
 #include "../Print.hpp"
+#include "BaobabSupport.hpp"
 #include "SupportLayer.hpp"
 #include "SupportParameters.hpp"
 #include "libslic3r/PrintConfig.hpp"
@@ -74,7 +75,21 @@ void generate_support_toolpaths(SupportLayerPtrs &support_layers, const PrintObj
                                 const SupportGeneratorLayersPtr &top_contacts,
                                 const SupportGeneratorLayersPtr &intermediate_layers,
                                 const SupportGeneratorLayersPtr &interface_layers,
-                                const SupportGeneratorLayersPtr &base_interface_layers);
+                                const SupportGeneratorLayersPtr &base_interface_layers, bool baobab = false,
+                                // Per-layer canopy ring footprints (print z in microns): the fill
+                                // grows only inside canopies, so trunk bores stay empty.
+                                const BaobabCanopyFootprints *baobab_canopy_footprints = nullptr);
+
+// Debug census for --debug baobab: hole counts of a layer category's polygons as they stand at
+// `tag`'s pipeline stage, with one detail line per holed layer (hole centroids and, when the
+// object is supplied, how many small object islands exist at the same z - a feature protruding
+// into the support zone registers there). No-op unless the baobab debug category is active.
+void baobab_debug_layer_census(const char *tag, const char *cat, const SupportGeneratorLayersPtr &layers,
+                               const PrintObject *print_object = nullptr);
+
+// Same census under the generic support debug category, for the passes that are not Baobab.
+void support_debug_layer_census(const char *tag, const char *cat, const SupportGeneratorLayersPtr &layers,
+                                const PrintObject *print_object = nullptr);
 
 // FN_HIGHER_EQUAL: the provided object pointer has a Z value >= of an internal threshold.
 // Find the first item with Z value >= of an internal threshold of fn_higher_equal.

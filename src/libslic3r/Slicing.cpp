@@ -774,18 +774,33 @@ std::vector<coordf_t> generate_object_layers(const SlicingParameters &slicing_pa
         assert(height > slicing_params.min_layer_height - EPSILON);
         assert(height < slicing_params.max_layer_height + EPSILON);
         out.push_back(print_z);
-        print_z += height;
-        // preFlight: Snap to whole millimeters when very close (within 0.005mm) to prevent
-        // floating point accumulation errors with layer heights like 0.3333 (3 layers per mm)
-        coordf_t nearest_mm = std::round(print_z);
-        if (std::abs(print_z - nearest_mm) < 0.005)
-            print_z = nearest_mm;
+        print_z = snap_print_z_whole_mm(print_z + height);
         slice_z = print_z + 0.5 * slicing_params.min_layer_height;
         out.push_back(print_z);
     }
 
     //FIXME Adjust the last layer to align with the top object layer exactly?
     return out;
+}
+
+std::vector<coordf_t> generate_support_layer_zs(const SlicingParameters &slicing_params)
+{
+    // Running the object's own layer generator at a fixed layer height is what carries the
+    // whole-millimetre snapping object layers get, which a plain first_height + n * layer_height
+    // ladder does not.
+    const std::vector<coordf_t> fixed_profile{0., slicing_params.layer_height,
+                                              slicing_params.object_print_z_uncompensated_height(),
+                                              slicing_params.layer_height};
+    // Pairs of low / high layer boundaries, based at z = 0. Keep the highs, offset to print z,
+    // and snap again after the offset exactly as the object's own layers are; without this a
+    // raft height that puts a boundary within the snap window moves the object's layers but
+    // not the grid, and everything keyed by height goes off by one at every such layer.
+    const std::vector<coordf_t> bounds = generate_object_layers(slicing_params, fixed_profile);
+    std::vector<coordf_t> zs;
+    zs.reserve(bounds.size() / 2);
+    for (size_t i = 1; i < bounds.size(); i += 2)
+        zs.emplace_back(snap_print_z_whole_mm(slicing_params.object_print_z_min + bounds[i]));
+    return zs;
 }
 
 // Check whether the layer height profile describes a fixed layer height profile.

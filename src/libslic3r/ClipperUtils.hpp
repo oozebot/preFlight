@@ -966,6 +966,20 @@ Slic3r::Polygons union_(const Slic3r::Polygons &subject, const PolyFillType fill
 Slic3r::Polygons union_(const Slic3r::Polygons &subject, const Slic3r::Polygon &subject2);
 Slic3r::Polygons union_(const Slic3r::Polygons &subject, const Slic3r::Polygons &subject2);
 Slic3r::Polygons union_(const Slic3r::Polygons &subject, const Slic3r::ExPolygon &subject2);
+// Union for closed loops of UNKNOWN winding (e.g. stitched skeletal-trapezoidation marker
+// walls): drops exact duplicate loops, orients every loop by containment parity (even depth
+// = outer CCW, odd depth = hole CW), then unions with the Positive fill rule. Safe against
+// duplicate loops, same-winding holes and nested islands, where NonZero swallows same-winding
+// holes and EvenOdd inverts the region on duplicated loops. Loops re-emitted with
+// sub-printable coordinate drift (matching bounds and area) are treated as siblings, not as
+// a contour/hole pair, so they merge instead of annihilating.
+struct UnknownWindingStats
+{
+    size_t duplicates_dropped = 0;
+    size_t hole_loops = 0;
+    size_t near_duplicates_dropped = 0;
+};
+Slic3r::Polygons union_unknown_winding(const Slic3r::Polygons &loops, UnknownWindingStats *stats = nullptr);
 // May be used to "heal" unusual models (3DLabPrints etc.) by providing fill_type (pftEvenOdd, pftNonZero, pftPositive, pftNegative).
 Slic3r::ExPolygons union_ex(const Slic3r::Polygons &subject, PolyFillType fill_type = pftNonZero);
 Slic3r::ExPolygons union_ex(const Slic3r::Polygons &subject, const Slic3r::Polygons &subject2,

@@ -1,5 +1,56 @@
 # preFlight Changelog
 
+## v1.3.0
+
+### Baobab (AKA 'Great Tree') Supports
+
+Baobab is a new support engine that lives somewhere between Organic and Snug. Where Organic grows slender branches that end in fine tips, Baobab grows thick trunks that expand into a canopy matching the shape of the support interface.
+
+- Generates broad canopies under the support interface which merge downward into thick trunks
+- Prints faster than other support types while maintaining rigidity with minimal material
+- Canopies are supported with Lightning infill to keep the structure light and interface layers solid
+- Available for automatic supports, or painted via the Baobab enforcer within the Paint-on supports gizmo
+- Dedicated settings under Support material control the trunk diameter, growth angles, and canopy shape and density
+
+### Serpentine
+- Added a relaxed spoke layout mode
+- Added an outer surface loop option
+
+### Tree Supports - Variable Layer Height Compatibility
+- Tree Supports now work with variable layer height
+  - Only extreme variability the interface layers can't bridge is still refused
+
+
+### Print Stability Alerts
+- Stability Analysis now runs for objects using manually placed supports (previously only available when support generation was not enabled)
+  - Painted enforcers, support enforcer volumes, and enforced first layers count as coverage
+  - The alert names only the trouble spots supports do not cover
+  - Can be turned off entirely with the existing "Alert when supports needed" preference
+
+### Width Control
+- Renamed Athena-specific "Maximum perimeter width" to "Maximum width" as Athena continues to grow beyond perimeters
+- Widened beads now slow down to hold their feature's intended volumetric flow rate when no max volumetric flow is configured
+  - With a max volumetric flow set, behavior is unchanged: the ceiling governs
+- New real-time width warning: if slicing generates a wall or fill bead wider than the extruder's "Width warning max" threshold, a warning is presented
+
+### Perimeters while Interlocking
+- Fixed perimeter gaps with interlocking enabled, caused by Athena bead placement drift from the third bead outward
+- Reworked suppression handling so regions are reliably covered by walls or fill, with dedicated interlocking lanes through narrow flow-through corridors
+- Bridge direction detection over interlocked regions now derives floating edges from the slices, fixing wrong bridge angles above interlocking
+- Fixed boundary offsets for interlocking bead pairs, with narrow solid regions exempted from the boundary
+
+### Bug Fixes
+- Support brim yields to the support base flange instead of trimming its extrusions (#255)
+- Organic and Baobab diameter floors now validate painted-enforcer objects, not just style-selected ones
+- Fixed a crash when auto-generating paint from the supports gizmo on objects whose stability data was never computed
+- Extra overhang perimeters print in anchored order with consistent direction and seams aligned to the seam placer (#253)
+- Internal infill spacing too narrow for a round bead is clamped to the minimum instead of dropping the region
+- Negative perimeter overlap is honored for internal beads instead of inflating them back to the spacing
+- Clicking a filament color swatch commits the color straight to the filament preset (#250)
+- Hardened Clipper2 geometry processing against micro self-intersections and winding edge cases
+- Fixed garbled characters in settings search results on non-ASCII locales
+- Fixed an inner-contour marker index in Arachne's capped beading branch
+
 ## v1.2.0
 
 ### Serpentine

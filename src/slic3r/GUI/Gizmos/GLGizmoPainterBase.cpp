@@ -1215,14 +1215,14 @@ ColorRGBA TriangleSelectorGUI::get_seed_fill_color(const ColorRGBA &base_color)
 
 void TriangleSelectorGUI::render(ImGuiWrapper *imgui, const Transform3d &matrix, const Camera &camera)
 {
-    // Colors indexed by state value (0-9). 0=unused, 1=ENFORCER, 2=BLOCKER, 3=ORGANIC, 4=GRID, 5-9=extended.
+    // Colors indexed by state value (0-9). 0=unused, 1=ENFORCER, 2=BLOCKER, 3=ORGANIC, 4=GRID, 5=BAOBAB, 6-9=extended.
     static const std::array<ColorRGBA, 10> state_colors = {{
         GLVolume::NEUTRAL_COLOR,    // 0: NONE
         {0.47f, 0.47f, 1.0f, 1.0f}, // 1: Enforcer - blue
         {1.0f, 0.44f, 0.44f, 1.0f}, // 2: Blocker - red
         {0.3f, 0.7f, 0.3f, 1.0f},   // 3: Organic - green
-        {1.0f, 0.6f, 0.2f, 1.0f},   // 4: Grid - orange
-        {0.6f, 0.3f, 0.85f, 1.0f},  // 5: purple
+        {0.6f, 0.3f, 0.85f, 1.0f},  // 4: Grid - purple
+        {0.8f, 0.42f, 0.2f, 1.0f},  // 5: Baobab - terracotta
         {0.2f, 0.75f, 0.75f, 1.0f}, // 6: teal
         {0.9f, 0.85f, 0.15f, 1.0f}, // 7: yellow
         {0.9f, 0.35f, 0.65f, 1.0f}, // 8: pink

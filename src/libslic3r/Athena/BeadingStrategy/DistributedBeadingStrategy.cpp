@@ -104,6 +104,7 @@ DistributedBeadingStrategy::Beading DistributedBeadingStrategy::compute(const co
     if (bead_count > 2)
     {
         coord_t accumulated_spacing = 0;
+        coord_t prev_spacing = 0;
         for (size_t bead_idx = 0; bead_idx < bead_count; ++bead_idx)
         {
             const coord_t splitup_left_over_spacing = static_cast<coord_t>(static_cast<float>(to_be_divided) *
@@ -112,19 +113,17 @@ DistributedBeadingStrategy::Beading DistributedBeadingStrategy::compute(const co
                                         ? thickness - accumulated_spacing
                                         : std::max(coord_t(0), bead_spacing + splitup_left_over_spacing);
 
-            // Calculate toolpath locations using distributed spacing
+            // Each bead occupies a slot of its spacing; consecutive centerlines sit half of
+            // each adjacent slot apart.
             if (bead_idx == 0)
             {
                 ret.toolpath_locations.emplace_back(spacing / 2);
             }
             else
             {
-                const coord_t prev_spacing = (bead_idx == 1) ? (ret.toolpath_locations[0] * 2)
-                                                             : (ret.toolpath_locations[bead_idx - 1] -
-                                                                ret.toolpath_locations[bead_idx - 2]) *
-                                                                   2;
                 ret.toolpath_locations.emplace_back(ret.toolpath_locations.back() + (prev_spacing + spacing) / 2);
             }
+            prev_spacing = spacing;
 
             // Athena: All widths are fixed to extrusion_width
             ret.bead_widths.emplace_back(extrusion_width);
