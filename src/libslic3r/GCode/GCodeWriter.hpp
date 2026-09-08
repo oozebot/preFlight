@@ -18,6 +18,7 @@
 #include <array>
 #include <cmath>
 #include <vector>
+#include <map>
 #include <cstring>
 
 #include "libslic3r/libslic3r.h"
@@ -141,6 +142,11 @@ public:
     std::string retract_for_toolchange(bool before_wipe = false);
     std::string unretract();
 
+    // Preview nominal volume from the next emitted E word, without advancing
+    // the extruder. Includes output rounding; EM is already contained in dE.
+    double preview_extrusion_volume(double dE) const;
+    void update_extrusion_position(unsigned int extruder_id, double position);
+
     // Current position of the printer, in G-code coordinates.
     // Z coordinate of current position contains zhop. If zhop is applied (this->zhop() > 0),
     // then the print_z = this->get_position().z() - this->zhop().
@@ -165,6 +171,8 @@ public:
 private:
     // Extruders are sorted by their ID, so that binary search is possible.
     std::vector<Extruder> m_extruders;
+    std::map<unsigned int, double> m_emitted_e_positions;
+    double record_emitted_e(double value);
     std::string m_extrusion_axis;
     bool m_single_extruder_multi_material;
     Extruder *m_extruder;
@@ -289,13 +297,21 @@ public:
             this->emit_axis('J', point.y(), XYZF_EXPORT_DIGITS);
     }
 
-    void emit_e(const std::string_view axis, double v)
+    static double normalize_e(double v)
     {
         const double precision{std::pow(10.0, -E_EXPORT_DIGITS)};
         if (std::abs(v) < precision)
         {
             v = v < 0 ? -precision : precision;
         }
+        return v;
+    }
+
+    static double emitted_e_value(double v) { return quantize_e(normalize_e(v)); }
+
+    void emit_e(const std::string_view axis, double v)
+    {
+        v = normalize_e(v);
         if (!axis.empty())
         {
             // not gcfNoExtrusion

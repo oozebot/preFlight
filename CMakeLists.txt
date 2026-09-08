@@ -687,6 +687,10 @@ add_subdirectory(build-utils)
 add_subdirectory(bundled_deps)
 # libslic3r, preFlight GUI and the preFlight executable.
 add_subdirectory(src)
+option(PREFLIGHT_INTERLOCKING_TESTS "Build focused interlocking flow regression tests" OFF)
+if (PREFLIGHT_INTERLOCKING_TESTS)
+    add_subdirectory(tests/interlocking)
+endif ()
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT preFlight_app_console)
 
 add_dependencies(gettext_make_pot hintsToPot)

@@ -30,6 +30,7 @@
 #include "I18N.hpp"
 #include "GCode.hpp"
 #include "GCode/GCodeObject.hpp"
+#include "GCode/InterlockingFlow.hpp"
 
 #ifdef _WIN32
 #include <malloc.h> // For _heapmin()
@@ -2189,7 +2190,7 @@ std::string GCodeGenerator::placeholder_parser_process(const std::string &name, 
             {
                 if (!m_writer.config.use_relative_e_distances &&
                     !is_approx(ppi.e_position[eid], ppi.opt_e_position->values[eid]))
-                    const_cast<Extruder &>(e).set_position(ppi.opt_e_position->values[eid]);
+                    m_writer.update_extrusion_position(eid, ppi.opt_e_position->values[eid]);
                 if (!is_approx(ppi.e_retracted[eid], ppi.opt_e_retracted->values[eid]) ||
                     !is_approx(ppi.e_restart_extra[eid], ppi.opt_e_restart_extra->values[eid]))
                     const_cast<Extruder &>(e).set_retracted(ppi.opt_e_retracted->values[eid],
@@ -5866,7 +5867,33 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
     // If the first emitted segment is over a bridge zone, use over_bridge_speed from the start
     if (over_bridge_speed_value > 0 && segment_over_bridge.size() > 1 && segment_over_bridge[1])
         F = std::round(over_bridge_speed_value * 60.0);
-    inject_feedrate(gcode, m_writer.set_speed(F, flow_held ? "flow hold" : "", cooling_marker_setspeed_comments));
+    const double interlocking_limit = path_attr.role == ExtrusionRole::InterlockingPerimeter
+        ? effective_max_volumetric_flow(m_config, m_writer.extruder()->id()) : 0.;
+    const bool guard_interlocking_flow = interlocking_limit > 0;
+    if (!guard_interlocking_flow)
+        inject_feedrate(gcode, m_writer.set_speed(F, flow_held ? "flow hold" : "", cooling_marker_setspeed_comments));
+    // F remains the feed requested by the unchanged speed-selection logic.
+    // Keep the emitted feed separately, so a short capped move cannot slow all
+    // subsequent moves. CoolingBuffer requires constant-feed adjustment blocks,
+    // so each feed change closes the previous block and opens another one.
+    double emitted_interlocking_f = -1.;
+    bool first_interlocking_move = true;
+    auto guard_interlocking_move = [&](double emitted_length, double extrusion) {
+        if (!guard_interlocking_flow)
+            return;
+        const double volume = m_writer.preview_extrusion_volume(extrusion);
+        const double motion_length = interlocking_motion_length(emitted_length, volume,
+            m_writer.extruder()->filament_crossection());
+        const double limited_f = interlocking_feedrate(std::round(F), interlocking_limit, motion_length, volume);
+        if (limited_f != emitted_interlocking_f || first_interlocking_move) {
+            if (!first_interlocking_move && !cooling_marker_setspeed_comments.empty())
+                gcode += ";_EXTRUDE_END\n";
+            inject_feedrate(gcode, m_writer.set_speed(limited_f, flow_held ? "flow hold" : "",
+                cooling_marker_setspeed_comments));
+            emitted_interlocking_f = limited_f;
+        }
+        first_interlocking_move = false;
+    };
 
     if (dynamic_print_and_fan_speeds.fan_speed >= 0 && !EXTRUDER_CONFIG(enable_manual_fan_speeds))
     {
@@ -6058,7 +6085,8 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
                         // Only emit speed change if it's different from current speed
                         if (std::abs(F - segment_F) > 0.1)
                         {
-                            inject_feedrate(gcode, m_writer.set_speed(segment_F, "", ""));
+                            if (!guard_interlocking_flow)
+                                inject_feedrate(gcode, m_writer.set_speed(segment_F, "", ""));
                             F = segment_F; // Update current F for comparison
                         }
                     }
@@ -6155,13 +6183,16 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
                             double subseg_F = std::round(subseg_speed * 60.0);
                             if (std::abs(F - subseg_F) > 0.1)
                             {
-                                inject_feedrate(gcode, m_writer.set_speed(subseg_F, "", ""));
+                                if (!guard_interlocking_flow)
+                                    inject_feedrate(gcode, m_writer.set_speed(subseg_F, "", ""));
                                 F = subseg_F;
                             }
 
                             // Emit the move
                             Vec2d to_quantized = GCodeFormatter::quantize(to);
                             double extrusion = subseg_e_per_mm * subseg_length * it->e_fraction;
+                            guard_interlocking_move((to_quantized -
+                                GCodeFormatter::quantize(Vec2d(m_writer.get_position().head<2>()))).norm(), extrusion);
                             gcode += m_writer.extrude_to_xy(to_quantized, extrusion, subseg_comment);
                         };
 
@@ -6193,7 +6224,8 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
                             double bridge_F = std::round(over_bridge_speed_value * 60.0);
                             if (std::abs(F - bridge_F) > 0.1)
                             {
-                                inject_feedrate(gcode, m_writer.set_speed(bridge_F, "", ""));
+                                if (!guard_interlocking_flow)
+                                    inject_feedrate(gcode, m_writer.set_speed(bridge_F, "", ""));
                                 F = bridge_F;
                             }
                         }
@@ -6204,7 +6236,8 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
                             double original_F = std::round(speed * 60.0);
                             if (std::abs(F - original_F) > 0.1)
                             {
-                                inject_feedrate(gcode, m_writer.set_speed(original_F, "", ""));
+                                if (!guard_interlocking_flow)
+                                    inject_feedrate(gcode, m_writer.set_speed(original_F, "", ""));
                                 F = original_F;
                             }
                         }
@@ -6214,10 +6247,14 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
                         {
                             const Vec3d destination{
                                 to_3d(p, this->m_last_layer_z + (it->height_fraction - 1) * m_last_height)};
+                            guard_interlocking_move((GCodeFormatter::quantize(destination) -
+                                GCodeFormatter::quantize(m_writer.get_position())).norm(), extrusion_amount);
                             gcode += m_writer.extrude_to_xyz(destination, extrusion_amount);
                         }
                         else
                         {
+                            guard_interlocking_move((p -
+                                GCodeFormatter::quantize(Vec2d(m_writer.get_position().head<2>()))).norm(), extrusion_amount);
                             gcode += m_writer.extrude_to_xy(p, extrusion_amount, comment);
                         }
                     }
@@ -6230,6 +6267,10 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
                 const double line_length = angle * std::abs(radius);
                 const double dE = segment_e_per_mm * line_length;
                 assert(dE > 0);
+                if (guard_interlocking_flow) {
+                    const Vec2d delta = p - GCodeFormatter::quantize(Vec2d(m_writer.get_position().head<2>()));
+                    guard_interlocking_move(interlocking_arc_length(delta.x(), delta.y(), ij.x(), ij.y(), it->ccw()), dE);
+                }
                 gcode += m_writer.extrude_to_xy_G2G3IJ(p, ij, it->ccw(), dE, comment);
             }
             prev = p;
