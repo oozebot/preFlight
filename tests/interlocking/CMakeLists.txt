@@ -6,3 +6,7 @@ add_test(NAME interlocking_flow COMMAND interlocking_flow_test)
 add_executable(interlocking_writer_test test_writer.cpp)
 target_link_libraries(interlocking_writer_test PRIVATE libslic3r)
 add_test(NAME interlocking_writer COMMAND interlocking_writer_test)
+
+add_executable(interlocking_pressure_equalizer_test test_pressure_equalizer.cpp)
+target_link_libraries(interlocking_pressure_equalizer_test PRIVATE libslic3r)
+add_test(NAME interlocking_pressure_equalizer COMMAND interlocking_pressure_equalizer_test)

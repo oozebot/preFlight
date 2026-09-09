@@ -282,7 +282,7 @@ def _effective_limit(config, tool=None):
 
 def _audit_summary(moves, limit):
     selected = [m for m in moves if m.role == ROLE]
-    violations = [m for m in selected if limit > 0 and m.flow_lower_bound > limit + 1e-9]
+    violations = [m for m in selected if limit > 0 and m.flow > limit + 1e-9]
     return dict(deposition_moves=len(moves), selected_moves=len(selected),
                 layers=max((m.layer for m in moves), default=0),
                 max_flow=max((m.flow for m in selected), default=0.), violations=len(violations),

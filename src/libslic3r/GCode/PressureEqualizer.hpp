@@ -44,6 +44,10 @@ public:
     // When process_layer is called for the first layer, then LayerResult::make_nop_layer_result() is returned.
     LayerResult process_layer(LayerResult &&input);
 
+    // Initial/between-object T commands are written outside this filter.
+    // Seed the active tool before streaming layers, as for CoolingBuffer.
+    void set_current_extruder(size_t extruder_id) { m_current_extruder = extruder_id; }
+
 private:
     void process_layer(const std::string &gcode);
 
@@ -87,6 +91,9 @@ private:
     // Configuration extracted from config.
     // Area of the crossestion of each filament. Necessary to calculate the volumetric flow rate.
     std::vector<float> m_filament_crossections;
+    // The generator already caps these tools' interlocking moves using emitted
+    // E/XYZ. Preserve that geometry and cap through downstream slope smoothing.
+    std::vector<bool> m_interlocking_flow_limited;
 
     // Internal data.
     // X,Y,Z,E,F

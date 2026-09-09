@@ -27,6 +27,16 @@ class RegressionTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 self.assertNotEqual(signature(baseline), signature(bad))
 
+    def test_summary_rejects_small_commanded_overshoot(self):
+        for mode in ('M82', 'M83'):
+            for feed, expected in ((19950, 0), (19960, 1)):
+                with self.subTest(mode=mode, feed=feed):
+                    moves = self.runner.audit(
+                        f'G90\n{mode}\n;TYPE:Interlocking perimeter\nG1 X1 E0.01000 F{feed}'.splitlines())
+                    summary = self.runner._audit_summary(moves, 8)
+                    self.assertEqual(summary['violations'], expected)
+                    self.assertEqual(self.runner._audit_summary(moves, 0)['violations'], 0)
+
     def test_cooling_minimum_speed_cannot_override_volumetric_cap_case(self):
         cases = {c.name: c for c in self.runner.build_cases()}
         config = self.runner.case_config(cases['cooling-min-speed-above-cap'])

@@ -1392,6 +1392,8 @@ void GCodeGenerator::_do_export(Print &print, GCodeOutputStream &file, Thumbnail
 
     m_cooling_buffer = make_unique<CoolingBuffer>(*this);
     m_cooling_buffer->set_current_extruder(initial_extruder_id);
+    if (m_pressure_equalizer)
+        m_pressure_equalizer->set_current_extruder(initial_extruder_id);
 
     // Emit machine envelope limits for the Marlin firmware.
     this->print_machine_envelope(file, print);
@@ -1564,6 +1566,8 @@ void GCodeGenerator::_do_export(Print &print, GCodeOutputStream &file, Thumbnail
             // Reset the cooling buffer internal state (the current position, feed rate, accelerations).
             m_cooling_buffer->reset(this->writer().get_position());
             m_cooling_buffer->set_current_extruder(initial_extruder_id);
+            if (m_pressure_equalizer)
+                m_pressure_equalizer->set_current_extruder(initial_extruder_id);
             // Process all layers of a single object instance (sequential mode) with a parallel pipeline:
             // Generate G-code, run the filters (vase mode, cooling buffer), run the G-code analyser
             // and export G-code into file.

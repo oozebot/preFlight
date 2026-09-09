@@ -7,7 +7,7 @@ for /f "tokens=* USEBACKQ" %%I in (`"%VSWHERE%" -latest -products * -version 18 
 if not defined FLOW_TEST_MSVC exit /b 2
 call "%FLOW_TEST_MSVC%\Common7\Tools\VsDevCmd.bat" -arch=x64 -host_arch=x64
 if errorlevel 1 exit /b %ERRORLEVEL%
-cmake --build "%~dp0..\..\build" --target interlocking_flow_test interlocking_writer_test --parallel 6
+cmake --build "%~dp0..\..\build" --target interlocking_flow_test interlocking_writer_test interlocking_pressure_equalizer_test --parallel 6
 if errorlevel 1 exit /b %ERRORLEVEL%
 ctest --test-dir "%~dp0..\..\build" --output-on-failure --no-tests=error -R "^interlocking_"
 exit /b %ERRORLEVEL%

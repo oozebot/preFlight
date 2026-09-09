@@ -42,7 +42,7 @@ not make concurrent application compilation safe.
 
 After `build.bat -config` succeeds, enable `PREFLIGHT_INTERLOCKING_TESTS=ON` in
 that candidate build's CMake cache, reconfigure and build through `build.bat`.
-The option defaults OFF and adds only the two focused test targets. In a
+The option defaults OFF and adds only the three focused test targets. In a
 developer environment with CMake on PATH:
 
 ```powershell
@@ -50,7 +50,10 @@ ctest --test-dir build --output-on-failure -R '^interlocking_'
 ```
 
 On Windows, `tests\interlocking\run_native_tests.bat` builds only those native
-test targets and their library dependencies, then runs CTest. It selects the
+test targets and their library dependencies, then runs CTest. The third target
+exercises the real PressureEqualizer with both E modes, both selected tools,
+print/filament limits and a legacy disabled-limit control. Initial tool selection
+is tested both inside the stream and in the header outside the filter. It selects the
 same VS 2026 compiler. This permits early native checks while a GUI-only build
 dependency is unavailable; it does not disable GUI in the application config,
 and cannot replace a successful full `build.bat` plus GUI/export validation.
@@ -106,9 +109,37 @@ export contract, including non-interlocking controls. They explicitly do not
 claim G2/G3 integration coverage. Unexpected generated arcs fail and require
 reassessment of firmware segmentation. Scalar and Writer arc tests are separate.
 
+## Downstream PressureEqualizer
+
+```powershell
+python tests/interlocking/pressure_equalizer_regression.py --baseline C:/isolated/baseline/preFlight-console.exe --candidate C:/isolated/candidate/preFlight-console.exe --output C:/isolated/evidence/pressure-001
+```
+
+This additional gate enables positive/negative volumetric slope limits and
+compares the same candidate's final output with smoothing off/on. It requires
+identical ordered interlocking endpoints/E and non-increasing feeds, including
+feeds below F60, absolute E and the second tool. Separate baseline controls
+require unchanged motion/feeds when the volumetric limit or interlocking is off.
+The ordinary paired matrix remains an independent gate with smoothing disabled.
+The additional matrix also covers scarf XYZE and forced cooling. The latter may
+dominate both runs and leave identical final feeds; all other enabled cases
+must show an observed slowdown, not merely a configured slope limit.
+
+For limited interlocking, PressureEqualizer applies its average correction to
+the original whole segment. It does not subdivide or reformat E/XYZ: doing so
+could invalidate the cap calculated from the generator's emitted coordinates.
+The final integer feed is floored and cannot exceed the incoming cap, even
+below the equalizer's legacy F60 minimum. This trades sub-segment smoothing
+resolution on long interlocking moves for exact deposited geometry/volume.
+Other extrusion roles and tools without a positive cap keep their existing path.
+The filter is seeded with the initial tool (also between sequential objects),
+because the header's tool-change command bypasses the layer postprocessor.
+
 The auditor supports the synthetic fixture's explicit tool-coordinate model;
 it does not infer real Klipper T macros. E precision is five decimal places.
-Rounding bounds are absolute, not a percentage margin. Explicit XYZ moves that
+The pass/fail decision uses the actual emitted flow with only a 1e-9 mm3/s
+floating arithmetic tolerance. E rounding bounds are diagnostic only: emitted
+E is a known command, not uncertainty that can excuse an overshoot. Explicit XYZ moves that
 round to zero displacement use extruder-only timing; plain E-only unretractions
 are excluded from deposition. Any unsupported mode is an error.
 

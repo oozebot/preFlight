@@ -201,7 +201,9 @@ def main():
     except (ValueError, OSError) as error:
         parser.error(str(error))
     selected = [m for m in moves if m.role == args.role]
-    violations = [m for m in selected if m.limit > 0 and m.flow_lower_bound > m.limit + 1e-9]
+    # E has already been emitted: its quantization is not uncertainty in the
+    # commanded volume. Keep the lower bound diagnostic-only.
+    violations = [m for m in selected if m.limit > 0 and m.flow > m.limit + 1e-9]
     print(json.dumps(dict(moves=len(selected), layers=max((m.layer for m in moves), default=0),
                          limit=args.limit, tool_limits=limits,
                          max_flow=max((m.flow for m in selected), default=0),

@@ -164,6 +164,19 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(report['examples'][0]['tool'], 1)
         self.assertEqual(report['examples'][0]['limit'], 4)
 
+    def test_cli_uses_emitted_flow_not_rounding_lower_bound(self):
+        for mode in ('M82', 'M83'):
+            for feed, expected in ((19950, 0), (19960, 1)):
+                with self.subTest(mode=mode, feed=feed):
+                    code = f'G90\n{mode}\n;TYPE:Interlocking perimeter\nG1 X1 E0.01000 F{feed}'
+                    result = self.run_cli(code, '--limit', '8')
+                    self.assertEqual(result.returncode, expected, result.stderr)
+                    report = json.loads(result.stdout)
+                    self.assertEqual(report['violations'], expected)
+                    if expected:
+                        self.assertGreater(report['max_flow'], 8)
+                        self.assertLess(report['examples'][0]['flow_lower_bound'], 8)
+
     def test_cli_invalid_scalar_limits_cannot_pass(self):
         for limit in ('nan', 'inf', '-1'):
             with self.subTest(limit=limit):
