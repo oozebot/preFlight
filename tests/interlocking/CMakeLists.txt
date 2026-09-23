@@ -1,0 +1,12 @@
+add_executable(interlocking_flow_test test_flow_limit.cpp)
+target_include_directories(interlocking_flow_test PRIVATE ${PROJECT_SOURCE_DIR}/src)
+target_compile_features(interlocking_flow_test PRIVATE cxx_std_17)
+add_test(NAME interlocking_flow COMMAND interlocking_flow_test)
+
+add_executable(interlocking_writer_test test_writer.cpp)
+target_link_libraries(interlocking_writer_test PRIVATE libslic3r)
+add_test(NAME interlocking_writer COMMAND interlocking_writer_test)
+
+add_executable(interlocking_pressure_equalizer_test test_pressure_equalizer.cpp)
+target_link_libraries(interlocking_pressure_equalizer_test PRIVATE libslic3r)
+add_test(NAME interlocking_pressure_equalizer COMMAND interlocking_pressure_equalizer_test)

@@ -20,6 +20,7 @@
 #include <string_view>
 #include <cassert>
 #include <cinttypes>
+#include <stdexcept>
 
 #include "libslic3r/libslic3r.h"
 
@@ -65,9 +66,13 @@ void GCodeWriter::set_extruders(std::vector<unsigned int> extruder_ids)
 {
     std::sort(extruder_ids.begin(), extruder_ids.end());
     m_extruders.clear();
+    m_emitted_e_positions.clear();
     m_extruders.reserve(extruder_ids.size());
     for (unsigned int extruder_id : extruder_ids)
+    {
         m_extruders.emplace_back(Extruder(extruder_id, &this->config));
+        m_emitted_e_positions.emplace(extruder_id, 0.);
+    }
 
     /*  we enable support for multiple extruder if any extruder greater than 0 is used
         (even if prints only uses that one) since we need to output Tx commands
@@ -280,11 +285,14 @@ std::string GCodeWriter::set_acceleration_internal(Acceleration type, unsigned i
 
 std::string GCodeWriter::reset_e(bool force)
 {
-    return FLAVOR_IS(gcfMach3) || FLAVOR_IS(gcfMakerWare) || FLAVOR_IS(gcfSailfish) ||
+    const bool skipped = FLAVOR_IS(gcfMach3) || FLAVOR_IS(gcfMakerWare) || FLAVOR_IS(gcfSailfish) ||
                    this->config.use_relative_e_distances ||
-                   (m_extruder != nullptr && !m_extruder->reset_E() && !force) || m_extrusion_axis.empty()
-               ? std::string{}
-               : std::string("G92 ") + m_extrusion_axis +
+                   (m_extruder != nullptr && !m_extruder->reset_E() && !force) || m_extrusion_axis.empty();
+    if (skipped)
+        return {};
+    if (m_extruder != nullptr)
+        m_emitted_e_positions.at(m_extruder->id()) = 0.;
+    return std::string("G92 ") + m_extrusion_axis +
                      (this->config.gcode_comments ? "0 ; reset extrusion distance\n" : "0\n");
 }
 
@@ -473,7 +481,7 @@ std::string GCodeWriter::extrude_to_xy(const Vec2d &point, double dE, const std:
 
     GCodeG1Formatter w;
     w.emit_xy(point);
-    w.emit_e(m_extrusion_axis, m_extruder->extrude(dE).second);
+    w.emit_e(m_extrusion_axis, record_emitted_e(m_extruder->extrude(dE).second));
     w.emit_comment(this->config.gcode_comments, comment);
     return w.string();
 }
@@ -484,7 +492,7 @@ std::string GCodeWriter::extrude_to_xyz(const Vec3d &point, double dE, const std
 
     GCodeG1Formatter w;
     w.emit_xyz(point);
-    w.emit_e(m_extrusion_axis, m_extruder->extrude(dE).second);
+    w.emit_e(m_extrusion_axis, record_emitted_e(m_extruder->extrude(dE).second));
     w.emit_comment(this->config.gcode_comments, comment);
     return w.string();
 }
@@ -505,7 +513,7 @@ std::string GCodeWriter::extrude_to_xy_G2G3IJ(const Vec2d &point, const Vec2d &i
     GCodeG2G3Formatter w(ccw);
     w.emit_xy(point);
     w.emit_ij(ij);
-    w.emit_e(m_extrusion_axis, m_extruder->extrude(dE).second);
+    w.emit_e(m_extrusion_axis, record_emitted_e(m_extruder->extrude(dE).second));
     w.emit_comment(this->config.gcode_comments, comment);
     return w.string();
 }
@@ -570,7 +578,7 @@ std::string GCodeWriter::_retract(double length, double restart_extra, const std
         else if (!m_extrusion_axis.empty())
         {
             GCodeG1Formatter w;
-            w.emit_e(m_extrusion_axis, emitE);
+            w.emit_e(m_extrusion_axis, record_emitted_e(emitE));
             w.emit_f(m_extruder->retract_speed() * 60.);
             w.emit_comment(this->config.gcode_comments, comment);
             gcode = w.string();
@@ -601,7 +609,7 @@ std::string GCodeWriter::unretract()
         {
             // use G1 instead of G0 because G0 will blend the restart with the previous travel move
             GCodeG1Formatter w;
-            w.emit_e(m_extrusion_axis, emitE);
+            w.emit_e(m_extrusion_axis, record_emitted_e(emitE));
             w.emit_f(m_extruder->deretract_speed() * 60.);
             w.emit_comment(this->config.gcode_comments, " ; unretract");
             gcode += w.string();
@@ -614,6 +622,39 @@ std::string GCodeWriter::unretract()
 void GCodeWriter::update_position(const Vec3d &new_pos)
 {
     m_pos = new_pos;
+}
+
+double GCodeWriter::record_emitted_e(double value)
+{
+    if (!m_extrusion_axis.empty())
+        m_emitted_e_positions.at(m_extruder->id()) = GCodeFormatter::emitted_e_value(value);
+    // Keep the original value going into the formatter: bookkeeping must not
+    // change extrusion output, including its minimum-quantum behavior.
+    return value;
+}
+
+double GCodeWriter::preview_extrusion_volume(double dE) const
+{
+    if (m_extrusion_axis.empty())
+        return 0.;
+    const double next_position = GCodeFormatter::quantize_e(dE) +
+        (config.use_relative_e_distances ? 0. : m_extruder->position());
+    const double emitted_word = GCodeFormatter::emitted_e_value(next_position);
+    const double emitted_delta = emitted_word -
+        (config.use_relative_e_distances ? 0. : m_emitted_e_positions.at(m_extruder->id()));
+    return emitted_delta * (config.use_volumetric_e ? 1. : m_extruder->filament_crossection());
+}
+
+void GCodeWriter::update_extrusion_position(unsigned int extruder_id, double position)
+{
+    auto it = std::find_if(m_extruders.begin(), m_extruders.end(),
+        [extruder_id](const Extruder &e) { return e.id() == extruder_id; });
+    if (it == m_extruders.end())
+        throw std::invalid_argument("Unknown extruder in custom G-code position update");
+    it->set_position(position);
+    // The custom-script contract supplies the final emitted coordinate, not an
+    // extrusion request: G92 E0 must remain zero here.
+    m_emitted_e_positions.at(extruder_id) = position;
 }
 
 std::string GCodeWriter::set_fan(const GCodeFlavor gcode_flavor, bool gcode_comments, unsigned int speed)

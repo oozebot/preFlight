@@ -71,6 +71,9 @@ PressureEqualizer::PressureEqualizer(const Slic3r::GCodeConfig &config)
         double a = 0.25f * M_PI * r * r;
         m_filament_crossections.push_back(float(a));
     }
+    for (size_t tool = 0; tool < config.filament_diameter.values.size(); ++tool)
+        m_interlocking_flow_limited.push_back(config.max_volumetric_flow.value > 0. ||
+                                             config.filament_max_volumetric_flow.get_at(tool) > 0.);
 
     // Volumetric rate of a 0.45mm x 0.2mm extrusion at 60mm/s XY movement: 0.45*0.2*60*60=5.4*60 = 324 mm^3/min
     // Volumetric rate of a 0.45mm x 0.2mm extrusion at 20mm/s XY movement: 0.45*0.2*20*60=1.8*60 = 108 mm^3/min
@@ -606,6 +609,40 @@ void PressureEqualizer::GCodeLine::update_end_position(const float *position_sta
 void PressureEqualizer::output_gcode_line(const size_t line_idx)
 {
     GCodeLine &line = m_gcode_lines[line_idx];
+    if (line.type == GCODELINETYPE_EXTRUDE &&
+        line.extrusion_role == GCodeExtrusionRole::InterlockingPerimeter &&
+        m_interlocking_flow_limited.at(line.extruder_id))
+    {
+        // The cap was computed from the generator's emitted E and XYZ, not the
+        // float positions used here. Reformatting or subdividing this line can
+        // change its volume/length ratio. Smooth its whole-segment feed only,
+        // preserving the original coordinate words (also for absolute E).
+        // Neither the legacy F60 floor nor rounding may raise the capped feed.
+        const float requested = line.modified ? line.feedrate() * line.volumetric_correction_avg() : line.feedrate();
+        const float feed = std::floor(std::min(line.feedrate(), std::max(1.f, requested)));
+        if (!std::isfinite(feed) || feed < 1.f)
+            throw Slic3r::RuntimeError("Invalid capped interlocking feed in PressureEqualizer");
+
+        std::string raw(line.raw.data(), line.raw_length);
+        // Move any inline F to the separate adjustment block below. Do not
+        // touch comments, E, XYZ or their original decimal representation.
+        for (const char *p = raw.c_str(); !is_eol(*p); ++p)
+            if (*p == 'F' && p != raw.c_str() && is_ws(p[-1])) {
+                const char *end = p + 1;
+                parse_float(end, raw.c_str() + raw.size() - end);
+                raw.erase(size_t(p - raw.c_str()), size_t(end - p));
+                break;
+            }
+        // Reassert even an unmodified segment's feed: the preceding modified
+        // line may have left a different modal F. Cooling sees constant-F blocks.
+        push_to_output(EXTRUDE_END_TAG, true);
+        GCodeG1Formatter formatter;
+        formatter.emit_f(feed);
+        formatter.emit_string(EXTRUDE_SET_SPEED_TAG);
+        push_to_output(formatter);
+        push_to_output(raw, true);
+        return;
+    }
     if (!line.modified)
     {
         push_to_output(line.raw.data(), line.raw_length, true);
