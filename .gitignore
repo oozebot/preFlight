@@ -3,3 +3,5 @@
 /build_debug/
 deps/build/
 deps/destdir/
+deps/build*/
+deps/.pkg_cache/
