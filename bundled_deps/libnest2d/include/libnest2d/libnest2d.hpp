@@ -7,8 +7,8 @@
 #include <libnest2d/backends/clipper/geometries.hpp>
 #endif
 
-#ifdef LIBNEST2D_GEOMETRIES_libslic3r
-#include <libnest2d/backends/libslic3r/geometries.hpp>
+#ifdef LIBNEST2D_GEOMETRIES_luminary
+#include <libnest2d/backends/luminary/geometries.hpp>
 #endif
 
 #ifdef LIBNEST2D_OPTIMIZER_nlopt

@@ -1,0 +1,157 @@
+///|/ Copyright (c) preFlight 2025+ oozeBot, LLC
+///|/ Copyright (c) Prusa Research 2023 Vojtěch Bubník @bubnikv, Pavel Mikuš @Godrak
+///|/
+///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
+///|/
+#pragma once
+
+#include <oneapi/tbb/scalable_allocator.h>
+#include <oneapi/tbb/spin_mutex.h>
+// for Luminary::deque
+#include "luminary/core/Prelude.hpp"
+#include "luminary/geometry/clipper/ClipperUtils.hpp"
+#include "luminary/geometry/contours/Polygon.hpp"
+
+namespace Luminary::FFFSupport
+{
+
+// Support layer type to be used by SupportGeneratorLayer. This type carries a much more detailed information
+// about the support layer type than the final support layers stored in a PrintObject.
+enum class SupporLayerType
+{
+    Unknown = 0,
+    // Ratft base layer, to be printed with the support material.
+    RaftBase,
+    // Raft interface layer, to be printed with the support interface material.
+    RaftInterface,
+    // Bottom contact layer placed over a top surface of an object. To be printed with a support interface material.
+    BottomContact,
+    // Dense interface layer, to be printed with the support interface material.
+    // This layer is separated from an object by an BottomContact layer.
+    BottomInterface,
+    // Sparse base support layer, to be printed with a support material.
+    Base,
+    // Gap transition layer - sparse like Base but with reduced height to create gap below interface.
+    // These layers sync to object Z heights but absorb the gap by reducing height.
+    GapTransition,
+    // Dense interface layer, to be printed with the support interface material.
+    // This layer is separated from an object with TopContact layer.
+    TopInterface,
+    // Top contact layer directly supporting an overhang. To be printed with a support interface material.
+    TopContact,
+    // Some undecided type yet. It will turn into Base first, then it may turn into BottomInterface or TopInterface.
+    Intermediate,
+};
+
+// A support layer type used internally by the SupportMaterial class. This class carries a much more detailed
+// information about the support layer than the layers stored in the PrintObject, mainly
+// the interface gaps between the object and the support.
+class SupportGeneratorLayer
+{
+public:
+    void reset() { *this = SupportGeneratorLayer(); }
+
+    bool operator==(const SupportGeneratorLayer &layer2) const
+    {
+        return print_z == layer2.print_z && height == layer2.height;
+    }
+
+    // Order the layers by lexicographically by an increasing print_z and a decreasing layer height.
+    bool operator<(const SupportGeneratorLayer &layer2) const
+    {
+        if (print_z < layer2.print_z)
+            return true;
+        else if (print_z == layer2.print_z)
+            return height > layer2.height;
+        else
+            return false;
+    }
+
+    void merge(SupportGeneratorLayer &&rhs)
+    {
+        // The union_() does not support move semantic yet, but maybe one day it will.
+        this->polygons = union_(this->polygons, std::move(rhs.polygons));
+        auto merge = [](std::unique_ptr<Polygons> &dst, std::unique_ptr<Polygons> &src)
+        {
+            if (!dst || dst->empty())
+                dst = std::move(src);
+            else if (src && !src->empty())
+                *dst = union_(*dst, std::move(*src));
+        };
+        merge(this->contact_polygons, rhs.contact_polygons);
+        merge(this->overhang_polygons, rhs.overhang_polygons);
+        merge(this->enforcer_polygons, rhs.enforcer_polygons);
+        merge(this->snug_enforcer_polygons, rhs.snug_enforcer_polygons);
+        merge(this->grid_enforcer_polygons, rhs.grid_enforcer_polygons);
+        rhs.reset();
+    }
+
+    // Bottom of the extruded layer; above bottom_z by the object to support gap where one applies.
+    coordf_t bottom_print_z() const { return print_z - height; }
+
+    // To sort the extremes of top / bottom interface layers.
+    coordf_t extreme_z() const
+    {
+        return (this->layer_type == SupporLayerType::TopContact) ? this->bottom_z : this->print_z;
+    }
+
+    SupporLayerType layer_type{SupporLayerType::Unknown};
+    // Z used for printing, in unscaled coordinates.
+    coordf_t print_z{0};
+    // Bottom Z of this layer. For soluble layers, bottom_z + height = print_z,
+    // otherwise bottom_z + gap + height = print_z.
+    coordf_t bottom_z{0};
+    // Layer height in unscaled coordinates.
+    coordf_t height{0};
+    // Index of a PrintObject layer_id supported by this layer. This will be set for top contact layers.
+    // If this is not a contact layer, it will be set to size_t(-1).
+    size_t idx_object_layer_above{size_t(-1)};
+    // Index of a PrintObject layer_id, which supports this layer. This will be set for bottom contact layers.
+    // If this is not a contact layer, it will be set to size_t(-1).
+    size_t idx_object_layer_below{size_t(-1)};
+
+    // Polygons to be filled by the support pattern.
+    Polygons polygons;
+    // Currently for the contact layers only.
+    std::unique_ptr<Polygons> contact_polygons;
+    std::unique_ptr<Polygons> overhang_polygons;
+    // Enforcers need to be propagated independently in case the "support on build plate only" option is enabled.
+    std::unique_ptr<Polygons> enforcer_polygons;
+    // Snug-style enforcers need closing+smoothing during propagation
+    std::unique_ptr<Polygons> snug_enforcer_polygons;
+    // Grid-style enforcers need grid rasterization during propagation
+    std::unique_ptr<Polygons> grid_enforcer_polygons;
+};
+
+// Layers are allocated and owned by a deque. Once a layer is allocated, it is maintained
+// up to the end of a generate() method. The layer storage may be replaced by an allocator class in the future,
+// which would allocate layers by multiple chunks.
+class SupportGeneratorLayerStorage
+{
+public:
+    SupportGeneratorLayer &allocate_unguarded(SupporLayerType layer_type)
+    {
+        m_storage.emplace_back();
+        m_storage.back().layer_type = layer_type;
+        return m_storage.back();
+    }
+
+    SupportGeneratorLayer &allocate(SupporLayerType layer_type)
+    {
+        m_mutex.lock();
+        m_storage.emplace_back();
+        SupportGeneratorLayer *layer_new = &m_storage.back();
+        m_mutex.unlock();
+        layer_new->layer_type = layer_type;
+        return *layer_new;
+    }
+
+private:
+    template<typename BaseType>
+    using Allocator = tbb::scalable_allocator<BaseType>;
+    Luminary::deque<SupportGeneratorLayer, Allocator<SupportGeneratorLayer>> m_storage;
+    tbb::spin_mutex m_mutex;
+};
+using SupportGeneratorLayersPtr = std::vector<SupportGeneratorLayer *>;
+
+} // namespace Luminary::FFFSupport

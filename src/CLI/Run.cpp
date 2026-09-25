@@ -4,13 +4,18 @@
 ///|/
 #include "../preFlight.hpp"
 #include "CLI.hpp"
-#include "libslic3r/DebugOutput.hpp"
+#include "luminary/core/diagnostics/DebugOutput.hpp"
+#include "luminary/core/Prelude.hpp"
 
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
+#include <utility>
 
-namespace Slic3r::CLI
+#include <boost/nowide/iostream.hpp>
+
+namespace Luminary::CLI
 {
 
 // Parse --debug <comma-list|all> into the global debug mask. Unknown category
@@ -19,7 +24,14 @@ namespace Slic3r::CLI
 static bool apply_debug_flags(const Data &cli)
 {
     if (!cli.misc_config.has("debug"))
+    {
+        if (cli.misc_config.has("debug-z") || cli.misc_config.has("debug-geom"))
+        {
+            std::fprintf(stderr, "--debug-z and --debug-geom need --debug <categories>.\n");
+            return false;
+        }
         return true;
+    }
 
     const std::string spec = cli.misc_config.opt_string("debug");
     uint32_t mask = 0;
@@ -60,6 +72,50 @@ static bool apply_debug_flags(const Data &cli)
 
     g_debug_mask = mask;
     g_dbg_flusher.start(); // flush stdout on a cadence so redirected output lands live
+
+    // --debug-z a[-b]: keep only the lines stamped inside that z window (z == 0 lines are
+    // run-scoped and always pass). A single value is one exact z; callers widen as needed.
+    if (cli.misc_config.has("debug-z"))
+    {
+        const std::string zspec = cli.misc_config.opt_string("debug-z");
+        char *end = nullptr;
+        double a = std::strtod(zspec.c_str(), &end);
+        double b = a;
+        if (end == zspec.c_str())
+        {
+            std::fprintf(stderr, "--debug-z expects <z> or <z_min>-<z_max>, got '%s'.\n", zspec.c_str());
+            return false;
+        }
+        if (*end == '-')
+        {
+            char *end2 = nullptr;
+            b = std::strtod(end + 1, &end2);
+            if (end2 == end + 1)
+            {
+                std::fprintf(stderr, "--debug-z expects <z> or <z_min>-<z_max>, got '%s'.\n", zspec.c_str());
+                return false;
+            }
+            end = end2;
+        }
+        if (*end != '\0')
+        {
+            // Trailing text would otherwise pass silently as the single value parsed so far.
+            std::fprintf(stderr, "--debug-z expects <z> or <z_min>-<z_max>, got '%s'.\n", zspec.c_str());
+            return false;
+        }
+        if (b < a)
+            std::swap(a, b);
+        g_debug_z_min = a;
+        g_debug_z_max = b;
+    }
+
+    // Schema line first, so a parser can refuse an unknown major version before reading
+    // counters or geometry.
+    // counters_end=1 announces that every [COUNTER] block ends with an _END row-count line.
+    dbg_log(DBG_ALL, 0., "META", "schema=2 build=%s categories=%s counters_end=1", PREFLIGHT_VERSION,
+            debug_category_list(mask).c_str());
+    if (cli.misc_config.has("debug-z"))
+        dbg_log(DBG_ALL, 0., "META", "z_window=%.3f-%.3f", g_debug_z_min, g_debug_z_max);
     return true;
 }
 
@@ -76,12 +132,22 @@ int run(int argc, char **argv)
         return 1;
 
     bool start_gui = cli.empty() || (cli.actions_config.empty() && !cli.transform_config.has("cut"));
+
+    // The geometry sidecar is written next to a CLI gcode export; the GUI has no export path
+    // to attach it to, so the flag is reported and ignored there.
+    if (cli.misc_config.has("debug-geom") && cli.misc_config.opt_bool("debug-geom"))
+    {
+        if (start_gui)
+            std::fprintf(stderr, "--debug-geom: the geometry sidecar requires a CLI export (-g); ignored.\n");
+        else
+            g_debug_geom = true;
+    }
     PrinterTechnology printer_technology = get_printer_technology(cli.overrides_config);
     DynamicPrintConfig print_config = {};
     std::vector<Model> models;
 
-#ifdef SLIC3R_GUI
-    GUI::GUI_InitParams gui_params;
+#ifdef PREFLIGHT_GUI
+    DSKY::GUI_InitParams gui_params;
     start_gui |= init_gui_params(gui_params, argc, argv, cli);
 
     if (gui_params.start_as_gcodeviewer)
@@ -90,6 +156,11 @@ int run(int argc, char **argv)
 
     if (!load_print_data(models, print_config, printer_technology, cli))
         return 1;
+
+    // A console run whose every input file was empty has no model to act on. The actions still run
+    // (one that needs no model, such as saving the config, is unaffected); only the exit code says
+    // so. The GUI opens on such a project as before, so this never applies when a window starts.
+    const bool no_model_input = !start_gui && models.empty() && cli.empty_input_files > 0;
 
     if (!start_gui && is_needed_post_processing(print_config))
         return 0;
@@ -102,7 +173,7 @@ int run(int argc, char **argv)
 
     if (start_gui)
     {
-#ifdef SLIC3R_GUI
+#ifdef PREFLIGHT_GUI
         return start_gui_with_params(gui_params);
 #else
         // No GUI support. Just print out a help.
@@ -112,7 +183,13 @@ int run(int argc, char **argv)
 #endif
     }
 
+    if (no_model_input)
+    {
+        boost::nowide::cerr << "Error: no input file holds a model." << std::endl;
+        return 1;
+    }
+
     return 0;
 }
 
-} // namespace Slic3r::CLI
+} // namespace Luminary::CLI

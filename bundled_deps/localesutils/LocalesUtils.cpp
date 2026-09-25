@@ -1,6 +1,7 @@
+///|/ Copyright (c) preFlight 2025+ oozeBot, LLC
 ///|/ Copyright (c) Prusa Research 2021 - 2022 Tomáš Mészáros @tamasmeszaros, Lukáš Hejl @hejllukas, Vojtěch Bubník @bubnikv, Lukáš Matěna @lukasmatena
 ///|/
-///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
 ///|/
 #include "LocalesUtils.hpp"
 
@@ -13,7 +14,7 @@
 #include <fast_float.h>
 
 
-namespace Slic3r {
+namespace Luminary {
 
 
 CNumericLocalesSetter::CNumericLocalesSetter()
@@ -100,5 +101,5 @@ std::string float_to_string_decimal_point(double value, int precision/* = -1*/)
 }
 
 
-} // namespace Slic3r
+} // namespace Luminary
 

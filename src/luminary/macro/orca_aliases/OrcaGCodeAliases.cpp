@@ -1,0 +1,135 @@
+///|/ Copyright (c) preFlight 2025+ oozeBot, LLC
+///|/
+///|/ Released under AGPLv3 or higher
+///|/
+#include "OrcaGCodeAliases.hpp"
+
+namespace Luminary
+{
+
+const std::unordered_map<std::string, std::string> &orca_gcode_aliases()
+{
+    // clang-format off
+    static const std::unordered_map<std::string, std::string> aliases = {
+        // --- Printer setting renames ---
+        {"printable_height",                    "max_print_height"},
+        {"machine_start_gcode",                 "start_gcode"},
+        {"machine_end_gcode",                   "end_gcode"},
+        {"before_layer_change_gcode",           "before_layer_gcode"},
+        {"layer_change_gcode",                  "layer_gcode"},
+        {"change_filament_gcode",               "toolchange_gcode"},
+        {"retraction_length",                   "retract_length"},
+        {"retraction_speed",                    "retract_speed"},
+        {"retraction_minimum_travel",           "retract_before_travel"},
+        {"z_hop",                               "retract_lift"},
+        {"wipe_distance",                       "wipe_length"},
+        {"deretraction_speed",                  "deretract_speed"},
+        {"machine_max_speed_x",                 "machine_max_feedrate_x"},
+        {"machine_max_speed_y",                 "machine_max_feedrate_y"},
+        {"machine_max_speed_z",                 "machine_max_feedrate_z"},
+        {"machine_max_speed_e",                 "machine_max_feedrate_e"},
+        {"retract_when_changing_layer",         "retract_layer_change"},
+        {"extruder_clearance_height_to_rod",    "extruder_clearance_height"},
+        {"emit_machine_limits_to_gcode",        "machine_limits_usage"},
+
+        // --- Filament setting renames ---
+        {"filament_flow_ratio",                 "extrusion_multiplier"},
+        {"nozzle_temperature",                  "temperature"},
+        {"nozzle_temperature_initial_layer",    "first_layer_temperature"},
+        {"fan_min_speed",                       "min_fan_speed"},
+        {"fan_max_speed",                       "max_fan_speed"},
+        {"fan_cooling_layer_time",              "fan_below_layer_time"},
+        {"slow_down_layer_time",                "slowdown_below_layer_time"},
+        {"slow_down_min_speed",                 "min_print_speed"},
+        {"close_fan_the_first_x_layers",        "disable_fan_first_layers"},
+        {"overhang_fan_speed",                  "bridge_fan_speed"},
+        {"filament_start_gcode",                "start_filament_gcode"},
+        {"filament_end_gcode",                  "end_filament_gcode"},
+        {"filament_retraction_length",          "filament_retract_length"},
+        {"filament_retraction_speed",           "filament_retract_speed"},
+        {"filament_deretraction_speed",         "filament_deretract_speed"},
+        {"filament_z_hop",                      "filament_retract_lift"},
+        {"filament_retract_when_changing_layer", "filament_retract_layer_change"},
+        {"filament_retraction_minimum_travel",  "filament_retract_before_travel"},
+        {"filament_wipe_distance",              "filament_wipe_length"},
+        {"default_filament_colour",             "filament_colour"},
+
+        // --- Process/print setting renames ---
+        {"initial_layer_print_height",          "first_layer_height"},
+        {"wall_loops",                          "perimeters"},
+        {"top_shell_layers",                    "top_solid_layers"},
+        {"bottom_shell_layers",                 "bottom_solid_layers"},
+        {"top_shell_thickness",                 "top_solid_min_thickness"},
+        {"bottom_shell_thickness",              "bottom_solid_min_thickness"},
+        {"sparse_infill_density",               "fill_density"},
+        {"inner_wall_line_width",               "perimeter_extrusion_width"},
+        {"outer_wall_line_width",               "external_perimeter_extrusion_width"},
+        {"top_surface_line_width",              "top_infill_extrusion_width"},
+        {"sparse_infill_line_width",            "infill_extrusion_width"},
+        {"internal_solid_infill_line_width",    "solid_infill_extrusion_width"},
+        {"support_line_width",                  "support_material_extrusion_width"},
+        {"initial_layer_line_width",            "first_layer_extrusion_width"},
+        {"inner_wall_speed",                    "perimeter_speed"},
+        {"outer_wall_speed",                    "external_perimeter_speed"},
+        {"sparse_infill_speed",                 "infill_speed"},
+        {"internal_solid_infill_speed",         "solid_infill_speed"},
+        {"top_surface_speed",                   "top_solid_infill_speed"},
+        {"gap_infill_speed",                    "gap_fill_speed"},
+        {"initial_layer_speed",                 "first_layer_speed"},
+        {"initial_layer_infill_speed",          "first_layer_infill_speed"},
+        {"internal_bridge_speed",               "over_bridge_speed"},
+        {"enable_support",                      "support_material"},
+        {"support_threshold_angle",             "support_material_threshold"},
+        {"support_on_build_plate_only",         "support_material_buildplate_only"},
+        {"support_base_pattern",                "support_material_pattern"},
+        {"support_interface_pattern",           "support_material_interface_pattern"},
+        {"support_interface_top_layers",        "support_material_interface_layers"},
+        {"support_interface_bottom_layers",     "support_material_bottom_interface_layers"},
+        {"support_object_xy_distance",          "support_material_xy_spacing"},
+        {"brim_object_gap",                     "brim_separation"},
+        {"skirt_loops",                         "skirts"},
+        {"ironing_flow",                        "ironing_flowrate"},
+        {"enable_prime_tower",                  "wipe_tower"},
+        {"prime_tower_width",                   "wipe_tower_width"},
+        {"prime_tower_brim_width",              "wipe_tower_brim_width"},
+        {"flush_into_infill",                   "wipe_into_infill"},
+        {"xy_contour_compensation",             "xy_size_compensation"},
+        {"reduce_infill_retraction",            "only_retract_when_crossing_perimeters"},
+        {"spiral_mode",                         "spiral_vase"},
+        {"enable_overhang_speed",               "enable_dynamic_overhang_speeds"},
+        {"bridge_flow",                         "bridge_flow_ratio"},
+        {"line_width",                          "extrusion_width"},
+        {"filename_format",                     "output_filename_format"},
+        {"support_speed",                       "support_material_speed"},
+        {"initial_layer_acceleration",          "first_layer_acceleration"},
+        {"inner_wall_acceleration",             "perimeter_acceleration"},
+        {"outer_wall_acceleration",             "external_perimeter_acceleration"},
+        {"sparse_infill_acceleration",          "infill_acceleration"},
+        {"internal_solid_infill_acceleration",  "solid_infill_acceleration"},
+        {"top_surface_acceleration",            "top_solid_infill_acceleration"},
+        {"overhang_1_4_speed",                  "overhang_speed_3"},
+        {"overhang_2_4_speed",                  "overhang_speed_2"},
+        {"overhang_3_4_speed",                  "overhang_speed_1"},
+        {"overhang_4_4_speed",                  "overhang_speed_0"},
+        {"tree_support_branch_angle",           "support_tree_angle"},
+        {"tree_support_branch_diameter",        "support_tree_branch_diameter"},
+        {"sparse_infill_pattern",               "fill_pattern"},
+        {"top_surface_pattern",                 "top_fill_pattern"},
+        {"bottom_surface_pattern",              "bottom_fill_pattern"},
+        {"support_style",                       "support_material_style"},
+        {"support_type",                        "support_material_style"},
+        {"wall_sequence",                       "external_perimeters_first"},
+        {"print_sequence",                      "complete_objects"},
+        {"only_one_wall_top",                   "top_one_perimeter_type"},
+        {"wall_generator",                      "perimeter_generator"},
+
+        // --- G-code placeholder aliases (not config keys, but used in Orca custom G-code) ---
+        {"bed_temperature_initial_layer_single", "first_layer_bed_temperature"},
+        {"bed_temperature_initial_layer",        "first_layer_bed_temperature"},
+        {"overall_chamber_temperature",          "chamber_temperature"},
+    };
+    // clang-format on
+    return aliases;
+}
+
+} // namespace Luminary

@@ -16,7 +16,7 @@
 #include <shellapi.h>
 #include <wchar.h>
 
-#ifdef SLIC3R_GUI
+#ifdef PREFLIGHT_GUI
 extern "C"
 {
     // Let the NVIDIA and AMD know we want to use their graphics card
@@ -24,14 +24,14 @@ extern "C"
     __declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;
     __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 }
-#endif /* SLIC3R_GUI */
+#endif /* PREFLIGHT_GUI */
 
 #include <stdlib.h>
 #include <stdio.h>
 
-#ifdef SLIC3R_GUI
+#ifdef PREFLIGHT_GUI
 #include <GL/GL.h>
-#endif /* SLIC3R_GUI */
+#endif /* PREFLIGHT_GUI */
 
 #include <string>
 #include <vector>
@@ -41,7 +41,7 @@ extern "C"
 
 #include <stdio.h>
 
-#ifdef SLIC3R_GUI
+#ifdef PREFLIGHT_GUI
 class OpenGLVersionCheck
 {
 public:
@@ -232,17 +232,17 @@ protected:
 };
 
 bool OpenGLVersionCheck::message_pump_exit = false;
-#endif /* SLIC3R_GUI */
+#endif /* PREFLIGHT_GUI */
 
 extern "C"
 {
-    typedef int(__stdcall *Slic3rMainFunc)(int argc, wchar_t **argv);
-    Slic3rMainFunc slic3r_main = nullptr;
+    typedef int(__stdcall *PreFlightMainFunc)(int argc, wchar_t **argv);
+    PreFlightMainFunc preflight_main = nullptr;
 }
 
 extern "C"
 {
-#ifdef SLIC3R_WRAPPER_NOCONSOLE
+#ifdef PREFLIGHT_WRAPPER_NOCONSOLE
     int APIENTRY wWinMain(HINSTANCE /* hInstance */, HINSTANCE /* hPrevInstance */, PWSTR /* lpCmdLine */,
                           int /* nCmdShow */)
     {
@@ -260,29 +260,29 @@ extern "C"
         std::vector<wchar_t *> argv_extended;
         argv_extended.emplace_back(argv[0]);
 
-#ifdef SLIC3R_WRAPPER_GCODEVIEWER
+#ifdef PREFLIGHT_WRAPPER_GCODEVIEWER
         wchar_t gcodeviewer_param[] = L"--gcodeviewer";
         argv_extended.emplace_back(gcodeviewer_param);
-#endif /* SLIC3R_WRAPPER_GCODEVIEWER */
+#endif /* PREFLIGHT_WRAPPER_GCODEVIEWER */
 
-#ifdef SLIC3R_GUI
+#ifdef PREFLIGHT_GUI
         // Here one may push some additional parameters based on the wrapper type.
         bool force_mesa = false;
         bool force_hw = false;
-#endif /* SLIC3R_GUI */
+#endif /* PREFLIGHT_GUI */
         for (int i = 1; i < argc; ++i)
         {
-#ifdef SLIC3R_GUI
+#ifdef PREFLIGHT_GUI
             if (wcscmp(argv[i], L"--sw-renderer") == 0)
                 force_mesa = true;
             else if (wcscmp(argv[i], L"--no-sw-renderer") == 0)
                 force_hw = true;
-#endif /* SLIC3R_GUI */
+#endif /* PREFLIGHT_GUI */
             argv_extended.emplace_back(argv[i]);
         }
         argv_extended.emplace_back(nullptr);
 
-#ifdef SLIC3R_GUI
+#ifdef PREFLIGHT_GUI
         OpenGLVersionCheck opengl_version_check;
         bool load_mesa =
             // Forced from the command line.
@@ -292,7 +292,7 @@ extern "C"
             (::GetSystemMetrics(SM_REMOTESESSION) && !force_hw) ||
             // Try to load the default OpenGL driver and test its context version.
             !opengl_version_check.load_opengl_dll() || !opengl_version_check.is_version_greater_or_equal_to(3, 2);
-#endif /* SLIC3R_GUI */
+#endif /* PREFLIGHT_GUI */
 
         wchar_t path_to_exe[MAX_PATH + 1] = {0};
         ::GetModuleFileNameW(nullptr, path_to_exe, MAX_PATH);
@@ -303,7 +303,7 @@ extern "C"
         _wsplitpath(path_to_exe, drive, dir, fname, ext);
         _wmakepath(path_to_exe, drive, dir, nullptr, nullptr);
 
-#ifdef SLIC3R_GUI
+#ifdef PREFLIGHT_GUI
         // https://wiki.qt.io/Cross_compiling_Mesa_for_Windows
         // http://download.qt.io/development_releases/prebuilt/llvmpipe/windows/
         if (load_mesa)
@@ -330,35 +330,35 @@ extern "C"
                     printf("MESA OpenGL library was loaded sucessfully\n");
             }
         }
-#endif /* SLIC3R_GUI */
+#endif /* PREFLIGHT_GUI */
 
-        wchar_t path_to_slic3r[MAX_PATH + 1] = {0};
-        wcscpy(path_to_slic3r, path_to_exe);
-        wcscat(path_to_slic3r, L"preFlight.dll");
-        //	printf("Loading Slic3r library: %S\n", path_to_slic3r);
-        HINSTANCE hInstance_Slic3r = LoadLibraryExW(path_to_slic3r, nullptr, 0);
-        if (hInstance_Slic3r == nullptr)
+        wchar_t path_to_preflight[MAX_PATH + 1] = {0};
+        wcscpy(path_to_preflight, path_to_exe);
+        wcscat(path_to_preflight, L"preFlight.dll");
+        //	printf("Loading preFlight library: %S\n", path_to_preflight);
+        HINSTANCE hInstance_preflight = LoadLibraryExW(path_to_preflight, nullptr, 0);
+        if (hInstance_preflight == nullptr)
         {
             printf("preFlight.dll was not loaded\n");
             return -1;
         }
 
         // resolve function address here
-        slic3r_main = (Slic3rMainFunc)
-            GetProcAddress(hInstance_Slic3r,
+        preflight_main = (PreFlightMainFunc)
+            GetProcAddress(hInstance_preflight,
 #ifdef _WIN64
                            // there is just a single calling conversion, therefore no mangling of the function name.
-                           "slic3r_main"
+                           "preflight_main"
 #else // stdcall calling convention declaration
-                           "_slic3r_main@8"
+                           "_preflight_main@8"
 #endif
             );
-        if (slic3r_main == nullptr)
+        if (preflight_main == nullptr)
         {
-            printf("could not locate the function slic3r_main in preFlight.dll\n");
+            printf("could not locate the function preflight_main in preFlight.dll\n");
             return -1;
         }
         // argc minus the trailing nullptr of the argv
-        return slic3r_main((int) argv_extended.size() - 1, argv_extended.data());
+        return preflight_main((int) argv_extended.size() - 1, argv_extended.data());
     }
 }

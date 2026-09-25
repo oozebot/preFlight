@@ -15,7 +15,7 @@
 #endif // NOMINMAX
 #include <Windows.h>
 #include <wchar.h>
-#ifdef SLIC3R_GUI
+#ifdef PREFLIGHT_GUI
 extern "C"
 {
     // Let the NVIDIA and AMD know we want to use their graphics card
@@ -23,7 +23,7 @@ extern "C"
     __declspec(dllexport) DWORD NvOptimusEnablement = 0x00000001;
     __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 }
-#endif /* SLIC3R_GUI */
+#endif /* PREFLIGHT_GUI */
 #endif /* WIN32 */
 
 #include <cstdio>
@@ -34,7 +34,7 @@ extern "C"
 
 #include <boost/nowide/args.hpp>
 
-#include "libslic3r/libslic3r.h"
+#include "luminary/core/Prelude.hpp"
 
 #include "preFlight.hpp"
 
@@ -43,7 +43,7 @@ extern "C"
 // Suppress known cosmetic GTK/GDK-CRITICAL assertions that fire when wxWidgets
 // operates on widgets before they are fully realized or after they are destroyed.
 // Must be installed via g_log_set_writer_func() before wxEntry() runs, because
-// GTK3 is compiled with G_LOG_USE_STRUCTURED — its g_critical() calls bypass
+// GTK3 is compiled with G_LOG_USE_STRUCTURED: its g_critical() calls bypass
 // g_log_set_handler() entirely and go through the structured logging writer.
 static GLogWriterOutput preflight_log_writer(GLogLevelFlags log_level, const GLogField *fields, gsize n_fields,
                                              gpointer /*user_data*/)
@@ -96,7 +96,7 @@ extern "C"
 }
 #endif
 
-#if defined(SLIC3R_UBSAN)
+#if defined(PREFLIGHT_UBSAN)
 extern "C"
 {
     // Enable printing stacktrace by default. It can be disabled by running preFlight with "UBSAN_OPTIONS=print_stacktrace=0".
@@ -110,7 +110,7 @@ extern "C"
 #if defined(_MSC_VER) || defined(__MINGW32__)
 extern "C"
 {
-    __declspec(dllexport) int __stdcall slic3r_main(int argc, wchar_t **argv)
+    __declspec(dllexport) int __stdcall preflight_main(int argc, wchar_t **argv)
     {
         // Convert wchar_t arguments to UTF8.
         std::vector<std::string> argv_narrow;
@@ -120,14 +120,14 @@ extern "C"
         for (size_t i = 0; i < argc; ++i)
             argv_ptrs[i] = argv_narrow[i].data();
         // Call the UTF8 main.
-        return Slic3r::CLI::run(argc, argv_ptrs.data());
+        return Luminary::CLI::run(argc, argv_ptrs.data());
     }
 }
 #else /* _MSC_VER */
 int main(int argc, char **argv)
 {
 #ifdef __linux__
-    // preFlight: Force dark GTK theme on Linux until light mode theming is fully reworked
+    // Force the dark GTK theme on Linux; light mode theming is not wired up there
     setenv("GTK_THEME", "Adwaita:dark", 0); // 0 = don't override if user explicitly sets it
 
     // Install structured log writer before wxWidgets initialization to suppress
@@ -137,6 +137,6 @@ int main(int argc, char **argv)
     g_log_set_writer_func(preflight_log_writer, nullptr, nullptr);
 #endif
 
-    return Slic3r::CLI::run(argc, argv);
+    return Luminary::CLI::run(argc, argv);
 }
 #endif /* _MSC_VER */

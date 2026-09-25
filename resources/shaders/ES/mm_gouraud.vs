@@ -4,9 +4,9 @@ uniform mat4 view_model_matrix;
 uniform mat4 projection_matrix;
 uniform mat4 volume_world_matrix;
 
-// Clipping plane, x = min z, y = max z. Used by the FFF and SLA previews to clip with a top / bottom plane.
+// Clipping plane, x = min z, y = max z. Used by the previews to clip with a top / bottom plane.
 uniform vec2 z_range;
-// Clipping plane - general orientation. Used by the SLA gizmo.
+// Clipping plane - general orientation. Used by the gizmos.
 uniform vec4 clipping_plane;
 
 attribute vec3 v_position;

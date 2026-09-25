@@ -14,6 +14,7 @@
 #   -flush    Force resource recompilation (Windows: icons, splash screen)
 #   -jobs N   Number of parallel build jobs (default: auto-detect)
 #   -arch A   Target architecture override (macOS: arm64/x86_64)
+#   -tests    Also build the unit test suite (tests/unit; run it with scripts/run_tests.sh)
 #
 # Examples:
 #   ./build.sh                Build release
@@ -35,6 +36,7 @@ BUILD_DEPS=0
 FLUSH=0
 JOBS=""
 ARCH=""
+TESTS=OFF
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
@@ -46,6 +48,7 @@ while [[ $# -gt 0 ]]; do
         -flush)   FLUSH=1 ;;
         -jobs)    JOBS="$2"; shift ;;
         -arch)    ARCH="$2"; shift ;;
+        -tests)   TESTS=ON ;;
         -h|-help|--help)
             sed -n '8,25p' "$0"
             exit 0
@@ -158,7 +161,7 @@ elif [[ $IS_MACOS -eq 1 ]]; then
 
 else
     # Linux
-    CMAKE_EXTRA_ARGS="-DSLIC3R_GTK=3"
+    CMAKE_EXTRA_ARGS="-DPREFLIGHT_GTK=3"
 fi
 
 # Find Python 3.14 (required for ABI compatibility with bundled runtime)
@@ -202,8 +205,9 @@ echo "** Running CMake with Ninja generator ..."
 cmake "$SCRIPT_DIR" -G Ninja \
     -DCMAKE_BUILD_TYPE="$CONFIG" \
     -DCMAKE_PREFIX_PATH="$DESTDIR" \
-    -DSLIC3R_STATIC=1 \
-    -DSLIC3R_PCH=1 \
+    -DPREFLIGHT_STATIC=1 \
+    -DPREFLIGHT_PCH=1 \
+    -DPREFLIGHT_BUILD_TESTS="$TESTS" \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
     $CMAKE_EXTRA_ARGS
 
@@ -223,9 +227,13 @@ ELAPSED=$(( SECONDS - START_TIME ))
 MINS=$(( ELAPSED / 60 ))
 SECS=$(( ELAPSED % 60 ))
 
-EXE_NAME="preFlight"
+# Windows places the binary in a per-config directory; Linux names it in lowercase.
 if [[ $IS_WINDOWS -eq 1 ]]; then
-    EXE_NAME="preFlight.exe"
+    EXE_NAME="$CONFIG/preFlight.exe"
+elif [[ $IS_MACOS -eq 1 ]]; then
+    EXE_NAME="preFlight"
+else
+    EXE_NAME="preflight"
 fi
 
 echo ""

@@ -42,8 +42,8 @@ if (MSVC)
         CONFIGURE_COMMAND ""
         BUILD_COMMAND     ""
         # Enable site imports so standalone python.exe can find site-packages.
-        # pip is NOT pre-installed; users bootstrap it themselves via the
-        # Python Console in Preferences (instructions provided in the UI).
+        # pip is not part of the embeddable package; the app build pre-installs it into its
+        # copy of this runtime (cmake/modules/DownloadGetPip.cmake).
         INSTALL_COMMAND ${CMAKE_COMMAND}
             -DPTH_FILE=${_py_destdir}/python${_py_ver_nodot}._pth
             -P ${CMAKE_CURRENT_LIST_DIR}/enable_site_imports.cmake

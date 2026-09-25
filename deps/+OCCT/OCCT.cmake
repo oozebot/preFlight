@@ -1,8 +1,6 @@
 add_cmake_project(OCCT
-	# Previous versions had chamfer triangulation bug (SPE-2257).
-	# Fix applied in OCCTWrapper.cpp: Angular deflection changed from 1.0 rad (57 deg)
-	# to FreeCAD's formula (~0.03 rad / 1.7 deg) which resolves the issue.
-	# See: ToDo/occt-upgrade-and-triangulation-fix.md for full analysis
+	# Earlier versions had a chamfer triangulation bug (SPE-2257). OCCTWrapper.cpp meshes with the
+	# deflections the caller passes (defaults 0.005 mm linear, 1.0 rad angular).
     URL https://github.com/Open-Cascade-SAS/OCCT/archive/refs/tags/V7_9_3.zip
 	URL_HASH SHA256=566a236b5a22e778dbe1c3dce6560ba12db4504bbdae0354c51dd2f4728756ee
 

@@ -1,0 +1,1797 @@
+///|/ Copyright (c) preFlight 2025+ oozeBot, LLC
+///|/ Copyright (c) 2022 Ultimaker B.V. - CuraEngine
+///|/
+///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
+///|/
+
+#include <algorithm> //For std::partition_copy and std::min_element.
+#include <limits>
+#include <memory>
+#include <cassert>
+#include <cinttypes>
+#include <cmath>
+
+#include "WallToolPaths.hpp"
+#include "luminary/walls/athena/skeleton/SkeletalTrapezoidation.hpp"
+#include "luminary/geometry/predicates/linearAlg2D.hpp"
+#include "luminary/walls/athena/spatial/SparseLineGrid.hpp"
+#include "luminary/geometry/transform/Geometry.hpp"
+#include "luminary/walls/athena/paths/PolylineStitcher.hpp"
+#include "luminary/geometry/clipper/ClipperUtils.hpp"
+#include "luminary/core/diagnostics/DebugCounters.hpp"
+#include "luminary/core/diagnostics/DebugOutput.hpp" // debug_enabled / DBG_PERIMETERS
+#include "luminary/walls/athena/beading/BeadingStrategy.hpp"
+#include "luminary/walls/athena/beading/BeadingStrategyFactory.hpp"
+#include "luminary/walls/athena/paths/ExtrusionJunction.hpp"
+#include "luminary/walls/athena/paths/ExtrusionLine.hpp"
+#include "luminary/geometry/index/athena/PolygonsPointIndex.hpp"
+#include "luminary/toolpath/flow/Flow.hpp"
+#include "luminary/geometry/primitives/Line.hpp"
+#include "luminary/geometry/contours/Polygon.hpp"
+#include "luminary/config/catalog/PrintConfig.hpp"
+#include "luminary/core/diagnostics/PerfTiming.hpp"
+
+//#define ATHENA_STITCH_PATCH_DEBUG
+
+namespace Luminary
+{
+extern PerfAccumTimer g_pg_wtp_prep, g_pg_voronoi, g_pg_beading, g_pg_inner_contour,
+    g_pg_thin_retry; // defined in PerimeterGenerator.cpp
+}
+
+namespace Luminary::Athena
+{
+
+WallToolPaths::WallToolPaths(const Polygons &outline, const coord_t bead_width_0, const coord_t bead_width_x,
+                             const size_t inset_count, const coord_t wall_0_inset, const coordf_t layer_height,
+                             const PrintObjectConfig &print_object_config, const PrintConfig &print_config,
+                             int layer_id, double min_bead_width_factor, coord_t max_perimeter_width)
+    : outline(outline)
+    , bead_width_0(bead_width_0)
+    , bead_width_x(bead_width_x)
+    , inset_count(inset_count)
+    , wall_0_inset(wall_0_inset)
+    , layer_height(layer_height)
+    , print_thin_walls(Luminary::Athena::fill_outline_gaps)
+    , min_feature_size(scaled<coord_t>(print_object_config.min_feature_size.value))
+    // Athena uses perimeter compression based on actual perimeter widths, not the Arachne min_bead_width setting
+    , min_bead_width(std::min(bead_width_0, bead_width_x)) // Use smaller of external/internal as base
+    , max_bead_width_external(0)                           // Initialized below from actual extrusion widths
+    , max_bead_width_internal(0)
+    , small_area_length(static_cast<double>(bead_width_0) / 2.)
+    , wall_transition_filter_deviation(scaled<coord_t>(print_object_config.wall_transition_filter_deviation.value))
+    , wall_transition_length(scaled<coord_t>(print_object_config.wall_transition_length.value))
+    , toolpaths_generated(false)
+    , print_object_config(print_object_config)
+    , fixed_width_external(0)
+    , fixed_width_internal(0)
+    , spacing_override_external(0)
+    , spacing_override_internal(0)
+    , spacing_override_innermost(0)
+    , debug_layer_id(layer_id)
+    , thin_wall_snap_precision(10000)
+    , m_original_inset_count(inset_count)
+{
+    assert(!print_config.nozzle_diameter.empty());
+    this->min_nozzle_diameter = float(
+        *std::min_element(print_config.nozzle_diameter.values.begin(), print_config.nozzle_diameter.values.end()));
+
+    if (const auto &min_feature_size_opt = print_object_config.min_feature_size; min_feature_size_opt.percent)
+        this->min_feature_size = scaled<coord_t>(min_feature_size_opt.value * 0.01 * this->min_nozzle_diameter);
+
+    // Athena's perimeter compression uses the configured perimeter widths as the base:
+    // - Off (factor=1.0): min = 100% of perimeter width (no compression)
+    // - Moderate (factor=0.66): min = 66% of perimeter width
+    // - Aggressive (factor=0.33): min = 33% of perimeter width
+    // Floor: nozzle_diameter/3 (33%) ensures printability
+    {
+        coord_t floor = scaled<coord_t>(this->min_nozzle_diameter / 3.0);
+        // Use the smaller of external/internal perimeter widths as base
+        coord_t base_width = std::min(bead_width_0, bead_width_x);
+
+        if (min_bead_width_factor < 1.0 && min_bead_width_factor > 0.0)
+        {
+            // Compression enabled: apply factor to gap-fill bead width only
+            coord_t target_min_bead = coord_t(double(base_width) * min_bead_width_factor);
+            this->min_bead_width = std::max(target_min_bead, floor);
+        }
+        else
+        {
+            // Compression disabled: use full perimeter width as minimum
+            this->min_bead_width = base_width;
+        }
+    }
+
+    // Configured width is the floor, max_perimeter_width is the ceiling
+    {
+        coord_t cap = (max_perimeter_width > 0) ? max_perimeter_width
+                                                : scaled<coord_t>(this->min_nozzle_diameter * 1.5);
+        this->max_bead_width_external = std::max(bead_width_0, cap);
+        this->max_bead_width_internal = std::max(bead_width_x, cap);
+    }
+
+    if (const auto &wall_transition_filter_deviation_opt = print_object_config.wall_transition_filter_deviation;
+        wall_transition_filter_deviation_opt.percent)
+        this->wall_transition_filter_deviation = scaled<coord_t>(wall_transition_filter_deviation_opt.value * 0.01 *
+                                                                 this->min_nozzle_diameter);
+
+    if (const auto &wall_transition_length_opt = print_object_config.wall_transition_length;
+        wall_transition_length_opt.percent)
+        this->wall_transition_length = scaled<coord_t>(wall_transition_length_opt.value * 0.01 *
+                                                       this->min_nozzle_diameter);
+}
+
+WallToolPaths::WallToolPaths(const Polygons &outline, const coord_t bead_width_0, const coord_t bead_width_x,
+                             const size_t inset_count, const coord_t wall_0_inset, const coordf_t layer_height,
+                             const PrintObjectConfig &print_object_config, const PrintConfig &print_config,
+                             coord_t fixed_width_0, coord_t fixed_width_x, coord_t spacing_0, coord_t spacing_x,
+                             coord_t spacing_innermost, int layer_id, double min_bead_width_factor,
+                             coord_t thin_wall_snap_precision, coord_t max_perimeter_width)
+    : outline(outline)
+    , bead_width_0(bead_width_0)
+    , bead_width_x(bead_width_x)
+    , inset_count(inset_count)
+    , wall_0_inset(wall_0_inset)
+    , layer_height(layer_height)
+    , print_thin_walls(Luminary::Athena::fill_outline_gaps)
+    , min_feature_size(scaled<coord_t>(print_object_config.min_feature_size.value))
+    // Athena uses perimeter compression based on actual perimeter widths, not the Arachne min_bead_width setting
+    , min_bead_width(std::min(bead_width_0, bead_width_x)) // Use smaller of external/internal as base
+    , max_bead_width_external(0)                           // Initialized below from actual extrusion widths
+    , max_bead_width_internal(0)
+    , small_area_length(static_cast<double>(bead_width_0) / 2.)
+    , wall_transition_filter_deviation(scaled<coord_t>(print_object_config.wall_transition_filter_deviation.value))
+    , wall_transition_length(scaled<coord_t>(print_object_config.wall_transition_length.value))
+    , toolpaths_generated(false)
+    , print_object_config(print_object_config)
+    , fixed_width_external(fixed_width_0)
+    , fixed_width_internal(fixed_width_x)
+    , spacing_override_external(spacing_0)
+    , spacing_override_internal(spacing_x)
+    , spacing_override_innermost(spacing_innermost)
+    , debug_layer_id(layer_id)
+    , thin_wall_snap_precision(thin_wall_snap_precision)
+    , m_original_inset_count(inset_count)
+{
+    assert(!print_config.nozzle_diameter.empty());
+    this->min_nozzle_diameter = float(
+        *std::min_element(print_config.nozzle_diameter.values.begin(), print_config.nozzle_diameter.values.end()));
+
+    if (const auto &min_feature_size_opt = print_object_config.min_feature_size; min_feature_size_opt.percent)
+        this->min_feature_size = scaled<coord_t>(min_feature_size_opt.value * 0.01 * this->min_nozzle_diameter);
+
+    // Athena's perimeter compression uses the configured perimeter widths as the base:
+    // - Off (factor=1.0): min = 100% of perimeter width (no compression)
+    // - Moderate (factor=0.66): min = 66% of perimeter width
+    // - Aggressive (factor=0.33): min = 33% of perimeter width
+    // Floor: nozzle_diameter/3 (33%) ensures printability
+    {
+        coord_t floor = scaled<coord_t>(this->min_nozzle_diameter / 3.0);
+        // Use the smaller of external/internal perimeter widths as base
+        coord_t base_width = std::min(bead_width_0, bead_width_x);
+
+        if (min_bead_width_factor < 1.0 && min_bead_width_factor > 0.0)
+        {
+            // Compression enabled: apply factor to gap-fill bead width only
+            coord_t target_min_bead = coord_t(double(base_width) * min_bead_width_factor);
+            this->min_bead_width = std::max(target_min_bead, floor);
+        }
+        else
+        {
+            // Compression disabled: use full perimeter width as minimum
+            this->min_bead_width = base_width;
+        }
+    }
+
+    // Configured width is the floor, max_perimeter_width is the ceiling
+    {
+        coord_t cap = (max_perimeter_width > 0) ? max_perimeter_width
+                                                : scaled<coord_t>(this->min_nozzle_diameter * 1.5);
+        coord_t w0 = (fixed_width_0 > 0) ? fixed_width_0 : bead_width_0;
+        coord_t wx = (fixed_width_x > 0) ? fixed_width_x : bead_width_x;
+        this->max_bead_width_external = std::max(w0, cap);
+        this->max_bead_width_internal = std::max(wx, cap);
+    }
+
+    if (const auto &wall_transition_filter_deviation_opt = print_object_config.wall_transition_filter_deviation;
+        wall_transition_filter_deviation_opt.percent)
+        this->wall_transition_filter_deviation = scaled<coord_t>(wall_transition_filter_deviation_opt.value * 0.01 *
+                                                                 this->min_nozzle_diameter);
+
+    if (const auto &wall_transition_length_opt = print_object_config.wall_transition_length;
+        wall_transition_length_opt.percent)
+        this->wall_transition_length = scaled<coord_t>(wall_transition_length_opt.value * 0.01 *
+                                                       this->min_nozzle_diameter);
+}
+
+void simplify(Polygon &thiss, const int64_t smallest_line_segment_squared, const int64_t allowed_error_distance_squared)
+{
+    if (thiss.size() < 3)
+    {
+        thiss.points.clear();
+        return;
+    }
+    if (thiss.size() == 3)
+        return;
+
+    Polygon new_path;
+    Point previous = thiss.points.back();
+    Point previous_previous = thiss.points.at(thiss.points.size() - 2);
+    Point current = thiss.points.at(0);
+
+    /* When removing a vertex, we check the height of the triangle of the area
+     being removed from the original polygon by the simplification. However,
+     when consecutively removing multiple vertices the height of the previously
+     removed vertices w.r.t. the shortcut path changes.
+     In order to not recompute the new height value of previously removed
+     vertices we compute the height of a representative triangle, which covers
+     the same amount of area as the area being cut off. We use the Shoelace
+     formula to accumulate the area under the removed segments. This works by
+     computing the area in a 'fan' where each of the blades of the fan go from
+     the origin to one of the segments. While removing vertices the area in
+     this fan accumulates. By subtracting the area of the blade connected to
+     the short-cutting segment we obtain the total area of the cutoff region.
+     From this area we compute the height of the representative triangle using
+     the standard formula for a triangle area: A = .5*b*h
+     */
+    int64_t accumulated_area_removed =
+        int64_t(previous.x()) * int64_t(current.y()) -
+        int64_t(previous.y()) *
+            int64_t(current.x()); // Twice the Shoelace formula for area of polygon per line segment.
+
+    for (size_t point_idx = 0; point_idx < thiss.points.size(); point_idx++)
+    {
+        current = thiss.points.at(point_idx % thiss.points.size());
+
+        //Check if the accumulated area doesn't exceed the maximum.
+        Point next;
+        if (point_idx + 1 < thiss.points.size())
+        {
+            next = thiss.points.at(point_idx + 1);
+        }
+        else if (point_idx + 1 == thiss.points.size() && new_path.size() > 1)
+        {                       // don't spill over if the [next] vertex will then be equal to [previous]
+            next = new_path[0]; //Spill over to new polygon for checking removed area.
+        }
+        else
+        {
+            next = thiss.points.at((point_idx + 1) % thiss.points.size());
+        }
+        const int64_t removed_area_next =
+            int64_t(current.x()) * int64_t(next.y()) -
+            int64_t(current.y()) *
+                int64_t(next.x()); // Twice the Shoelace formula for area of polygon per line segment.
+        const int64_t negative_area_closing =
+            int64_t(next.x()) * int64_t(previous.y()) -
+            int64_t(next.y()) * int64_t(previous.x()); // area between the origin and the short-cutting segment
+        accumulated_area_removed += removed_area_next;
+
+        const int64_t length2 = (current - previous).cast<int64_t>().squaredNorm();
+        if (length2 < scaled<int64_t>(25.))
+        {
+            // We're allowed to always delete segments of less than 5 micron.
+            continue;
+        }
+
+        const int64_t area_removed_so_far = accumulated_area_removed +
+                                            negative_area_closing; // close the shortcut area polygon
+        const int64_t base_length_2 = (next - previous).cast<int64_t>().squaredNorm();
+
+        if (base_length_2 == 0) //Two line segments form a line back and forth with no area.
+            continue;           //Remove the vertex.
+        //We want to check if the height of the triangle formed by previous, current and next vertices is less than allowed_error_distance_squared.
+        //1/2 L = A           [actual area is half of the computed shoelace value] // Shoelace formula is .5*(...) , but we simplify the computation and take out the .5
+        //A = 1/2 * b * h     [triangle area formula]
+        //L = b * h           [apply above two and take out the 1/2]
+        //h = L / b           [divide by b]
+        //h^2 = (L / b)^2     [square it]
+        //h^2 = L^2 / b^2     [factor the divisor]
+        const int64_t height_2 = double(area_removed_so_far) * double(area_removed_so_far) / double(base_length_2);
+        if ((height_2 <= Luminary::sqr(scaled<coord_t>(0.005)) //Almost exactly colinear (barring rounding errors).
+             &&
+             Line::distance_to_infinite(current, previous, next) <=
+                 scaled<double>(
+                     0.005))) // make sure that height_2 is not small because of cancellation of positive and negative areas
+            continue;
+
+        if (length2 < smallest_line_segment_squared &&
+            height_2 <= allowed_error_distance_squared) // removing the vertex doesn't introduce too much error.)
+        {
+            const int64_t next_length2 = (current - next).cast<int64_t>().squaredNorm();
+            if (next_length2 > 4 * smallest_line_segment_squared)
+            {
+                // Special case; The next line is long. If we were to remove this, it could happen that we get quite noticeable artifacts.
+                // We should instead move this point to a location where both edges are kept and then remove the previous point that we wanted to keep.
+                // By taking the intersection of these two lines, we get a point that preserves the direction (so it makes the corner a bit more pointy).
+                // We just need to be sure that the intersection point does not introduce an artifact itself.
+                Point intersection_point;
+                bool has_intersection =
+                    Line(previous_previous, previous).intersection_infinite(Line(current, next), &intersection_point);
+                if (!has_intersection ||
+                    Line::distance_to_infinite_squared(intersection_point, previous, current) >
+                        double(allowed_error_distance_squared) ||
+                    (intersection_point - previous).cast<int64_t>().squaredNorm() >
+                        smallest_line_segment_squared // The intersection point is way too far from the 'previous'
+                    || (intersection_point - next).cast<int64_t>().squaredNorm() >
+                           smallest_line_segment_squared) // and 'next' points, so it shouldn't replace 'current'
+                {
+                    // We can't find a better spot for it, but the size of the line is more than 5 micron.
+                    // So the only thing we can do here is leave it in...
+                }
+                else
+                {
+                    // New point seems like a valid one.
+                    current = intersection_point;
+                    // If there was a previous point added, remove it.
+                    if (!new_path.empty())
+                    {
+                        new_path.points.pop_back();
+                        previous = previous_previous;
+                    }
+                }
+            }
+            else
+            {
+                continue; //Remove the vertex.
+            }
+        }
+        //Don't remove the vertex.
+        accumulated_area_removed =
+            removed_area_next; // so that in the next iteration it's the area between the origin, [previous] and [current]
+        previous_previous = previous;
+        previous = current; //Note that "previous" is only updated if we don't remove the vertex.
+        new_path.points.push_back(current);
+    }
+
+    thiss = new_path;
+}
+
+/*!
+     * Removes vertices of the polygons to make sure that they are not too high
+     * resolution.
+     *
+     * This removes points which are connected to line segments that are shorter
+     * than the `smallest_line_segment`, unless that would introduce a deviation
+     * in the contour of more than `allowed_error_distance`.
+     *
+     * Criteria:
+     * 1. Never remove a vertex if either of the connceted segments is larger than \p smallest_line_segment
+     * 2. Never remove a vertex if the distance between that vertex and the final resulting polygon would be higher than \p allowed_error_distance
+     * 3. The direction of segments longer than \p smallest_line_segment always
+     * remains unaltered (but their end points may change if it is connected to
+     * a small segment)
+     *
+     * Simplify uses a heuristic and doesn't neccesarily remove all removable
+     * vertices under the above criteria, but simplify may never violate these
+     * criteria. Unless the segments or the distance is smaller than the
+     * rounding error of 5 micron.
+     *
+     * Vertices which introduce an error of less than 5 microns are removed
+     * anyway, even if the segments are longer than the smallest line segment.
+     * This makes sure that (practically) colinear line segments are joined into
+     * a single line segment.
+     * \param smallest_line_segment Maximal length of removed line segments.
+     * \param allowed_error_distance If removing a vertex introduces a deviation
+     * from the original path that is more than this distance, the vertex may
+     * not be removed.
+ */
+void simplify(Polygons &thiss, const int64_t smallest_line_segment = scaled<coord_t>(0.01),
+              const int64_t allowed_error_distance = scaled<coord_t>(0.005))
+{
+    // The erase-remove idiom batches the deletions into a single O(n) pass. Erasing inside the loop
+    // would make it O(n^2), which costs 5-20x on a polygon set of any size.
+    const int64_t allowed_error_distance_squared = int64_t(allowed_error_distance) * int64_t(allowed_error_distance);
+    const int64_t smallest_line_segment_squared = int64_t(smallest_line_segment) * int64_t(smallest_line_segment);
+
+    // Simplify all polygons first
+    for (Polygon &poly : thiss)
+    {
+        simplify(poly, smallest_line_segment_squared, allowed_error_distance_squared);
+    }
+
+    // Remove degenerate polygons (< 3 points) using erase-remove idiom
+    thiss.erase(std::remove_if(thiss.begin(), thiss.end(), [](const Polygon &p) { return p.size() < 3; }), thiss.end());
+}
+
+typedef SparseLineGrid<PolygonsPointIndex, PolygonsPointIndexSegmentLocator> LocToLineGrid;
+std::unique_ptr<LocToLineGrid> createLocToLineGrid(const Polygons &polygons, int square_size)
+{
+    unsigned int n_points = 0;
+    for (const auto &poly : polygons)
+        n_points += poly.size();
+
+    auto ret = std::make_unique<LocToLineGrid>(square_size, n_points);
+
+    for (unsigned int poly_idx = 0; poly_idx < polygons.size(); poly_idx++)
+        for (unsigned int point_idx = 0; point_idx < polygons[poly_idx].size(); point_idx++)
+            ret->insert(PolygonsPointIndex(&polygons, poly_idx, point_idx));
+    return ret;
+}
+
+/* Note: Also tries to solve for near-self intersections, when epsilon >= 1
+ */
+void fixSelfIntersections(const coord_t epsilon, Polygons &thiss)
+{
+    if (epsilon < 1)
+    {
+        // A union removes self-intersections and duplicate points.
+        thiss = union_(thiss, Clipper2Lib::FillRule::NonZero);
+        return;
+    }
+
+    const int64_t half_epsilon = (epsilon + 1) / 2;
+
+    // Points too close to line segments should be moved a little away from those line segments, but less than epsilon,
+    //   so at least half-epsilon distance between points can still be guaranteed.
+    constexpr coord_t grid_size = scaled<coord_t>(2.);
+    auto query_grid = createLocToLineGrid(thiss, grid_size);
+
+    const auto move_dist = std::max<int64_t>(2L, half_epsilon - 2);
+    const int64_t half_epsilon_sqrd = half_epsilon * half_epsilon;
+
+    const size_t n = thiss.size();
+    for (size_t poly_idx = 0; poly_idx < n; poly_idx++)
+    {
+        const size_t pathlen = thiss[poly_idx].size();
+        for (size_t point_idx = 0; point_idx < pathlen; ++point_idx)
+        {
+            Point &pt = thiss[poly_idx][point_idx];
+            for (const auto &line : query_grid->getNearby(pt, epsilon))
+            {
+                const size_t line_next_idx = (line.point_idx + 1) % thiss[line.poly_idx].size();
+                if (poly_idx == line.poly_idx && (point_idx == line.point_idx || point_idx == line_next_idx))
+                    continue;
+
+                const Line segment(thiss[line.poly_idx][line.point_idx], thiss[line.poly_idx][line_next_idx]);
+                Point segment_closest_point;
+                segment.distance_to_squared(pt, &segment_closest_point);
+
+                if (half_epsilon_sqrd >= (pt - segment_closest_point).cast<int64_t>().squaredNorm())
+                {
+                    const Point &other = thiss[poly_idx][(point_idx + 1) % pathlen];
+                    const Vec2i64 vec = (LinearAlg2D::pointIsLeftOfLine(other, segment.a, segment.b) > 0
+                                             ? segment.b - segment.a
+                                             : segment.a - segment.b)
+                                            .cast<int64_t>();
+                    assert(Luminary::sqr(double(vec.x())) < double(std::numeric_limits<int64_t>::max()));
+                    assert(Luminary::sqr(double(vec.y())) < double(std::numeric_limits<int64_t>::max()));
+                    const int64_t len = vec.norm();
+                    pt.x() += (-vec.y() * move_dist) / len;
+                    pt.y() += (vec.x() * move_dist) / len;
+                }
+            }
+        }
+    }
+
+    // A union removes self-intersections and duplicate points.
+    thiss = union_(thiss, Clipper2Lib::FillRule::NonZero);
+}
+
+/*!
+     * Removes overlapping consecutive line segments which don't delimit a positive area.
+ */
+void removeDegenerateVerts(Polygons &thiss)
+{
+    // The erase-remove idiom batches the deletions into a single O(n) pass; erasing inside the loop
+    // would make it O(n^2).
+
+    auto isDegenerate = [](const Point &last, const Point &now, const Point &next)
+    {
+        Vec2i64 last_line = (now - last).cast<int64_t>();
+        Vec2i64 next_line = (next - now).cast<int64_t>();
+        return last_line.dot(next_line) == -1 * last_line.norm() * next_line.norm();
+    };
+
+    // Process all polygons first, modifying them in-place
+    for (Polygon &poly : thiss)
+    {
+        Polygon result;
+        bool isChanged = false;
+
+        for (size_t idx = 0; idx < poly.size(); idx++)
+        {
+            const Point &last = (result.size() == 0) ? poly.back() : result.back();
+            if (idx + 1 == poly.size() && result.size() == 0)
+                break;
+
+            const Point &next = (idx + 1 == poly.size()) ? result[0] : poly[idx + 1];
+            if (isDegenerate(last, poly[idx], next))
+            { // lines are in the opposite direction
+                // don't add vert to the result
+                isChanged = true;
+                while (result.size() > 1 && isDegenerate(result[result.size() - 2], result.back(), next))
+                    result.points.pop_back();
+            }
+            else
+            {
+                result.points.emplace_back(poly[idx]);
+            }
+        }
+
+        if (isChanged && result.size() > 2)
+        {
+            poly = result;
+        }
+    }
+
+    // Remove degenerate polygons (< 3 points) using erase-remove idiom
+    thiss.erase(std::remove_if(thiss.begin(), thiss.end(), [](const Polygon &p) { return p.size() < 3; }), thiss.end());
+}
+
+void removeSmallAreas(Polygons &thiss, const double min_area_size, const bool remove_holes)
+{
+    auto to_path = [](const Polygon &poly) -> Clipper2Lib::Path64
+    {
+        Clipper2Lib::Path64 out;
+        for (const Point &pt : poly.points)
+            out.emplace_back(pt.x(), pt.y());
+        return out;
+    };
+
+    auto new_end = thiss.end();
+    if (remove_holes)
+    {
+        for (auto it = thiss.begin(); it < new_end;)
+        {
+            // All polygons smaller than target are removed by replacing them with a polygon from the back of the vector.
+            if (fabs(Clipper2Lib::Area(to_path(*it))) < min_area_size)
+            {
+                --new_end;
+                *it = std::move(*new_end);
+                continue; // Don't increment the iterator such that the polygon just swapped in is checked next.
+            }
+            ++it;
+        }
+    }
+    else
+    {
+        // For each polygon, computes the signed area, move small outlines at the end of the vector and keep pointer on small holes
+        Polygons small_holes;
+        for (auto it = thiss.begin(); it < new_end;)
+        {
+            if (double area = Clipper2Lib::Area(to_path(*it)); fabs(area) < min_area_size)
+            {
+                if (area >= 0)
+                {
+                    --new_end;
+                    if (it < new_end)
+                    {
+                        std::swap(*new_end, *it);
+                        continue;
+                    }
+                    else
+                    { // Don't self-swap the last Path
+                        break;
+                    }
+                }
+                else
+                {
+                    small_holes.push_back(*it);
+                }
+            }
+            ++it;
+        }
+
+        // Removes small holes that have their first point inside one of the removed outlines
+        // Iterating in reverse ensures that unprocessed small holes won't be moved
+        const auto removed_outlines_start = new_end;
+        for (auto hole_it = small_holes.rbegin(); hole_it < small_holes.rend(); hole_it++)
+            for (auto outline_it = removed_outlines_start; outline_it < thiss.end(); outline_it++)
+                if (Polygon(*outline_it).contains(*hole_it->begin()))
+                {
+                    new_end--;
+                    *hole_it = std::move(*new_end);
+                    break;
+                }
+    }
+    thiss.resize(new_end - thiss.begin());
+}
+
+void removeColinearEdges(Polygon &poly, const double max_deviation_angle)
+{
+    size_t num_removed_in_iteration = 0;
+    do
+    {
+        num_removed_in_iteration = 0;
+        std::vector<bool> process_indices(poly.points.size(), true);
+
+        bool go = true;
+        while (go)
+        {
+            go = false;
+
+            const auto &rpath = poly;
+            const size_t pathlen = rpath.size();
+            if (pathlen <= 3)
+                return;
+
+            std::vector<bool> skip_indices(poly.points.size(), false);
+
+            Polygon new_path;
+            for (size_t point_idx = 0; point_idx < pathlen; ++point_idx)
+            {
+                // Don't iterate directly over process-indices, but do it this way, because there are points _in_ process-indices that should nonetheless
+                // be skipped:
+                if (!process_indices[point_idx])
+                {
+                    new_path.points.push_back(rpath[point_idx]);
+                    continue;
+                }
+
+                // Should skip the last point for this iteration if the old first was removed (which can be seen from the fact that the new first was skipped):
+                if (point_idx == (pathlen - 1) && skip_indices[0])
+                {
+                    skip_indices[new_path.size()] = true;
+                    go = true;
+                    new_path.points.push_back(rpath[point_idx]);
+                    break;
+                }
+
+                const Point &prev = rpath[(point_idx - 1 + pathlen) % pathlen];
+                const Point &pt = rpath[point_idx];
+                const Point &next = rpath[(point_idx + 1) % pathlen];
+
+                float angle = LinearAlg2D::getAngleLeft(prev, pt, next); // [0 : 2 * pi]
+                if (angle >= float(M_PI))
+                {
+                    angle -= float(M_PI);
+                } // map [pi : 2 * pi] to [0 : pi]
+
+                // Check if the angle is within limits for the point to 'make sense', given the maximum deviation.
+                // If the angle indicates near-parallel segments ignore the point 'pt'
+                if (angle > max_deviation_angle && angle < M_PI - max_deviation_angle)
+                {
+                    new_path.points.push_back(pt);
+                }
+                else if (point_idx != (pathlen - 1))
+                {
+                    // Skip the next point, since the current one was removed:
+                    skip_indices[new_path.size()] = true;
+                    go = true;
+                    new_path.points.push_back(next);
+                    ++point_idx;
+                }
+            }
+            poly = new_path;
+            num_removed_in_iteration += pathlen - poly.points.size();
+
+            process_indices.clear();
+            process_indices.insert(process_indices.end(), skip_indices.begin(), skip_indices.end());
+        }
+    } while (num_removed_in_iteration > 0);
+}
+
+void removeColinearEdges(Polygons &thiss, const double max_deviation_angle = 0.0005)
+{
+    // The erase-remove idiom batches the deletions into a single O(n) pass; erasing inside the loop
+    // would make it O(n^2).
+
+    // Process colinear edge removal for all polygons first
+    for (Polygon &poly : thiss)
+    {
+        removeColinearEdges(poly, max_deviation_angle);
+    }
+
+    // Remove degenerate polygons (< 3 points) using erase-remove idiom
+    thiss.erase(std::remove_if(thiss.begin(), thiss.end(), [](const Polygon &p) { return p.size() < 3; }), thiss.end());
+}
+
+const std::vector<VariableWidthLines> &WallToolPaths::generate()
+{
+    if (this->inset_count < 1)
+        return toolpaths;
+
+    const coord_t smallest_segment = Luminary::Athena::meshfix_maximum_resolution;
+    const coord_t allowed_distance = Luminary::Athena::meshfix_maximum_deviation;
+    const coord_t epsilon_offset = (allowed_distance / 2) - 1;
+    const double transitioning_angle = Geometry::deg2rad(this->print_object_config.wall_transition_angle.value);
+    constexpr coord_t discretization_step_size = scaled<coord_t>(0.8);
+
+    // The triple offset runs over flat Polygons, so every polygon is offset on its own, CW holes
+    // among them as separate shapes, and the union_() below rebuilds the hole structure. Offsetting
+    // ExPolygons here would treat a hole as a hole and give a different outline.
+
+    // Step 1: triple offset over flat Polygons
+    // This offsets each polygon independently, treating CW holes as separate shapes
+    auto pg_prep_t0 = std::chrono::steady_clock::now();
+    Polygons prepared_outline = offset(offset(offset(outline, -epsilon_offset), epsilon_offset * 2), -epsilon_offset);
+
+    if (Luminary::debug_enabled(Luminary::DBG_PERIMETERS))
+    {
+        // Fingerprint of the input and of the prepared outline: two runs on identical input
+        // must print identical lines here, or the drift is upstream of the skeleton.
+        auto fingerprint = [](const Polygons &polys, size_t &pts, double &area)
+        {
+            uint64_t h = 1469598103934665603ull;
+            pts = 0;
+            area = 0.;
+            for (const Polygon &p : polys)
+            {
+                area += p.area();
+                for (const Point &pt : p.points)
+                {
+                    ++pts;
+                    for (const coord_t c : {pt.x(), pt.y()})
+                        h = (h ^ uint64_t(c)) * 1099511628211ull;
+                }
+            }
+            return h;
+        };
+        size_t in_pts = 0, prep_pts = 0;
+        double in_area = 0., prep_area = 0.;
+        const uint64_t in_h = fingerprint(outline, in_pts, in_area);
+        const uint64_t prep_h = fingerprint(prepared_outline, prep_pts, prep_area);
+        dbg_log(Luminary::DBG_PERIMETERS, debug_print_z, "DETERM",
+                "WTP_INPUT layer=%d insets=%zu polys=%zu pts=%zu area=%.4fmm2 hash=%016llx prepared_polys=%zu "
+                "prepared_pts=%zu prepared_area=%.4fmm2 prepared_hash=%016llx",
+                debug_layer_id, inset_count, outline.size(), in_pts, in_area * 1e-12, (unsigned long long) in_h,
+                prepared_outline.size(), prep_pts, prep_area * 1e-12, (unsigned long long) prep_h);
+    }
+
+    // Step 2: Apply simplifications (still on flat Polygons, like Clipper1)
+    simplify(prepared_outline, smallest_segment, allowed_distance);
+    fixSelfIntersections(epsilon_offset, prepared_outline);
+    removeDegenerateVerts(prepared_outline);
+    removeColinearEdges(prepared_outline, 0.005);
+    fixSelfIntersections(epsilon_offset, prepared_outline);
+    removeDegenerateVerts(prepared_outline);
+    removeSmallAreas(prepared_outline, small_area_length * small_area_length, false);
+
+    // Step 3: NOW convert to ExPolygons and apply union (this reconstructs hole structure)
+    // In Clipper1 this was: prepared_outline = union_(prepared_outline);
+    // In Clipper2 we use: union_ex to preserve the hole structure we're about to create
+    ExPolygons prepared_expolygons = ClipperPaths_to_ExPolygons(prepared_outline, false);
+    prepared_expolygons = union_ex(prepared_expolygons);
+
+    // Step 4: Convert back to flat Polygons for SkeletalTrapezoidation
+    prepared_outline = to_polygons(prepared_expolygons);
+
+    // The Voronoi diagram generator is very sensitive to:
+    // - Polygons with < 3 vertices
+    // - Polygons with zero or near-zero area
+    // - Self-intersecting polygons
+    // These cause "missing Voronoi vertex" errors and infinite loops
+    Polygons filtered_outline;
+    filtered_outline.reserve(prepared_outline.size());
+    const double min_area = 100.0; // Minimum area in scaled units
+
+    for (size_t i = 0; i < prepared_outline.size(); i++)
+    {
+        const Polygon &poly = prepared_outline[i];
+        if (poly.size() < 3)
+        {
+            continue;
+        }
+        double a = poly.area();
+        if (std::abs(a) < min_area)
+        {
+            continue;
+        }
+        filtered_outline.push_back(poly);
+    }
+    prepared_outline = std::move(filtered_outline);
+
+    // Remove exact duplicate points (same coordinates) which can break Voronoi
+    // This doesn't alter geometry, just removes degenerate cases
+    for (Polygon &poly : prepared_outline)
+    {
+        poly.remove_duplicate_points();
+    }
+    Luminary::g_pg_wtp_prep.add(pg_prep_t0, std::chrono::steady_clock::now());
+
+    if (prepared_outline.empty() || area(prepared_outline) <= 0)
+    {
+        assert(toolpaths.empty());
+        return toolpaths;
+    }
+
+    // Thin-wall detection: if polygon's effective width is <= bead_width_0,
+    // it can only fit a single perimeter. Bypass SkeletalTrapezoidation
+    // (which can fail due to Voronoi robustness issues on small polygons)
+    // and generate a simple thin-wall loop directly - just like thin wall handling.
+    bool use_thin_wall_path = false;
+    double total_area_tw = 0;
+    double total_perim_tw = 0;
+    for (const Polygon &poly : prepared_outline)
+    {
+        double a = std::abs(poly.area());
+        double p = poly.length();
+        if (a > 0 && p > 0)
+        {
+            total_area_tw += a;
+            total_perim_tw += p;
+        }
+    }
+    double effective_width_tw = (total_perim_tw > 0) ? (2.0 * total_area_tw / total_perim_tw) : 0;
+
+    // If the effective width is at most one bead wide AND the polygon is small,
+    // the Voronoi-based SkeletalTrapezoidation is unreliable (it can produce empty results
+    // or garbage for certain small polygon vertex arrangements, e.g. cone tips).
+    // Treat as a thin wall: generate a single centerline perimeter loop directly.
+    // Only bypass Voronoi for small polygons. Large thin geometry (e.g. a thin
+    // annular ring exactly one bead wide) has enough vertices for Voronoi to work correctly,
+    // and the thin-wall offset path fragments it into swiss cheese.
+    constexpr double MAX_THIN_WALL_PERIMETER_FACTOR = 12.0;
+    double max_thin_wall_perimeter = double(bead_width_0) * MAX_THIN_WALL_PERIMETER_FACTOR;
+    if (effective_width_tw > 0 && effective_width_tw <= double(bead_width_0) &&
+        total_perim_tw <= max_thin_wall_perimeter)
+        use_thin_wall_path = true;
+
+    if (use_thin_wall_path)
+    {
+        // Thin-wall path: generate a single centerline perimeter loop directly.
+        // This bypasses the Voronoi diagram entirely, avoiding robustness issues.
+        coord_t bead_w = std::max(coord_t(effective_width_tw), min_feature_size);
+        bead_w = std::min(bead_w, bead_width_0);
+
+        // Offset inward by half the bead width to get the extrusion centerline
+        coord_t inward = bead_w / 2;
+        Polygons centerlines = offset(prepared_outline, -float(inward));
+
+        // If the primary offset produced nothing (e.g., elongated shape narrower than bead_w at some point),
+        // try progressively smaller offsets down to min_feature_size/2
+        if (centerlines.empty() && bead_w > min_feature_size)
+        {
+            // Try with min_feature_size as the bead width
+            bead_w = min_feature_size;
+            inward = bead_w / 2;
+            centerlines = offset(prepared_outline, -float(inward));
+        }
+
+        if (!centerlines.empty())
+        {
+            VariableWidthLines thin_wall_lines;
+            for (const Polygon &cl : centerlines)
+            {
+                if (cl.size() < 3)
+                    continue;
+                ExtrusionLine line(0, false, true); // inset_idx=0 (outer wall), not odd, closed loop
+                line.junctions.reserve(cl.size() + 1);
+                for (const Point &pt : cl.points)
+                    line.junctions.push_back({pt, bead_w, 0});
+                // Close the loop by repeating the first point
+                line.junctions.push_back({cl.points.front(), bead_w, 0});
+                thin_wall_lines.push_back(std::move(line));
+            }
+            if (!thin_wall_lines.empty())
+                toolpaths.push_back(std::move(thin_wall_lines));
+        }
+    }
+    else
+    {
+        // Normal path: use SkeletalTrapezoidation (Voronoi-based wall generation)
+        const float external_perimeter_extrusion_width = Flow::rounded_rectangle_extrusion_width_from_spacing(
+            unscale<float>(bead_width_0), float(this->layer_height));
+        const float perimeter_extrusion_width = Flow::rounded_rectangle_extrusion_width_from_spacing(
+            unscale<float>(bead_width_x), float(this->layer_height));
+
+        // Minimum viable threshold: don't add a bead unless there's room for at least
+        // a min_bead_width bead. Scales naturally with nozzle size (min_bead_width floor = nozzle/3).
+        const double min_viable_threshold = (bead_width_x > 0) ? std::clamp(unscaled<double>(this->min_bead_width) /
+                                                                                unscaled<double>(bead_width_x),
+                                                                            0.01, 0.99)
+                                                               : 0.01;
+
+        double wall_split_middle_threshold =
+            std::clamp(2. * unscaled<double>(this->min_bead_width) / external_perimeter_extrusion_width - 1.,
+                       min_viable_threshold, 0.99);
+        double wall_add_middle_threshold = std::clamp(unscaled<double>(this->min_bead_width) /
+                                                          perimeter_extrusion_width,
+                                                      min_viable_threshold, 0.99);
+
+        // When max_bead_width caps expansion, lower wall_add_middle_threshold so the
+        // skeleton adds center beads sooner (preventing them from expanding beyond the
+        // cap). wall_split_middle_threshold is NOT lowered - it controls the 1->2 bead
+        // transition via RedistributeBeadingStrategy, and we never want expansion to
+        // consolidate two beads into one wider bead.
+        if (this->max_bead_width_internal > 0)
+        {
+            const coord_t nominal_spacing = bead_width_x;
+            const coord_t nominal_width = (fixed_width_internal > 0) ? fixed_width_internal : bead_width_x;
+            const double max_expansion = unscaled<double>(this->max_bead_width_internal) -
+                                         unscaled<double>(nominal_width);
+
+            if (max_expansion <= 0)
+            {
+                // 100% cap: no expansion, add center beads as early as printable
+                wall_add_middle_threshold = min_viable_threshold;
+            }
+            else
+            {
+                // Partial cap: derive add threshold from max allowable leftover
+                const double adjustment_factor = (nominal_spacing > 0)
+                                                     ? (double(nominal_width) / double(nominal_spacing))
+                                                     : 1.0;
+                const double max_leftover_even = 2.0 * max_expansion / adjustment_factor;
+                const double max_threshold_even = (nominal_spacing > 0)
+                                                      ? (max_leftover_even / unscaled<double>(nominal_spacing))
+                                                      : 0.99;
+
+                wall_add_middle_threshold = std::clamp(std::min(wall_add_middle_threshold, max_threshold_even),
+                                                       min_viable_threshold, 0.99);
+            }
+        }
+
+        const int wall_distribution_count = 1;
+        (void) this->print_object_config.wall_distribution_count;
+        const size_t max_bead_count = (size_t(inset_count) < size_t(std::numeric_limits<coord_t>::max() / 2))
+                                          ? 2 * inset_count
+                                          : std::numeric_limits<coord_t>::max();
+        const auto beading_strat = BeadingStrategyFactory::makeStrategy(
+            bead_width_0, fixed_width_external, bead_width_x, fixed_width_internal, wall_transition_length,
+            transitioning_angle, print_thin_walls, min_bead_width, min_feature_size, wall_split_middle_threshold,
+            wall_add_middle_threshold, max_bead_count, wall_0_inset, wall_distribution_count, spacing_override_external,
+            spacing_override_innermost, coord_t(m_original_inset_count), debug_layer_id, thin_wall_snap_precision,
+            scaled<coord_t>(this->min_nozzle_diameter), this->max_bead_width_external, debug_print_z);
+        const coord_t transition_filter_dist = scaled<coord_t>(100.f);
+        const coord_t allowed_filter_deviation = wall_transition_filter_deviation;
+
+        coord_t ext_s = bead_width_0; // Must match pre-inset
+
+        auto pg_t0 = std::chrono::steady_clock::now();
+        SkeletalTrapezoidation wall_maker(prepared_outline, *beading_strat, beading_strat->getTransitioningAngle(),
+                                          discretization_step_size, transition_filter_dist, allowed_filter_deviation,
+                                          wall_transition_length, this->max_bead_width_external,
+                                          this->max_bead_width_internal, ext_s, debug_print_z, debug_layer_id);
+        auto pg_t1 = std::chrono::steady_clock::now();
+        Luminary::g_pg_voronoi.add(pg_t0, pg_t1);
+
+        wall_maker.generateToolpaths(toolpaths);
+        Luminary::g_pg_beading.add(pg_t1, std::chrono::steady_clock::now());
+    }
+
+    stitchToolPaths(toolpaths, this->bead_width_x);
+
+    removeSmallLines(toolpaths);
+
+    // Includes a thin-contour regeneration when one fires (it re-enters generate()).
+    auto pg_t1 = std::chrono::steady_clock::now();
+    separateOutInnerContour();
+    Luminary::g_pg_inner_contour.add(pg_t1, std::chrono::steady_clock::now());
+
+    // If thin contour regeneration fired, it recursively called generate() which
+    // already ran the full post-processing pipeline. Skip redundant passes.
+    if (toolpaths_generated)
+        return toolpaths;
+
+    simplifyToolPaths(toolpaths);
+
+    removeEmptyToolPaths(toolpaths);
+
+    // Deduplicate overlapping closed loops at the same inset level. With perimeter
+    // overlap, the center pair from opposing walls can land at the exact same position,
+    // creating two identical ExtrusionLines. Keep one, drop the duplicate.
+    // Runs after all processing (including separateOutInnerContour) to avoid
+    // affecting infill boundary computation.
+    for (VariableWidthLines &inset : toolpaths)
+    {
+        if (inset.size() < 2)
+            continue;
+        for (size_t i = 0; i < inset.size(); ++i)
+        {
+            if (!inset[i].is_closed || inset[i].junctions.size() < 3 || inset[i].junctions.front().w == 0)
+                continue;
+            Polygon poly_i = inset[i].toPolygon();
+            BoundingBox bb_i = poly_i.bounding_box();
+            double area_i = std::abs(poly_i.area());
+            coord_t w_i = inset[i].junctions.front().w;
+            for (size_t j = i + 1; j < inset.size(); ++j)
+            {
+                if (!inset[j].is_closed || inset[j].junctions.size() < 3 || inset[j].junctions.front().w == 0)
+                    continue;
+                // Junction count must be similar (identical loops have same vertex count)
+                if (std::abs(int(inset[i].junctions.size()) - int(inset[j].junctions.size())) >
+                    int(inset[i].junctions.size()) / 5)
+                    continue;
+                // Width must match
+                coord_t w_j = inset[j].junctions.front().w;
+                if (std::abs(w_i - w_j) > scaled<coord_t>(0.05))
+                    continue;
+                Polygon poly_j = inset[j].toPolygon();
+                BoundingBox bb_j = poly_j.bounding_box();
+                double area_j = std::abs(poly_j.area());
+                // Bounding box center, size, AND area must all match
+                if ((bb_i.center() - bb_j.center()).cast<int64_t>().norm() < scaled<coord_t>(0.01) &&
+                    std::abs(bb_i.size().x() - bb_j.size().x()) < scaled<coord_t>(0.05) &&
+                    std::abs(bb_i.size().y() - bb_j.size().y()) < scaled<coord_t>(0.05) &&
+                    std::abs(area_i - area_j) < area_i * 0.05)
+                {
+                    DBG_COUNT("WTP_DEDUP_FIRE");
+                    dbg_log(Luminary::DBG_PERIMETERS, debug_print_z, "PERIM",
+                            "WTP_DEDUP_FIRE layer=%d inset=%zu area=%.3fmm2 w=%.3fmm center=(%.2f,%.2f)",
+                            debug_layer_id, size_t(inset[i].inset_idx), area_i * SCALING_FACTOR * SCALING_FACTOR,
+                            unscaled<double>(w_i), unscaled<double>(bb_i.center().x()),
+                            unscaled<double>(bb_i.center().y()));
+                    if (j == inset.size() - 1)
+                        inset.pop_back();
+                    else
+                    {
+                        inset[j] = std::move(inset.back());
+                        inset.pop_back();
+                    }
+                    --j;
+                }
+            }
+        }
+    }
+
+    assert(std::is_sorted(toolpaths.cbegin(), toolpaths.cend(),
+                          [](const VariableWidthLines &l, const VariableWidthLines &r)
+                          { return l.front().inset_idx < r.front().inset_idx; }) &&
+           "WallToolPaths should be sorted from the outer 0th to inner_walls");
+    toolpaths_generated = true;
+    return toolpaths;
+}
+
+void WallToolPaths::stitchToolPaths(std::vector<VariableWidthLines> &toolpaths, const coord_t bead_width_x)
+{
+    const coord_t stitch_distance =
+        bead_width_x -
+        1; //In 0-width contours, junctions can cause up to 1-line-width gaps. Don't stitch more than 1 line width.
+
+    for (unsigned int wall_idx = 0; wall_idx < toolpaths.size(); wall_idx++)
+    {
+        VariableWidthLines &wall_lines = toolpaths[wall_idx];
+
+        VariableWidthLines stitched_polylines;
+        VariableWidthLines closed_polygons;
+        PolylineStitcher<VariableWidthLines, ExtrusionLine, ExtrusionJunction>::stitch(wall_lines, stitched_polylines,
+                                                                                       closed_polygons,
+                                                                                       stitch_distance);
+#ifdef ATHENA_STITCH_PATCH_DEBUG
+        for (const ExtrusionLine &line : stitched_polylines)
+        {
+            if (!line.is_odd && line.polylineLength() > 3 * stitch_distance && line.size() > 3)
+            {
+                BOOST_LOG_TRIVIAL(error) << "Some even contour lines could not be closed into polygons!";
+                assert(false && "Some even contour lines could not be closed into polygons!");
+                BoundingBox aabb;
+                for (auto line2 : wall_lines)
+                    for (auto j : line2)
+                        aabb.merge(j.p);
+                {
+                    static int iRun = 0;
+                    SVG svg(debug_out_path("contours_before.svg-%d.png", iRun), aabb);
+                    std::array<const char *, 8> colors = {"gray", "black",  "blue", "green",
+                                                          "lime", "purple", "red",  "yellow"};
+                    size_t color_idx = 0;
+                    for (auto &inset : toolpaths)
+                        for (auto &line2 : inset)
+                        {
+                            // svg.writePolyline(line2.toPolygon(), col);
+
+                            Polygon poly = line2.toPolygon();
+                            Point last = poly.front();
+                            for (size_t idx = 1; idx < poly.size(); idx++)
+                            {
+                                Point here = poly[idx];
+                                svg.draw(Line(last, here), colors[color_idx]);
+                                //                                svg.draw_text((last + here) / 2, std::to_string(line2.junctions[idx].region_id).c_str(), "black");
+                                last = here;
+                            }
+                            svg.draw(poly[0], colors[color_idx]);
+                            // svg.nextLayer();
+                            // svg.writePoints(poly, true, 0.1);
+                            // svg.nextLayer();
+                            color_idx = (color_idx + 1) % colors.size();
+                        }
+                }
+                {
+                    static int iRun = 0;
+                    SVG svg(debug_out_path("contours-%d.svg", iRun), aabb);
+                    for (auto &inset : toolpaths)
+                        for (auto &line2 : inset)
+                            svg.draw_outline(line2.toPolygon(), "gray");
+                    for (auto &line2 : stitched_polylines)
+                    {
+                        const char *col = line2.is_odd ? "gray" : "red";
+                        if (!line2.is_odd)
+                            std::cerr << "Non-closed even wall of size: " << line2.size() << " at " << line2.front().p
+                                      << "\n";
+                        if (!line2.is_odd)
+                            svg.draw(line2.front().p);
+                        Polygon poly = line2.toPolygon();
+                        Point last = poly.front();
+                        for (size_t idx = 1; idx < poly.size(); idx++)
+                        {
+                            Point here = poly[idx];
+                            svg.draw(Line(last, here), col);
+                            last = here;
+                        }
+                    }
+                    for (auto line2 : closed_polygons)
+                        svg.draw(line2.toPolygon());
+                }
+            }
+        }
+#endif                                              // ATHENA_STITCH_PATCH_DEBUG
+        wall_lines = std::move(stitched_polylines); // replace input toolpaths with stitched polylines
+
+        for (ExtrusionLine &wall_polygon : closed_polygons)
+        {
+            if (wall_polygon.junctions.empty())
+            {
+                continue;
+            }
+
+            // The stitcher can return a closed extrusion whose endpoints differ by a small distance,
+            // so close the gap here.
+            if (wall_polygon.junctions.front().p != wall_polygon.junctions.back().p &&
+                (wall_polygon.junctions.back().p - wall_polygon.junctions.front().p).cast<double>().norm() <
+                    stitch_distance)
+            {
+                wall_polygon.junctions.emplace_back(wall_polygon.junctions.front());
+            }
+            wall_polygon.is_closed = true;
+            wall_lines.emplace_back(std::move(wall_polygon)); // add stitched polygons to result
+        }
+#ifdef DEBUG
+        for (ExtrusionLine &line : wall_lines)
+        {
+            assert(line.inset_idx == wall_idx);
+        }
+#endif // DEBUG
+    }
+}
+
+template<typename T>
+bool shorterThan(const T &shape, const coord_t check_length)
+{
+    const auto *p0 = &shape.back();
+    int64_t length = 0;
+    for (const auto &p1 : shape)
+    {
+        length += (*p0 - p1).template cast<int64_t>().norm();
+        if (length >= check_length)
+            return false;
+        p0 = &p1;
+    }
+    return true;
+}
+
+void WallToolPaths::removeSmallLines(std::vector<VariableWidthLines> &toolpaths)
+{
+    for (VariableWidthLines &inset : toolpaths)
+    {
+        for (size_t line_idx = 0; line_idx < inset.size(); line_idx++)
+        {
+            ExtrusionLine &line = inset[line_idx];
+            coord_t min_width = std::numeric_limits<coord_t>::max();
+            for (const ExtrusionJunction &j : line)
+                min_width = std::min(min_width, j.w);
+            if (line.is_odd && !line.is_closed && shorterThan(line, min_wall_length.threshold(min_width)))
+            { // remove odd open thin-wall fragment under the short-wall floor
+                // Reported only when the engine floor would have kept it: the setting's own effect.
+                if (!shorterThan(line, min_width / 2))
+                {
+                    DBG_COUNT("WTP_SHORT_WALL_DROP");
+                    const Point at = line.junctions.empty() ? Point(0, 0) : line.junctions.front().p;
+                    dbg_log(Luminary::DBG_PERIMETERS, debug_print_z, "PERIM",
+                            "WTP_SHORT_WALL_DROP layer=%d inset=%zu w=%.3fmm floor=%.3fmm pts=%zu at=(%.2f,%.2f)",
+                            debug_layer_id, size_t(line.inset_idx), unscaled<double>(min_width),
+                            unscaled<double>(min_wall_length.threshold(min_width)), line.junctions.size(),
+                            unscaled<double>(at.x()), unscaled<double>(at.y()));
+                }
+                line = std::move(inset.back());
+                inset.erase(--inset.end());
+                line_idx--; // reconsider the current position
+                continue;
+            }
+            // Drop open even-paired lines whose bbox fits inside their own bead width.
+            // These are orphans PolylineStitcher couldn't close into a loop. Their entire
+            // extrusion footprint overlaps adjacent perimeters, so they emit as visible
+            // specks on top of bead that's already there. Closed loops are exempt - small
+            // closed perimeters are valid (e.g. tiny holes / circular features).
+            if (!line.is_odd && !line.is_closed && !line.junctions.empty())
+            {
+                Point pmin = line.junctions.front().p, pmax = pmin;
+                for (const ExtrusionJunction &j : line.junctions)
+                {
+                    pmin.x() = std::min(pmin.x(), j.p.x());
+                    pmin.y() = std::min(pmin.y(), j.p.y());
+                    pmax.x() = std::max(pmax.x(), j.p.x());
+                    pmax.y() = std::max(pmax.y(), j.p.y());
+                }
+                const coord_t bb_max_dim = std::max(pmax.x() - pmin.x(), pmax.y() - pmin.y());
+                if (bb_max_dim < min_width)
+                {
+                    DBG_COUNT("WTP_SPECK_FIRE");
+                    dbg_log(Luminary::DBG_PERIMETERS, debug_print_z, "PERIM",
+                            "WTP_SPECK_FIRE layer=%d inset=%zu bbox=%.3fmm w=%.3fmm pts=%zu at=(%.2f,%.2f)",
+                            debug_layer_id, size_t(line.inset_idx), unscaled<double>(bb_max_dim),
+                            unscaled<double>(min_width), line.junctions.size(),
+                            unscaled<double>(line.junctions.front().p.x()),
+                            unscaled<double>(line.junctions.front().p.y()));
+                    line = std::move(inset.back());
+                    inset.erase(--inset.end());
+                    line_idx--;
+                    continue;
+                }
+            }
+        }
+    }
+}
+
+void WallToolPaths::simplifyToolPaths(std::vector<VariableWidthLines> &toolpaths)
+{
+    for (size_t toolpaths_idx = 0; toolpaths_idx < toolpaths.size(); ++toolpaths_idx)
+    {
+        const int64_t maximum_resolution = Luminary::Athena::meshfix_maximum_resolution;
+        const int64_t maximum_deviation = Luminary::Athena::meshfix_maximum_deviation;
+        const int64_t maximum_extrusion_area_deviation =
+            Luminary::Athena::meshfix_maximum_extrusion_area_deviation; // unit: um^2
+        for (auto &line : toolpaths[toolpaths_idx])
+        {
+            line.simplify(maximum_resolution * maximum_resolution, maximum_deviation * maximum_deviation,
+                          maximum_extrusion_area_deviation);
+        }
+    }
+}
+
+const std::vector<VariableWidthLines> &WallToolPaths::getToolPaths()
+{
+    if (!toolpaths_generated)
+        return generate();
+    return toolpaths;
+}
+
+// ===================== WTP CLASSIFY DEBUG =====================
+// Log per-inset width distribution and the is_contour decision made by
+// separateOutInnerContour. Flags "MIXED" insets - those that contain a blend of
+// zero-width marker junctions and non-zero real-bead junctions - which defeat
+// the single-junction classifier and can slip degenerate 0-width markers into
+// the g-code as visible extrusion.
+static void dbg_wtp_classify(double z, int layer_id, const std::vector<VariableWidthLines> &toolpaths,
+                             size_t inset_count)
+{
+    if (!Luminary::debug_enabled(Luminary::DBG_PERIMETERS))
+        return;
+    dbg_log(Luminary::DBG_PERIMETERS, z, "PERIM", "WTP_CLASSIFY layer=%d inset_count=%zu toolpaths=%zu", layer_id,
+            inset_count, toolpaths.size());
+    for (size_t inset_idx = 0; inset_idx < toolpaths.size(); ++inset_idx)
+    {
+        const VariableWidthLines &inset = toolpaths[inset_idx];
+        if (inset.empty())
+            continue;
+        // Predict the current classifier's decision (mirrors the live logic below).
+        bool predicted_is_contour = false;
+        for (const ExtrusionLine &line : inset)
+        {
+            if (line.empty())
+                continue;
+            predicted_is_contour = (line.junctions.front().w == 0);
+        }
+        // Count zero-width vs non-zero junctions across the whole inset to detect mixed insets.
+        size_t zero_junctions = 0, nonzero_junctions = 0, total_junctions = 0;
+        size_t mixed_lines = 0;
+        for (const ExtrusionLine &line : inset)
+        {
+            bool line_has_zero = false, line_has_nonzero = false;
+            for (const ExtrusionJunction &j : line.junctions)
+            {
+                if (j.w == 0)
+                {
+                    ++zero_junctions;
+                    line_has_zero = true;
+                }
+                else
+                {
+                    ++nonzero_junctions;
+                    line_has_nonzero = true;
+                }
+                ++total_junctions;
+            }
+            if (line_has_zero && line_has_nonzero)
+                ++mixed_lines;
+        }
+        const bool inset_mixed = (zero_junctions > 0 && nonzero_junctions > 0);
+        dbg_log(Luminary::DBG_PERIMETERS, z, "PERIM",
+                "  WTP_INSET idx=%zu lines=%zu zero_j=%zu nz_j=%zu mixed_lines=%zu "
+                "inset_mixed=%d predicted_is_contour=%d",
+                inset_idx, inset.size(), zero_junctions, nonzero_junctions, mixed_lines, inset_mixed ? 1 : 0,
+                predicted_is_contour ? 1 : 0);
+        for (size_t li = 0; li < inset.size(); ++li)
+        {
+            const ExtrusionLine &line = inset[li];
+            if (line.junctions.empty())
+            {
+                dbg_log(Luminary::DBG_PERIMETERS, z, "PERIM", "    WTP_LINE  [%zu] EMPTY", li);
+                continue;
+            }
+            coord_t min_w = line.junctions.front().w, max_w = min_w;
+            Point pmin = line.junctions.front().p, pmax = pmin;
+            size_t line_zero = 0;
+            for (const ExtrusionJunction &j : line.junctions)
+            {
+                min_w = std::min(min_w, j.w);
+                max_w = std::max(max_w, j.w);
+                pmin.x() = std::min(pmin.x(), j.p.x());
+                pmin.y() = std::min(pmin.y(), j.p.y());
+                pmax.x() = std::max(pmax.x(), j.p.x());
+                pmax.y() = std::max(pmax.y(), j.p.y());
+                if (j.w == 0)
+                    ++line_zero;
+            }
+            dbg_log(Luminary::DBG_PERIMETERS, z, "PERIM",
+                    "    WTP_LINE  [%zu] is_odd=%d is_closed=%d pts=%zu first_w=%.4fmm "
+                    "w=%.4f-%.4fmm zero_j=%zu bbox=(%.2f,%.2f)-(%.2f,%.2f)",
+                    li, (int) line.is_odd, (int) line.is_closed, line.junctions.size(),
+                    unscaled<double>(line.junctions.front().w), unscaled<double>(min_w), unscaled<double>(max_w),
+                    line_zero, unscaled<double>(pmin.x()), unscaled<double>(pmin.y()), unscaled<double>(pmax.x()),
+                    unscaled<double>(pmax.y()));
+        }
+    }
+}
+// ===================== END WTP CLASSIFY DEBUG =====================
+
+void WallToolPaths::separateOutInnerContour()
+{
+    dbg_wtp_classify(debug_print_z, debug_layer_id, toolpaths, inset_count);
+
+    // Classify each line as marker (all junctions w==0), bead (all junctions w>0), or mixed.
+    // Markers contribute to inner_contour. Beads stay in toolpaths. Mixed lines are malformed
+    // (a marker was stitched to a real bead despite the stitcher gate, or upstream produced
+    // a line with in-tolerance width transitions crossing the zero boundary) and would emit
+    // the bead portions as visible extrusion across empty space if kept; drop them.
+    std::vector<VariableWidthLines> actual_toolpaths;
+    actual_toolpaths.reserve(toolpaths.size());
+    inner_contour.clear();
+
+    size_t stripped_mixed_lines = 0;
+    // Set when a dropped even marker was long enough to have bounded a printable region. The
+    // stitcher refuses to close any chain shorter than three stitch distances, so shorter open
+    // markers are tiny loops refused by design, not a lost contour.
+    bool marker_lost = false;
+    auto open_marker = [&](const ExtrusionLine &line, int mixed)
+    {
+        double len = 0.;
+        for (size_t i = 1; i < line.junctions.size(); ++i)
+            len += (line.junctions[i].p - line.junctions[i - 1].p).cast<double>().norm();
+        if (len >= 3. * double(bead_width_x))
+            marker_lost = true;
+        DBG_COUNT("WTP_MARKER_OPEN");
+        if (!Luminary::debug_enabled(Luminary::DBG_PERIMETERS))
+            return;
+        // An even marker the stitcher could not close: the region it should have bounded
+        // loses its inner contour.
+        const Point &a = line.junctions.front().p;
+        const Point &b = line.junctions.back().p;
+        dbg_log(Luminary::DBG_PERIMETERS, debug_print_z, "PERIM",
+                "WTP_MARKER_OPEN layer=%d pts=%zu gap=%.3fmm at=(%.2f,%.2f) mixed=%d bw=%.3fmm len=%.3fmm",
+                debug_layer_id, line.junctions.size(), unscaled<double>((a - b).cast<double>().norm()),
+                unscaled<double>(a.x()), unscaled<double>(a.y()), mixed, unscaled<double>(bead_width_x),
+                unscaled<double>(len));
+    };
+    for (const VariableWidthLines &inset : toolpaths)
+    {
+        if (inset.empty())
+            continue;
+
+        VariableWidthLines kept_lines;
+        kept_lines.reserve(inset.size());
+
+        for (const ExtrusionLine &line : inset)
+        {
+            if (line.junctions.empty())
+                continue;
+
+            bool has_zero = false, has_nonzero = false;
+            for (const ExtrusionJunction &j : line.junctions)
+            {
+                if (j.w == 0)
+                    has_zero = true;
+                else
+                    has_nonzero = true;
+                if (has_zero && has_nonzero)
+                    break;
+            }
+
+            if (has_zero && !has_nonzero)
+            {
+                // Pure marker line. Only closed even markers become the inner contour.
+                if (!line.is_odd && line.is_closed)
+                    inner_contour.emplace_back(line.toPolygon());
+                else if (!line.is_odd)
+                    open_marker(line, 0);
+                // Non-closed markers and odd markers contribute nothing and are dropped.
+            }
+            else if (!has_zero && has_nonzero)
+            {
+                // Pure real-bead line. Keep for downstream g-code emission.
+                kept_lines.emplace_back(line);
+            }
+            else
+            {
+                // Mixed line: marker junctions (w==0) stitched with real beads (w>0).
+                if (!line.is_odd && line.is_closed)
+                    inner_contour.emplace_back(line.toPolygon());
+                else if (!line.is_odd)
+                {
+                    // An open even mixed line drops its marker junctions with it.
+                    open_marker(line, 1);
+                }
+
+                // With perimeters=1, the non-zero segments are gap-fill perimeters
+                // where the wall is wide enough for a second bead. Extract them so
+                // the "(minimum)" contract is honored. For multi-perimeter cases,
+                // mixed lines at inner insets may be stitcher artifacts - drop them.
+                if (inset_count == 1)
+                {
+                    const auto &junctions = line.junctions;
+                    const size_t n = junctions.size();
+
+                    if (line.is_closed)
+                    {
+                        // For closed lines, rotate to start at a zero-width junction
+                        // so the modulo wrap doesn't split a non-zero segment.
+                        size_t zero_start = 0;
+                        for (size_t i = 0; i < n; ++i)
+                        {
+                            if (junctions[i].w == 0)
+                            {
+                                zero_start = i;
+                                break;
+                            }
+                        }
+
+                        ExtrusionLine segment(line.inset_idx, line.is_odd, false);
+                        for (size_t i = 0; i < n; ++i)
+                        {
+                            const ExtrusionJunction &j = junctions[(zero_start + i) % n];
+                            if (j.w > 0)
+                            {
+                                segment.junctions.emplace_back(j);
+                            }
+                            else
+                            {
+                                if (segment.junctions.size() >= 2)
+                                    kept_lines.emplace_back(std::move(segment));
+                                segment = ExtrusionLine(line.inset_idx, line.is_odd, false);
+                            }
+                        }
+                        if (segment.junctions.size() >= 2)
+                            kept_lines.emplace_back(std::move(segment));
+                    }
+                    else
+                    {
+                        // For open lines, iterate linearly - no modulo wrap.
+                        ExtrusionLine segment(line.inset_idx, line.is_odd, false);
+                        for (size_t i = 0; i < n; ++i)
+                        {
+                            const ExtrusionJunction &j = junctions[i];
+                            if (j.w > 0)
+                            {
+                                segment.junctions.emplace_back(j);
+                            }
+                            else
+                            {
+                                if (segment.junctions.size() >= 2)
+                                    kept_lines.emplace_back(std::move(segment));
+                                segment = ExtrusionLine(line.inset_idx, line.is_odd, false);
+                            }
+                        }
+                        if (segment.junctions.size() >= 2)
+                            kept_lines.emplace_back(std::move(segment));
+                    }
+
+                    // Filter segments too small to print (same as removeSmallLines filter #2).
+                    // These are created after removeSmallLines runs, so filter inline.
+                    for (size_t li = 0; li < kept_lines.size();)
+                    {
+                        ExtrusionLine &seg = kept_lines[li];
+                        if (!seg.is_closed && seg.inset_idx == line.inset_idx && !seg.junctions.empty())
+                        {
+                            coord_t min_w = std::numeric_limits<coord_t>::max();
+                            Point pmin = seg.junctions.front().p, pmax = pmin;
+                            for (const ExtrusionJunction &j : seg.junctions)
+                            {
+                                min_w = std::min(min_w, j.w);
+                                pmin.x() = std::min(pmin.x(), j.p.x());
+                                pmin.y() = std::min(pmin.y(), j.p.y());
+                                pmax.x() = std::max(pmax.x(), j.p.x());
+                                pmax.y() = std::max(pmax.y(), j.p.y());
+                            }
+                            if (std::max(pmax.x() - pmin.x(), pmax.y() - pmin.y()) < min_w)
+                            {
+                                seg = std::move(kept_lines.back());
+                                kept_lines.pop_back();
+                                continue;
+                            }
+                        }
+                        ++li;
+                    }
+                }
+
+                ++stripped_mixed_lines;
+            }
+        }
+
+        if (!kept_lines.empty())
+            actual_toolpaths.emplace_back(std::move(kept_lines));
+    }
+
+    if (Luminary::debug_enabled(Luminary::DBG_PERIMETERS) && stripped_mixed_lines > 0)
+    {
+        dbg_log(Luminary::DBG_PERIMETERS, debug_print_z, "PERIM", "WTP_CLASSIFY layer=%d stripped_mixed_lines=%zu",
+                debug_layer_id, stripped_mixed_lines);
+    }
+
+    if (!actual_toolpaths.empty())
+        toolpaths = std::move(actual_toolpaths); // Filtered out the 0-width paths.
+    else
+        toolpaths.clear();
+
+    //The output walls from the skeletal trapezoidation have no known winding order, especially if they are joined together from polylines.
+    //They can be in any direction, clockwise or counter-clockwise, regardless of whether the shapes are positive or negative.
+    //To get a correct shape, we need to make the outside contour positive and any holes inside negative.
+    // Winding-safe union for unknown-winding loops: duplicates are dropped, each loop is
+    // oriented by containment parity, then united with the Positive rule. NonZero swallowed
+    // holes whose stitched winding matched the enclosing contour (fill then crossed the
+    // hole's perimeters); EvenOdd inverts the region when a loop is emitted twice.
+    Luminary::UnknownWindingStats uw_stats;
+    inner_contour = union_unknown_winding(inner_contour, &uw_stats);
+    DBG_COUNT_ADD("WTP_UNION_DUP_DROPPED", uw_stats.duplicates_dropped + uw_stats.near_duplicates_dropped);
+    if (Luminary::debug_enabled(Luminary::DBG_PERIMETERS) &&
+        (uw_stats.duplicates_dropped > 0 || uw_stats.hole_loops > 0 || uw_stats.near_duplicates_dropped > 0))
+        dbg_log(Luminary::DBG_PERIMETERS, debug_print_z, "PERIM", "WTP_UNION dup_dropped=%zu holes=%zu near_dup=%zu",
+                uw_stats.duplicates_dropped, uw_stats.hole_loops, uw_stats.near_duplicates_dropped);
+
+    // Remove inner contour regions already covered by expanded perimeter beads.
+    // The bead width adjustment expands innermost beads to absorb leftover gaps,
+    // but the zero-width contour markers were placed before adjustment and still
+    // show those gaps. Compute the physical coverage of innermost beads and subtract.
+    if (!inner_contour.empty() && !toolpaths.empty())
+    {
+        int innermost_inset = -1;
+        for (const VariableWidthLines &inset : toolpaths)
+            for (const ExtrusionLine &line : inset)
+                if (!line.junctions.empty() && line.junctions.front().w > 0)
+                    innermost_inset = std::max(innermost_inset, (int) line.inset_idx);
+
+        if (innermost_inset >= 0)
+        {
+            Polygons bead_coverage;
+            for (const VariableWidthLines &inset : toolpaths)
+            {
+                for (const ExtrusionLine &line : inset)
+                {
+                    if ((int) line.inset_idx != innermost_inset || line.junctions.size() < 2)
+                        continue;
+                    for (size_t i = 0; i + 1 < line.junctions.size(); i++)
+                    {
+                        const auto &j0 = line.junctions[i];
+                        const auto &j1 = line.junctions[i + 1];
+                        if (j0.w == 0 && j1.w == 0)
+                            continue;
+                        // Average half-width approximates the tapered bead shape
+                        coord_t half_w = (j0.w + j1.w) / 4;
+                        if (half_w <= 0)
+                            continue;
+                        Polyline seg;
+                        seg.points = {j0.p, j1.p};
+                        append(bead_coverage, offset(seg, half_w));
+                    }
+                }
+            }
+            if (!bead_coverage.empty())
+            {
+                bead_coverage = union_(bead_coverage);
+                inner_contour = diff(inner_contour, bead_coverage);
+            }
+        }
+    }
+
+    // A lost marker leaves its region with no inner contour, or with an orphaned hole-side
+    // loop that the parity union turns into an island. The inner contour of the whole instance
+    // is then built geometrically: the outline eroded by the nominal wall depth, minus the
+    // footprint of every emitted bead. A throat thinner than two wall depths vanishes in the
+    // erosion, so the region closes there; everywhere else this is the inner edge of the
+    // innermost bead, which is what the marker approximates.
+    if (marker_lost && !outline.empty() && !toolpaths.empty())
+    {
+        Polygons footprints;
+        for (const VariableWidthLines &inset : toolpaths)
+        {
+            for (const ExtrusionLine &line : inset)
+            {
+                for (size_t i = 0; i + 1 < line.junctions.size(); i++)
+                {
+                    const auto &j0 = line.junctions[i];
+                    const auto &j1 = line.junctions[i + 1];
+                    const coord_t half_w = (j0.w + j1.w) / 4;
+                    if (half_w <= 0)
+                        continue;
+                    Polyline seg;
+                    seg.points = {j0.p, j1.p};
+                    append(footprints, offset(seg, half_w));
+                }
+            }
+        }
+        // Interlocking shells are spaced apart on purpose (lanes for the alternating layer's
+        // beads), so the footprints are closed into one band before subtraction: gaps up to one
+        // bead spacing are filled and two bands closer than that merge.
+        const float closing_radius = float(bead_width_x) / 2.f;
+        const ExPolygons band = offset_ex(offset_ex(union_ex(footprints), closing_radius), -closing_radius);
+        // Nominal wall depth: outline edge to the inner edge of the innermost bead, with the
+        // per-inset spacing and width overrides this instance was built with (interlocking
+        // halves the innermost spacing and fixes the shell widths). The erosion bounds the core
+        // where this instance left room for beads a later pass adds; the band subtraction
+        // trims beads that were widened into the core.
+        coord_t nominal_depth = bead_width_0 / 2;
+        for (size_t i = 1; i < inset_count; ++i)
+        {
+            coord_t spacing = bead_width_x;
+            if (i == 1 && spacing_override_external > 0)
+                spacing = spacing_override_external;
+            else if (i + 1 == inset_count && spacing_override_innermost > 0)
+                spacing = spacing_override_innermost;
+            else if (spacing_override_internal > 0)
+                spacing = spacing_override_internal;
+            nominal_depth += spacing;
+        }
+        nominal_depth += (inset_count == 1           ? bead_width_0
+                          : fixed_width_internal > 0 ? fixed_width_internal
+                                                     : bead_width_x) /
+                         2;
+        // An opening by a quarter bead drops the slivers left between beads and along the outline.
+        const float sliver = float(bead_width_x) / 4.f;
+        ExPolygons geometric = offset_ex(offset_ex(diff_ex(offset_ex(union_ex(outline), -float(nominal_depth)), band),
+                                                   -sliver),
+                                         sliver);
+        DBG_COUNT("WTP_CONTOUR_GEOMETRIC");
+        if (Luminary::debug_enabled(Luminary::DBG_PERIMETERS))
+        {
+            auto area_of = [](const ExPolygons &polys)
+            {
+                double a = 0.;
+                for (const ExPolygon &ep : polys)
+                    a += std::abs(ep.area());
+                return a * 1e-12;
+            };
+            dbg_log(Luminary::DBG_PERIMETERS, debug_print_z, "PERIM",
+                    "WTP_CONTOUR_GEOMETRIC layer=%d islands=%zu area=%.4fmm2 marker_area=%.4fmm2 eroded=%.4fmm2 "
+                    "band=%.4fmm2 depth=%.3fmm bw0=%.3fmm bwx=%.3fmm insets=%zu",
+                    debug_layer_id, geometric.size(), area_of(geometric), area_of(union_ex(inner_contour)),
+                    area_of(offset_ex(union_ex(outline), -float(nominal_depth))), area_of(band),
+                    unscaled<double>(nominal_depth), unscaled<double>(bead_width_0), unscaled<double>(bead_width_x),
+                    inset_count);
+        }
+        inner_contour = to_polygons(geometric);
+    }
+
+    // If we have more bead sets than the user requested perimeters, but no contours,
+    // we need to create a zero-width contour for infill boundary
+    int bead_count = toolpaths.size();
+    int contour_count = inner_contour.empty() ? 0 : 1;
+
+    if (bead_count > static_cast<int>(inset_count) && contour_count == 0 && !toolpaths.empty())
+    {
+        // Find the innermost perimeter that has closed paths
+        int innermost_idx = static_cast<int>(toolpaths.size()) - 1;
+        while (innermost_idx >= 0)
+        {
+            bool has_closed = false;
+            for (const ExtrusionLine &line : toolpaths[innermost_idx])
+            {
+                if (line.is_closed)
+                {
+                    has_closed = true;
+                    break;
+                }
+            }
+            if (has_closed)
+                break;
+            innermost_idx--;
+        }
+
+        if (innermost_idx >= 0)
+        {
+            // Create contour from the innermost perimeter's centerline
+            for (const ExtrusionLine &line : toolpaths[innermost_idx])
+            {
+                if (line.is_closed && !line.junctions.empty())
+                {
+                    // Build the polygon from the perimeter path
+                    Polygon contour_poly;
+                    for (const ExtrusionJunction &junction : line.junctions)
+                    {
+                        contour_poly.points.emplace_back(junction.p);
+                    }
+
+                    // Use the innermost perimeter's centerline directly as the contour
+                    // The infill generation will handle the overlap setting (0%) from there
+                    inner_contour.emplace_back(contour_poly);
+                }
+            }
+        }
+    }
+
+    // If inner_contour exists but is too thin for solid infill, trigger regeneration with +1 bead
+    // This prevents gaps where solid infill algorithms fail on thin/irregular regions
+    // Example: With 4 perimeters, a region may be just barely too wide, creating thin solid infill
+    // that can't fill properly. Adding a 5th perimeter allows Athena's gap fill to work correctly.
+    if (!inner_contour.empty() && inset_count > 0 && !m_thin_contour_regeneration_attempted)
+    {
+        // "Too thin" is measured against the bead that will fill the region: the smaller of the
+        // centerline pitch and the fixed internal width. For interlocking shells the pitch is
+        // about twice the width; for plain perimeters the width exceeds the spacing by the
+        // overlap and the spacing is the yardstick as before.
+        const coord_t fill_bead = fixed_width_internal > 0 ? std::min(fixed_width_internal, bead_width_x)
+                                                           : bead_width_x;
+        // Calculate threshold: region is "too thin" if it can't fit 2 bead widths
+        // (solid infill needs at least ~2 passes to fill properly)
+        const coord_t thin_threshold = coord_t(fill_bead * 2.0);
+        const coord_t test_offset = thin_threshold / 2;
+
+        // Quick test: if inner_contour collapses when offset inward, it's too thin for solid infill
+        Polygons eroded = offset(inner_contour, -test_offset);
+
+        if (!eroded.empty() && fill_bead != bead_width_x && Luminary::debug_enabled(Luminary::DBG_PERIMETERS) &&
+            offset(inner_contour, -bead_width_x).empty())
+        {
+            // The region holds two fill beads but fewer than two pitches: the pitch yardstick
+            // would have regenerated here and lost the markers.
+            DBG_COUNT("WTP_THIN_SKIP");
+            dbg_log(Luminary::DBG_PERIMETERS, debug_print_z, "PERIM",
+                    "WTP_THIN_SKIP layer=%d fill_bead=%.3fmm pitch=%.3fmm contours=%zu", debug_layer_id,
+                    unscaled<double>(fill_bead), unscaled<double>(bead_width_x), inner_contour.size());
+        }
+
+        if (eroded.empty())
+        {
+            // Inner contour is too thin for solid infill
+            // But check if it's at least half a bead wide (not just a tiny gap that gap fill handles)
+            const coord_t min_sensible_width = fill_bead / 2;
+            Polygons min_eroded = offset(inner_contour, -min_sensible_width / 2);
+
+            if (!min_eroded.empty())
+            {
+                // Region is between 0.5x and 2.0x bead width - perfect candidate for extra bead
+                // Trigger regeneration with +1 bead count
+                DBG_COUNT("WTP_THIN_REGEN");
+                dbg_log(Luminary::DBG_PERIMETERS, debug_print_z, "PERIM",
+                        "WTP_THIN_REGEN layer=%d inset_count=%zu->%zu contours=%zu", debug_layer_id, inset_count,
+                        inset_count + 1, inner_contour.size());
+                m_thin_contour_regeneration_attempted = true; // Prevent infinite recursion
+
+                // Clear current state
+                toolpaths.clear();
+                inner_contour.clear();
+                toolpaths_generated = false;
+
+                // Increment inset_count and regenerate
+                inset_count++;
+                auto pg_retry_t0 = std::chrono::steady_clock::now();
+                generate(); // Re-run entire generation with new bead count
+                Luminary::g_pg_thin_retry.add(pg_retry_t0, std::chrono::steady_clock::now());
+
+                // Note: generate() calls separateOutInnerContour() again
+                // The flag prevents this block from triggering a second time
+                return; // Exit early, new contour is already computed
+            }
+        }
+    }
+}
+
+const Polygons &WallToolPaths::getInnerContour()
+{
+    if (!toolpaths_generated && inset_count > 0)
+    {
+        generate();
+    }
+    else if (inset_count == 0)
+    {
+        return outline;
+    }
+    return inner_contour;
+}
+
+bool WallToolPaths::removeEmptyToolPaths(std::vector<VariableWidthLines> &toolpaths)
+{
+    toolpaths.erase(std::remove_if(toolpaths.begin(), toolpaths.end(),
+                                   [](const VariableWidthLines &lines) { return lines.empty(); }),
+                    toolpaths.end());
+    return toolpaths.empty();
+}
+
+} // namespace Luminary::Athena

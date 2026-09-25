@@ -27,12 +27,10 @@ else ()
     set(_wx_secretstore "-DwxUSE_SECRETSTORE=ON")
 endif ()
 
-# Prusa's fork was 9,892 commits behind upstream. wx 3.2.9 (stable branch) includes:
-# - 4+ years of bug fixes and improvements
-# - Same API as Prusa's fork was based on (no breaking changes)
-# - macOS 14 CGDisplayCreateImage deprecation fix (no patch needed)
-# NOTE: wx 3.3.1 was attempted but had severe breaking changes (wxStaticBoxSizer, private headers)
-#       See NEXT_AGENT.md for details on the 3.3.1 attempt and why we're using 3.2.9
+# Upstream wx 3.2.9 (stable branch), unpatched:
+# - the macOS 14 CGDisplayCreateImage deprecation fix is included (no patch needed)
+# NOTE: wx 3.3.1 has breaking changes for this code base (wxStaticBoxSizer, private headers), which
+#       is why the 3.2 stable branch is used
 add_cmake_project(wxWidgets
     URL https://github.com/wxWidgets/wxWidgets/releases/download/v3.2.9/wxWidgets-3.2.9.zip
     URL_HASH SHA256=cdfc198704c9f8faecf1f5fa6510c6e78f4562d8c803a51c97f5f71b01907b15

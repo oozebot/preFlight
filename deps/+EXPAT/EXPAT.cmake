@@ -1,8 +1,6 @@
-# The integer overflow fix (CVE-2022-22826) was already in 2.4.3 upstream.
-# v2.6.4 includes additional security fixes: CVE-2022-40674, CVE-2024-28757, etc.
 add_cmake_project(EXPAT
-  URL https://github.com/libexpat/libexpat/archive/refs/tags/R_2_6_4.zip
-  URL_HASH SHA256=80e29f3af7372def1e36f4bff26987e21cdcb6dd65c4a34d52974c6eb60f91ad
+  URL https://github.com/libexpat/libexpat/archive/refs/tags/R_2_8_5.zip
+  URL_HASH SHA256=2eb1428d8ef3de0a9cd2f63d6267a4abbe8acb206ebc8833ff9b120eaa99ba02
   SOURCE_SUBDIR expat
   CMAKE_ARGS
     -DEXPAT_BUILD_TOOLS:BOOL=OFF

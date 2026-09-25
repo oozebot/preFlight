@@ -1,0 +1,44 @@
+///|/ Copyright (c) preFlight 2025+ oozeBot, LLC
+///|/ Copyright (c) Prusa Research 2018 - 2019 Oleksandra Iushchenko @YuSanka, Vojtěch Bubník @bubnikv
+///|/
+///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
+///|/
+#pragma once
+
+#include "GUI.hpp"
+#include "GUI_Utils.hpp"
+
+#include <wx/wx.h>
+#include <wx/intl.h>
+#include <wx/html/htmlwin.h>
+
+namespace DSKY
+{
+using namespace Luminary;
+
+namespace Config
+{
+class SnapshotDB;
+}
+
+class ConfigSnapshotDialog : public DPIDialog
+{
+public:
+    ConfigSnapshotDialog(const Config::SnapshotDB &snapshot_db, const wxString &id);
+    const std::string &snapshot_to_activate() const { return m_snapshot_to_activate; }
+
+protected:
+    void on_dpi_changed(const wxRect &suggested_rect) override;
+
+private:
+    void onLinkClicked(wxHtmlLinkEvent &event);
+    void onCloseDialog(wxEvent &);
+
+    // If set, it contains a snapshot ID to be restored after the dialog closes.
+    std::string m_snapshot_to_activate;
+
+    wxHtmlWindow *html;
+};
+
+} // namespace DSKY
+

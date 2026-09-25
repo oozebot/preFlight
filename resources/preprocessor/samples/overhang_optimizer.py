@@ -20,7 +20,6 @@ BRIDGE_SPEED_FACTOR = 0.4       # bridges need even more care
 def process(gcode: preFlight.GCode):
     base_temp = int(gcode.settings.temperature.split(";")[0])
     modified_layers = 0
-    prev_layer_had_overhangs = False
 
     for layer in gcode.layers:
         overhang_moves = layer.moves_by_role(ExtrusionRole.OverhangPerimeter)
@@ -49,12 +48,7 @@ def process(gcode: preFlight.GCode):
                     move.fan_speed = OVERHANG_FAN
                     move.temperature = base_temp - OVERHANG_TEMP_DROP
 
-        elif prev_layer_had_overhangs:
-            first_ext = next((m for m in layer.moves if m.type == MoveType.Extrude), None)
-            if first_ext:
-                first_ext.temperature = base_temp
-                first_ext.annotation = "restore temp after overhang"
-
-        prev_layer_had_overhangs = has_overhangs
+        # Fan and temperature return to their original values automatically before
+        # the first unmodified extruding move after the tuned moves; no manual restore.
 
     print(f"[overhang_optimizer] Tuned {modified_layers} layers with overhangs")

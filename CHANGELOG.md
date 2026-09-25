@@ -1,5 +1,138 @@
 # preFlight Changelog
 
+## v1.4.0
+
+### RIP Slic3r! Long live Luminary!
+One of our initial goals with preFlight was to retire libslic3r, the 15-year-old engine at its core. With the next release, we're doing exactly that with the introduction of Luminary as its replacement. This isn't just a rename, it's an entire ground-up reimagining of the engine we've been working towards for the past 18 months, with additional modernization still ahead that will land in future releases. And while we were at it, the UI formerly known as slic3r becomes DSKY.
+
+For anyone curious about why these names were chosen, look up Apollo 13. When an oxygen tank blew on the way to the Moon, the crew powered down the Command Module to save it for reentry and used the lunar lander, Aquarius, as a lifeboat. The software that flew Aquarius home was Luminary, and the crew ran those critical burns by hand through the DSKY, the display and keyboard unit. Neither Luminary nor the DSKY was meant to save a mission, but together they brought the crew back alive. That's the pedigree we want for the engine everything else depends on.
+
+And for the record, we owe a real debt to everyone who built Slic3r and PrusaSlicer over the years - the remaining attributions carry forward, as it should.
+
+If we did it right, you won't notice any of this: your profiles, projects and G-code are unchanged. Post-processing scripts now also receive `PREFLIGHT_PP_HOST` and `PREFLIGHT_PP_OUTPUT_NAME`, and the old `SLIC3R_PP_*` names are still set, so existing scripts keep working.
+
+### Sidebar (Re)Slicing
+- Sidebar processing replaces background processing
+- The Sidebar is now available in the Preview via the "hamburger" icon beside the Legend near the top. Clicking it swaps the Legend for the Sidebar
+- In the Preview, any change made within the Sidebar automatically reslices
+  - Changes made anywhere else, including the Settings tabs, return the button to Slice
+  - Changes made in Prepare never trigger a slice
+- Objects can be selected in the Preview by clicking them, with the same selection box as in Prepare
+
+### Sidebar Overrides
+- The object settings panel has been rebuilt. Click the new Overrides column at the far right of the Object list to open it for any object or part
+  - Every setting the item can override is listed with a checkbox to enable it and a lock showing whether it matches the project value
+  - Changes prompt the same way the main settings do, such as enabling Serpentine or setting 100% infill with a pattern that can't be solid
+- The old right-click "Add settings" flow has been retired
+- The object info panel under the Object list has been removed, giving the list more room
+
+### Rendering & Camera
+- Alt+Middle click centers the view and the orbit point on whatever is under the cursor, toolpaths included
+- New "Full (shadows + AO)" lighting quality with shadows, ambient occlusion and physically based shading in Prepare and Preview. Toolpaths cast and receive shadows
+- Supersampling (Off, 1.5x, 2x) removes aliasing in dense previews and applies without a restart
+- Preferences > Camera offers mouse navigation schemes matching Blender, Fusion 360, SolidWorks and Tinkercad
+- Changing MSAA now prompts for the restart it needs
+
+### Settings
+- The categories inside the Print, Filament and Printer panels of the Sidebar now collapse to assist with navigation, and stay the way you left them
+- Disabled settings now say why, such as "Available when <setting> is enabled"
+- New setting: Small perimeter diameter (default 13 mm, previously a fixed 6.5 mm radius)
+- New setting: Support alerts (on by default). Turn it off to skip stability analysis on objects without automatic supports
+- New per-object setting: Minimum wall length for Athena and Arachne (#277)
+  - Single thin walls shorter than this are skipped, avoiding strings of tiny stubs
+  - The default (50%) matches previous behavior
+- First layer speed, First layer solid infill speed and the over-raft speed are now limits, so features already set slower keep their own speed on the first layer. 0 disables the limit
+
+### Supports
+- Organic, Baobab and Snug supports now reach sloped overhangs, and painted supports ignore the threshold angle
+- New per-object "Minimum opening" for Organic and Baobab (default 8 mm): branches no longer route through holes or slots narrower than this. Set it to 0 to allow them
+- "Support on build plate only" can now be set whenever supports are generated, including painted Organic supports. "Plant trunks on object" had the same problem (#285)
+- Tree and Organic support roof lines follow the interface angle and alternate each layer instead of always printing at 45 degrees
+- Baobab: new "Trunk consolidation" setting (default 4 mm). Higher values give fewer, larger trunks
+- Baobab: redundant trunks are removed, the base under each interface covers the whole interface, and canopies keep their clearance from the model
+- Baobab: moving or rotating an object no longer produces a different tree
+- The print stability alert now separates unsupported geometry from bed adhesion and part strength issues
+- Fixed thick Organic branches near walls being cut flat
+- Fixed Organic support branches printing through the interface under some overhangs
+- Projects saved with the old "tree" support style now load as Organic
+
+### Seams
+- Painted seams follow the center of the paint stroke, so a slightly wobbly stroke should generate a straight seam, in every seam mode
+- Nip/Tuck notches span their full configured width and no longer collapse on tapered walls
+- Seam notch width can now go down to 0.5x the external perimeter width (#237)
+
+### Serpentine
+- Fixed islands Serpentine can't fully cover printing about half a bead oversized. The uncovered parts now print as normal walls, with one notification per object
+- Fixed thin walls alternating between Serpentine and normal walls from layer to layer
+- Fixed small solid islands such as bolt heads being left hollow in the center
+- The Serpentine extrusion width is now validated like every other width
+- Several of these fixes were inspired by an experimental Serpentine build shared by @LeoMoz (thank you!)
+
+### Printers
+- New option "Combine Z into first travel" (Printer Settings > General > Advanced): the first move to the print is one diagonal move, so a nozzle parked high doesn't drop to layer height and skim across the bed (#262)
+- Klipper physical printers now have an optional separate web interface address, for setups where Mainsail or Fluidd is served apart from Moonraker (#169)
+- New preference (Preferences > GUI): "Open the printer web interface in the system browser"
+- Downloaded updates only run when signed by oozeBot
+
+### Preprocessing
+- Time estimates, filament statistics and M73 progress now reflect the changes scripts make
+- Fan and temperature overrides apply only to the moves a script changes instead of carrying over for whole layers
+- Scripts have a time limit and can be interrupted with Cancel
+- The console asks before running scripts embedded in a project
+- API: layers can now search their own G-code, `layer.z` ignores z-hops, and invalid line numbers raise `ValueError`
+
+### Performance
+- Slicing on Windows is 10 to 17 percent faster. Memory allocation now goes through tbbmalloc instead of the Windows heap (not on Windows ARM64)
+  - If Windows blocks tbbmalloc, for example with Arbitrary Code Guard turned on in Exploit Protection, preFlight falls back to the Windows heap. Set `TBB_MALLOC_DISABLE_REPLACEMENT=1` to turn tbbmalloc off
+- Ironing no longer stalls on narrow top surfaces (one test case went from 30 seconds to less than 5)
+- Projects using Interlocking Perimeters or an over-bridge speed slice up to twice as fast
+- A settings change only reruns the steps it affects, so many changes reslice in a fraction of the time
+- Large Baobab supports slice much faster
+- Travel planning is much faster with Avoid crossing curled overhangs enabled
+
+### Bug Fixes / Other tweaks
+- Fixed the Linux AppImage printer tab crashing on newer systems such as Ubuntu 26.04 and never loading on systems older than 24.04
+  - If the page fails, preFlight now opens it in your browser (#281)
+- Fixed Linux desktop integration asking to update itself at every launch when a packaged preFlight.desktop already exists in a system directory
+- Fixed print time estimates on curved parts reading up to 3x too long with junction deviation or Klipper, which also made preview layer times disagree with auto-cooling (#274)
+- Fixed a crash when enabling "Use surface" in the Emboss gizmo (#278)
+- Switching to a printer with fewer extruders and back now restores each slot's filament and color (#94)
+- Fixed a Sidebar UI lag while a Settings tab is open, and when loading a project that switches to a printer with more extruders
+- Fixed the printer tab keeping the previous printer's name after switching physical printers (#284)
+- Fixed the Print Settings and Printer rows being cut off in the Objects tab on macOS (#276)
+- Fixed per-feature fan speeds being skipped in manual fan mode
+- Fixed the first slice of a project ignoring filament shrinkage compensation
+- Fixed the per-object slice closing radius using the first object's value for every object
+- Slicing the same project twice now gives identical G-code (except with random seams)
+- Fixed the per-extruder nozzle rows showing as modified with some projects
+- Fixed projects loading with the previous project's first filament selected
+- Fixed the color mixing palette using stale printer colors instead of the filament colors
+- Fixed the title losing its unsaved-changes marker after long editing sessions
+- Fixed uploads reporting success when the G-code file couldn't be read
+- Fixed objects in the notch of an L- or U-shaped custom bed counting as inside the print area
+- Spiral vase with absolute extrusion now warns that it skips the entry and exit tapers
+- Fixed a crash when closing preFlight during the startup update check
+- Fixed Repair STL and mesh export reporting success when they failed
+- Fixed several error messages showing in English in every language
+- Several custom G-code errors are now easier to read
+- Fixed missing solid fill and misplaced bridge anchors with Interlocking Perimeters
+- Fixed clipping plane cross-sections stretching into long spikes
+- The Clipping Plane entry is now available on every object and centers the view on it
+- The Filament tab shows the extruder selector for every printer with more than one extruder
+- Many smaller robustness fixes in 3MF loading, print host uploads, painting gizmos and fuzzy skin
+
+### Klipper
+- Moonraker v0.11.0 (released 2026-08-25) is the first version that recognizes G-code sliced by preFlight
+  - Moonraker v0.9.3 and older show no thumbnails for preFlight G-code. v0.10.0 shows thumbnails but not the other details below
+  - Older versions treat preFlight as an unknown slicer and read only the first layer height, object height and first layer temperatures
+  - The estimated print time, filament used and weight, layer height, layer count, nozzle diameter, and filament names, types and colors are missing in Mainsail and Fluidd until Moonraker is updated
+
+### Build
+- IMPORTANT: Building from source requires a clean dependency rebuild on every platform: run `build_deps.bat -clean` (Windows) or `./build_deps.sh -clean` (Linux, macOS) before building
+- Bumped bundled expat from 2.6.4 to 2.8.5 for its XML parser security fixes
+- `build_deps` now names the dependency that failed instead of stopping silently
+
+
 ## v1.3.0
 
 ### Baobab (AKA 'Great Tree') Supports

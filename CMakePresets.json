@@ -8,10 +8,10 @@
             "binaryDir": "${sourceDir}/build-default",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
-                "SLIC3R_STATIC": true,
-                "SLIC3R_GTK": "3",
-                "SLIC3R_ENC_CHECK": false,
-                "SLIC3R_PCH": true,
+                "PREFLIGHT_STATIC": true,
+                "PREFLIGHT_GTK": "3",
+                "PREFLIGHT_ENC_CHECK": false,
+                "PREFLIGHT_PCH": true,
                 "CMAKE_INSTALL_PREFIX": "${sourceDir}/build-default/dist",
                 "preFlight_DEPS_PRESET": "default",
                 "preFlight_DEPS_OUTPUT_QUIET": false
@@ -24,7 +24,7 @@
             "inherits": "default",
             "binaryDir": "${sourceDir}/build-no-occt",
             "cacheVariables": {
-                "SLIC3R_ENABLE_FORMAT_STEP": false,
+                "PREFLIGHT_ENABLE_FORMAT_STEP": false,
                 "preFlight_DEPS_PRESET": "no-occt"
             }
         },
@@ -35,10 +35,10 @@
             "binaryDir": "${sourceDir}/shareddeps",
             "cacheVariables": {
                 "CMAKE_BUILD_TYPE": "Release",
-                "SLIC3R_STATIC": false,
-                "SLIC3R_GTK": "3",
-                "SLIC3R_ENC_CHECK": false,
-                "SLIC3R_PCH": true,
+                "PREFLIGHT_STATIC": false,
+                "PREFLIGHT_GTK": "3",
+                "PREFLIGHT_ENC_CHECK": false,
+                "PREFLIGHT_PCH": true,
                 "preFlight_BUILD_DEPS": false
             }
         }

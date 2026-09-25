@@ -1,4 +1,4 @@
-# See src/slic3r/GUI/Mouse3DController.cpp for the list of devices
+# See src/DSKY/GUI/Mouse3DController.cpp for the list of devices
 
 # Logitech vendor devices
 KERNEL=="hidraw*", ATTRS{idVendor}=="046d", ATTRS{idProduct}=="c603", MODE="0666"

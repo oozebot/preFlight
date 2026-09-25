@@ -9,14 +9,16 @@
 #include <boost/nowide/fstream.hpp>
 #include <boost/dll/runtime_symbol_info.hpp>
 
-#include "libslic3r/libslic3r.h"
-#include "libslic3r/Config.hpp"
-#include "libslic3r/PrintConfig.hpp"
-#include "libslic3r/Platform.hpp"
-#include "libslic3r/Utils.hpp"
-#include "libslic3r/Thread.hpp"
-#include "libslic3r/BlacklistedLibraryCheck.hpp"
-#include "libslic3r/Utils/DirectoriesUtils.hpp"
+#include "luminary/core/Prelude.hpp"
+#include "luminary/config/model/Config.hpp"
+#include "luminary/config/catalog/PrintConfig.hpp"
+#include "luminary/platform/host/Platform.hpp"
+#include "luminary/platform/concurrency/WorkerPolicy.hpp"
+#include "luminary/platform/paths/Paths.hpp"
+#include "luminary/platform/process/Process.hpp"
+#include "luminary/platform/concurrency/Thread.hpp"
+#include "luminary/platform/host/BlacklistedLibraryCheck.hpp"
+#include "luminary/platform/paths/Paths.hpp"
 
 #include "CLI.hpp"
 
@@ -26,11 +28,11 @@
 #include <cstring>
 #endif
 
-#ifdef SLIC3R_GUI
-// #include "slic3r/Utils/ServiceConfig.hpp"
-#endif /* SLIC3R_GUI */
+#ifdef PREFLIGHT_GUI
+// #include "DSKY/Utils/ServiceConfig.hpp"
+#endif /* PREFLIGHT_GUI */
 
-namespace Slic3r::CLI
+namespace Luminary::CLI
 {
 
 Data::Data()
@@ -229,7 +231,7 @@ static bool read(Data &data, int argc, const char *const argv[])
 static bool setup_common()
 {
     // Mark the main thread for the debugger and for runtime checks.
-    set_current_thread_name("slic3r_main");
+    set_current_thread_name("preflight_main");
     // Save the thread ID of the main thread.
     save_main_thread_id();
 
@@ -296,7 +298,7 @@ static bool setup_common()
     }
     catch (const std::runtime_error &ex)
     {
-        std::string caption = std::string(SLIC3R_APP_NAME) + " Error";
+        std::string caption = std::string(PREFLIGHT_APP_NAME) + " Error";
         std::string text =
             std::string("An error occured while setting up locale.\n") +
             (
@@ -304,9 +306,9 @@ static bool setup_common()
                 // likely some linux system
                 "You may need to reconfigure the missing locales, likely by running the \"locale-gen\" and \"dpkg-reconfigure locales\" commands.\n"
 #endif
-                SLIC3R_APP_NAME " will now terminate.\n\n") +
+                PREFLIGHT_APP_NAME " will now terminate.\n\n") +
             ex.what();
-#if defined(_WIN32) && defined(SLIC3R_GUI)
+#if defined(_WIN32) && defined(PREFLIGHT_GUI)
         MessageBoxA(NULL, text.c_str(), caption.c_str(), MB_OK | MB_ICONERROR);
 #endif
         boost::nowide::cerr << text.c_str() << std::endl;
@@ -314,22 +316,22 @@ static bool setup_common()
     }
 
     {
-        Slic3r::set_logging_level(1);
-        const char *loglevel = boost::nowide::getenv("SLIC3R_LOGLEVEL");
+        Luminary::set_logging_level(1);
+        const char *loglevel = boost::nowide::getenv("PREFLIGHT_LOGLEVEL");
         if (loglevel != nullptr)
         {
             if (loglevel[0] >= '0' && loglevel[0] <= '9' && loglevel[1] == 0)
                 set_logging_level(loglevel[0] - '0');
             else
-                boost::nowide::cerr << "Invalid SLIC3R_LOGLEVEL environment variable: " << loglevel << std::endl;
+                boost::nowide::cerr << "Invalid PREFLIGHT_LOGLEVEL environment variable: " << loglevel << std::endl;
         }
     }
 
-    // Detect the operating system flavor after SLIC3R_LOGLEVEL is set.
+    // Detect the operating system flavor after PREFLIGHT_LOGLEVEL is set.
     detect_platform();
 
 #ifdef WIN32
-    // Notify user that a blacklisted DLL was injected into preFlight process (for example Nahimic, see GH #5573).
+    // Notify the user that a blacklisted DLL was injected into the preFlight process (for example Nahimic).
     // We hope that if a DLL is being injected into a preFlight process, it happens at the very start of the application,
     // thus we shall detect them now.
     if (BlacklistedLibraryCheck::get_instance().perform_check())
@@ -350,25 +352,25 @@ static bool setup_common()
     // boost::filesystem::path path_to_binary = boost::filesystem::system_complete(argv[0]);
     boost::filesystem::path path_to_binary = boost::dll::program_location();
 
-    // Path from the Slic3r binary to its resources.
+    // Path from the preFlight binary to its resources.
 #ifdef __APPLE__
-    // The application is packed in the .dmg archive as 'Slic3r.app/Contents/MacOS/Slic3r'
-    // The resources are packed to 'Slic3r.app/Contents/Resources'
+    // The application is packed in the .dmg archive as 'preFlight.app/Contents/MacOS/preFlight'
+    // The resources are packed to 'preFlight.app/Contents/Resources'
     boost::filesystem::path path_resources = boost::filesystem::canonical(path_to_binary).parent_path() /
                                              "../Resources";
 #elif defined _WIN32
     // The application is packed in the .zip archive in the root,
     // The resources are packed to 'resources'
-    // Path from Slic3r binary to resources:
+    // Path from the preFlight binary to resources:
     boost::filesystem::path path_resources = path_to_binary.parent_path() / "resources";
-#elif defined SLIC3R_FHS
+#elif defined PREFLIGHT_FHS
     // The application is packaged according to the Linux Filesystem Hierarchy Standard
     // Resources are set to the 'Architecture-independent (shared) data', typically /usr/share or /usr/local/share
-    boost::filesystem::path path_resources = SLIC3R_FHS_RESOURCES;
+    boost::filesystem::path path_resources = PREFLIGHT_FHS_RESOURCES;
 #else
-    // The application is packed in the .tar.bz archive (or in AppImage) as 'bin/slic3r',
+    // The application is packed in the .tar.bz archive (or in AppImage) as 'bin/preflight',
     // The resources are packed to 'resources'
-    // Path from Slic3r binary to resources:
+    // Path from the preFlight binary to resources:
     boost::filesystem::path path_resources = boost::filesystem::canonical(path_to_binary).parent_path() /
                                              "../resources";
 #endif
@@ -407,7 +409,7 @@ bool setup(Data &cli, int argc, char **argv)
 
     set_data_dir(cli.misc_config.has("datadir") ? cli.misc_config.opt_string("datadir") : get_default_datadir());
 
-    // #ifdef SLIC3R_GUI
+    // #ifdef PREFLIGHT_GUI
     //     if (cli.misc_config.has("webdev")) {
     //         Utils::ServiceConfig::instance().set_webdev_enabled(cli.misc_config.opt_bool("webdev"));
     //     }
@@ -415,4 +417,4 @@ bool setup(Data &cli, int argc, char **argv)
     return true;
 }
 
-} // namespace Slic3r::CLI
+} // namespace Luminary::CLI

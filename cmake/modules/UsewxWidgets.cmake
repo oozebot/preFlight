@@ -1,4 +1,4 @@
-# PrusaSlicer: this is a direct copy of the UsewxWidgets.cmake module
+# preFlight: this is a direct copy of the UsewxWidgets.cmake module
 # within the original CMake 3.27 distribution
 
 # Distributed under the OSI-approved BSD 3-Clause License.  See accompanying

@@ -243,7 +243,7 @@ static bool stl_read(stl_file *stl, FILE *fp, int first_facet, bool first)
 
 bool stl_open(stl_file *stl, const char *file)
 {
-    Slic3r::CNumericLocalesSetter locales_setter;
+    Luminary::CNumericLocalesSetter locales_setter;
 	stl->clear();
 	FILE *fp = stl_open_count_facets(stl, file);
 	if (fp == nullptr)

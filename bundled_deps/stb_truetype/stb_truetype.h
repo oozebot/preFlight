@@ -1,4 +1,4 @@
-// Standalone stb_truetype.h 1.20 for libslic3r font processing.
+// Standalone stb_truetype.h 1.20 for the engine's font processing.
 // Originally from imgui's bundled copy with minor compiler/static analyzer fixes.
 // Grep for [DEAR IMGUI] to find the changes from upstream stb_truetype.
 

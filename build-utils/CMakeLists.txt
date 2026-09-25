@@ -1,12 +1,12 @@
 
-option(SLIC3R_ENC_CHECK "Verify encoding of source files" 1)
+option(PREFLIGHT_ENC_CHECK "Verify encoding of source files" 1)
 
 if (IS_CROSS_COMPILE)
     # Force disable due to cross compilation. This fact is already printed on cli for users
-    set(SLIC3R_ENC_CHECK OFF CACHE BOOL "" FORCE)
+    set(PREFLIGHT_ENC_CHECK OFF CACHE BOOL "" FORCE)
 endif ()
 
-if (SLIC3R_ENC_CHECK)
+if (PREFLIGHT_ENC_CHECK)
     add_executable(encoding-check encoding-check.cpp)
     set_target_properties(encoding-check PROPERTIES
         RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}"
@@ -27,7 +27,7 @@ endif()
 # using the above encoding-check binary
 
 function(encoding_check TARGET)
-    if (SLIC3R_ENC_CHECK)
+    if (PREFLIGHT_ENC_CHECK)
         # Obtain target source files
         get_target_property(T_SOURCES ${TARGET} SOURCES)
 

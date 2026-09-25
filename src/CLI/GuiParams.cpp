@@ -9,13 +9,16 @@
 #include <boost/nowide/cstdlib.hpp>
 
 #include "CLI.hpp"
+// is_gcode_file, which this file reached transitively until Slicing.hpp stopped carrying the
+// Utils.hpp umbrella.
+#include "luminary/platform/files/FileIO.hpp"
 
-#ifdef SLIC3R_GUI
+#ifdef PREFLIGHT_GUI
 
-namespace Slic3r::CLI
+namespace Luminary::CLI
 {
 
-bool init_gui_params(GUI::GUI_InitParams &gui_params, int argc, char **argv, Data &cli)
+bool init_gui_params(DSKY::GUI_InitParams &gui_params, int argc, char **argv, Data &cli)
 {
     bool start_gui = false;
 
@@ -44,7 +47,7 @@ bool init_gui_params(GUI::GUI_InitParams &gui_params, int argc, char **argv, Dat
     }
 #endif // _WIN32
 
-#if !SLIC3R_OPENGL_ES
+#if !PREFLIGHT_OPENGL_ES
     if (cli.misc_config.has("opengl-version"))
     {
         const Semver opengl_minimum = Semver(3, 2, 0);
@@ -55,8 +58,8 @@ bool init_gui_params(GUI::GUI_InitParams &gui_params, int argc, char **argv, Dat
             std::pair<int, int> &version = gui_params.opengl_version;
             version.first = semver->maj();
             version.second = semver->min();
-            if (std::find(Slic3r::GUI::OpenGLVersions::core.begin(), Slic3r::GUI::OpenGLVersions::core.end(),
-                          std::make_pair(version.first, version.second)) == Slic3r::GUI::OpenGLVersions::core.end())
+            if (std::find(DSKY::OpenGLVersions::core.begin(), DSKY::OpenGLVersions::core.end(),
+                          std::make_pair(version.first, version.second)) == DSKY::OpenGLVersions::core.end())
             {
                 version = {0, 0};
                 boost::nowide::cerr << "Required OpenGL version " << opengl_version_str
@@ -84,7 +87,7 @@ bool init_gui_params(GUI::GUI_InitParams &gui_params, int argc, char **argv, Dat
         start_gui = true;
         gui_params.opengl_debug = true;
     }
-#endif // SLIC3R_OPENGL_ES
+#endif // PREFLIGHT_OPENGL_ES
 
     if (cli.misc_config.has("delete-after-load"))
     {
@@ -101,7 +104,7 @@ bool init_gui_params(GUI::GUI_InitParams &gui_params, int argc, char **argv, Dat
 
     if (has_full_config_from_profiles(cli))
     {
-        gui_params.selected_presets = Slic3r::GUI::CLISelectedProfiles{
+        gui_params.selected_presets = DSKY::CLISelectedProfiles{
             cli.input_config.opt_string("print-profile"), cli.input_config.opt_string("printer-profile"),
             cli.input_config.option<ConfigOptionStrings>("material-profile")->values};
     }
@@ -125,7 +128,7 @@ bool init_gui_params(GUI::GUI_InitParams &gui_params, int argc, char **argv, Dat
     return start_gui;
 }
 
-int start_gui_with_params(GUI::GUI_InitParams &params)
+int start_gui_with_params(DSKY::GUI_InitParams &params)
 {
 #if !defined(_WIN32) && !defined(__APPLE__)
     // likely some linux / unix system
@@ -141,10 +144,10 @@ int start_gui_with_params(GUI::GUI_InitParams &params)
         return 1;
     }
 #endif // some linux / unix system
-    return Slic3r::GUI::GUI_Run(params);
+    return DSKY::GUI_Run(params);
 }
 
-int start_as_gcode_viewer(GUI::GUI_InitParams &gui_params)
+int start_as_gcode_viewer(DSKY::GUI_InitParams &gui_params)
 {
     if (gui_params.input_files.size() > 1)
     {
@@ -166,7 +169,7 @@ int start_as_gcode_viewer(GUI::GUI_InitParams &gui_params)
     return start_gui_with_params(gui_params);
 }
 
-} // namespace Slic3r::CLI
-#else  // SLIC3R_GUI
+} // namespace Luminary::CLI
+#else  // PREFLIGHT_GUI
 // If there is no GUI, we shall ignore the parameters. Remove them from the list.
-#endif // SLIC3R_GUI
+#endif // PREFLIGHT_GUI

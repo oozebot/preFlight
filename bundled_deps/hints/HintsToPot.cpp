@@ -1,3 +1,8 @@
+///|/ Copyright (c) preFlight 2025+ oozeBot, LLC
+///|/ Copyright (c) Prusa Research 2021 - 2023 David Kocík @kocikdav, Vojtěch Bubník @bubnikv, Lukáš Matěna @lukasmatena
+///|/
+///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
+///|/
 #include <iostream>
 #include <vector>
 #include <string>
@@ -14,7 +19,7 @@ bool write_to_pot(boost::filesystem::path path, const std::vector<std::pair<std:
 	for (const auto& element : data)
 	{
 		//Example of .pot element 
-		//#: src/slic3r/GUI/GUI_App.cpp:1647 src/slic3r/GUI/wxExtensions.cpp:687
+		//#: src/DSKY/GUI/GUI_App.cpp:1647 src/DSKY/GUI/wxExtensions.cpp:687
 		//msgctxt "Mode"
 		//msgid "Advanced"
 		//msgstr ""

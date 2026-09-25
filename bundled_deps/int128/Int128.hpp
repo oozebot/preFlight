@@ -42,12 +42,12 @@
 *                                                                              *
 *******************************************************************************/
 
-#ifndef SLIC3R_INT128_HPP
-#define SLIC3R_INT128_HPP
-// #define SLIC3R_DEBUG
+#ifndef PREFLIGHT_INT128_HPP
+#define PREFLIGHT_INT128_HPP
+// #define PREFLIGHT_DEBUG
 
-// Make assert active if SLIC3R_DEBUG
-#ifdef SLIC3R_DEBUG
+// Make assert active if PREFLIGHT_DEBUG
+#ifdef PREFLIGHT_DEBUG
     #undef NDEBUG
     #define DEBUG
     #define _DEBUG
@@ -308,4 +308,4 @@ public:
 	}
 };
 
-#endif // SLIC3R_INT128_HPP
+#endif // PREFLIGHT_INT128_HPP

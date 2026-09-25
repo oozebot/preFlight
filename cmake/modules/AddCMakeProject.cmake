@@ -66,7 +66,7 @@ function(add_cmake_project projectname)
     endif()
 
     # Policy CMP0091 must be set to NEW for CMAKE_MSVC_RUNTIME_LIBRARY to work.
-    # Without this, external projects like OpenVDB ignore the runtime library setting
+    # Without this, external projects ignore the runtime library setting
     # and default to /MT (static CRT), causing link errors with preFlight's /MD (dynamic CRT).
     set(_msvc_runtime_policy_args "")
     if (MSVC)

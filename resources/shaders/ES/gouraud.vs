@@ -32,9 +32,9 @@ uniform mat3 view_normal_matrix;
 uniform mat4 volume_world_matrix;
 uniform SlopeDetection slope;
 
-// Clipping plane, x = min z, y = max z. Used by the FFF and SLA previews to clip with a top / bottom plane.
+// Clipping plane, x = min z, y = max z. Used by the previews to clip with a top / bottom plane.
 uniform vec2 z_range;
-// Clipping plane - general orientation. Used by the SLA gizmo.
+// Clipping plane - general orientation. Used by the gizmos.
 uniform vec4 clipping_plane;
 // Color clip plane - general orientation. Used by the cut gizmo.
 uniform vec4 color_clip_plane;

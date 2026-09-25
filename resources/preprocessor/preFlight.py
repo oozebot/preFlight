@@ -1,181 +1,192 @@
-# preFlight Pre-Processor Python API
+# preFlight preprocessing API type stub. GENERATED FILE, do not edit.
 #
-# This module is provided by preFlight via pybind11 bindings.
-# These type stubs define the API contract - the actual implementation
-# lives in C++ and is exposed to Python at runtime.
+# Built by build_stubs.py from the pybind11 module in
+# src/luminary/gcode/scripting/PreProcessor.cpp (bindings and their docstrings),
+# the C++ enum headers (numeric values) and PrintConfig.hpp (Settings).
 #
-# Scripts define a process(gcode) function that preFlight calls
-# after slicing, before preview rendering.
+# Place this file next to your script so the editor resolves
+# "import preFlight" for autocomplete. At slice time the embedded module
+# takes precedence; this file is never executed by preFlight.
+#
+# Entry points a script may define:
+#   def process(gcode: GCode) -> None       preprocessing, runs after slicing
+#   def export(gcode: ExportGCode) -> None  Export to Script, receives the final text
+
+from __future__ import annotations
 
 from enum import IntEnum
-from typing import List, Dict, Optional, Tuple, Callable
+from typing import Callable, Dict, List, Optional, Tuple
 
-# Module-level constant: preFlight version string (e.g. "0.9.13")
-version: str
+version: str  # preFlight version string, e.g. "1.3.0"
+api_version: int  # script API version this build implements; a script may declare "# preflight-api: N" and is refused when N is newer
+exe_dir: str  # directory containing the running preFlight executable
+user_packages_dir: str  # per-user pip target directory added to sys.path each slice, empty when unusable
 
 
-# ---------------------------------------------------------------------------
-# Enums - mirror the C++ enums from GCodeProcessor
-# ---------------------------------------------------------------------------
+class ScriptTimeout(BaseException):
+    """Raised in a script that ran past the preprocessing time limit; the slice then fails. Do not catch it."""
+
 
 class MoveType(IntEnum):
-    Noop = 0
-    Retract = 1
-    Unretract = 2
-    Seam = 3
-    ToolChange = 4
-    ColorChange = 5
-    PausePrint = 6
-    CustomGCode = 7
-    Travel = 8
-    Wipe = 9
-    Extrude = 10
+    """Kind of G-code move"""
+    Noop = 0  # no operation
+    Retract = 1  # filament retraction
+    Unretract = 2  # filament unretraction
+    Seam = 3  # seam point
+    ToolChange = 4  # tool change (T command)
+    ColorChange = 5  # color change event
+    PausePrint = 6  # pause print event
+    CustomGCode = 7  # custom G-code event
+    Travel = 8  # non-extrusion travel
+    Wipe = 9  # nozzle wipe
+    Extrude = 10  # extrusion move
 
 
 class ExtrusionRole(IntEnum):
-    NoRole = 0
-    Perimeter = 1
-    ExternalPerimeter = 2
-    OverhangPerimeter = 3
-    InterlockingPerimeter = 4
-    InternalInfill = 5
-    SolidInfill = 6
-    TopSolidInfill = 7
-    Ironing = 8
-    BridgeInfill = 9
-    GapFill = 10
-    Skirt = 11
-    SupportMaterial = 12
-    SupportMaterialInterface = 13
-    WipeTower = 14
-    Custom = 15
+    """Feature type of an extrusion move"""
+    NoRole = 0  # no role assigned
+    Serpentine = 1  # Serpentine single-path island fill
+    SerpentineOverhang = 2  # Serpentine fill over an unsupported area
+    Perimeter = 3  # inner perimeter
+    ExternalPerimeter = 4  # outer perimeter (visible wall)
+    OverhangPerimeter = 5  # perimeter over an unsupported area
+    InterlockingPerimeter = 6  # interlocking boundary perimeter
+    InternalInfill = 7  # sparse internal fill
+    SolidInfill = 8  # solid fill that is not a top surface
+    TopSolidInfill = 9  # top surface fill
+    Ironing = 10  # ironing pass
+    BridgeInfill = 11  # bridging fill over gaps
+    GapFill = 12  # thin gap fill between features
+    Skirt = 13  # skirt or brim outline
+    SupportMaterial = 14  # support structure
+    SupportMaterialInterface = 15  # support interface layer
+    WipeTower = 16  # wipe tower purge
+    Custom = 17  # custom G-code region, for example start or end G-code
 
 
 class CustomEventType(IntEnum):
-    ColorChange = 0
-    PausePrint = 1
-    ToolChange = 2
-    Template = 3
-    Custom = 4
-
-
-# ---------------------------------------------------------------------------
-# Data classes - thin wrappers over C++ structures via pybind11
-# ---------------------------------------------------------------------------
-
-class Move:
-    """A single G-code movement command (MoveVertex).
-
-    All positional values in mm, feedrates in mm/s, temperatures in C.
-    Writable properties update both the internal structure and the
-    corresponding G-code line in the virtual file.
-    """
-
-    # Read/write properties (propagate to G-code)
-    feedrate: float              # commanded feedrate (mm/s) -> F parameter
-    delta_e: float               # filament displacement (mm) -> E parameter
-    fan_speed: float             # fan percentage (0-100) -> M106 insertion
-    temperature: float           # hotend temperature (C) -> M104 insertion
-
-    # Read/write properties (preview only, no G-code propagation)
-    width: float                 # extrusion line width (mm)
-    height: float                # layer/extrusion height (mm)
-
-    # Per-move annotation (overrides gcode.annotation for this move)
-    annotation: str
-
-    # Read-only properties
-    type: MoveType
-    role: ExtrusionRole
-    x: float
-    y: float
-    z: float
-    extruder_id: int             # active extruder (0-based)
-    actual_feedrate: float       # after acceleration limits (mm/s)
-    mm3_per_mm: float            # volumetric rate constant
-    volumetric_rate: float       # feedrate * mm3_per_mm (mm3/s)
-    actual_volumetric_rate: float
-    color_id: int                # sequential color change counter
-    layer_id: int                # which layer this move belongs to
-    gcode_line_id: int           # source line in the virtual file (1-based)
-    internal_only: bool          # True for G2/G3 arc segments
-    time: float                  # move duration in seconds (normal mode)
-    time_stealth: float          # move duration in seconds (stealth mode)
-
-    # Motion analysis (populated from time estimation)
-    distance: float              # XYZ path length (mm)
-    junction_angle: float        # angle from previous move (degrees, signed: + right, - left)
-    acceleration: float          # effective acceleration (mm/s^2, normal mode)
-    acceleration_stealth: float  # effective acceleration (mm/s^2, stealth mode)
-    max_entry_speed: float       # junction-limited entry speed (mm/s, normal mode)
-    max_entry_speed_stealth: float  # junction-limited entry speed (mm/s, stealth mode)
-
-    # Fill region properties (from slicing geometry)
-    region_area: float           # mm^2 (island boundary for perimeters, fill surface for infill, 0 if N/A)
-    fill_pattern: str            # infill pattern name ("Rectilinear", "Gyroid", etc., "" for non-fill)
-
-
-class Layer:
-    """A group of moves sharing the same layer_id.
-
-    Provides convenience accessors and the ability to inject G-code
-    at layer boundaries.
-    """
-
-    id: int                      # layer number
-    z: float                     # Z height of this layer (mm)
-    height: float                # layer height (mm) - delta from previous
-    moves: List[Move]            # all moves in this layer
-    time: float                  # total layer time (seconds, normal mode)
-
-    def prepend(self, gcode: str, comment: str = "") -> None:
-        """Insert G-code lines before the first move in this layer."""
-        ...
-
-    def append(self, gcode: str, comment: str = "") -> None:
-        """Insert G-code lines after the last move in this layer."""
-        ...
-
-    def moves_by_type(self, move_type: MoveType) -> List[Move]:
-        """Filter moves by type."""
-        ...
-
-    def moves_by_role(self, role: ExtrusionRole) -> List[Move]:
-        """Filter moves by extrusion role."""
-        ...
-
-    def extrusion_length(self) -> float:
-        """Total filament extruded in this layer (mm)."""
-        ...
-
-    def travel_distance(self) -> float:
-        """Total travel (non-extrusion) distance in this layer (mm)."""
-        ...
+    """Kind of custom G-code event placed at a print Z"""
+    ColorChange = 0  # M600 color change
+    PausePrint = 1  # M601 pause
+    ToolChange = 2  # tool change event
+    Template = 3  # template custom G-code
+    Custom = 4  # user custom G-code
 
 
 class FilamentUsage:
-    """Filament consumption stats for a role or extruder."""
-    meters: float
-    grams: float
-    volume_mm3: float
-    cost: float
+    """Filament consumption for one extrusion role or extruder"""
+
+    # Read-only
+    meters: float  # filament length (m)
+    grams: float  # filament weight (g)
+    volume_mm3: float  # filament volume (mm3)
+    cost: float  # filament cost in the configured currency
 
 
 class CustomEvent:
-    """A custom G-code event (color change, pause, etc.) at a specific Z."""
-    z: float
-    type: int                    # CustomEventType value
-    extruder: int
-    color: str
-    extra: str                   # custom G-code text
+    """A custom G-code event (color change, pause, ...) at a print Z"""
 
+    # Read-only
+    z: float  # print Z of the event (mm)
+    type: int  # CustomEventType value
+    extruder: int  # extruder index
+    color: str  # color string
+    extra: str  # custom G-code text
+
+
+class Move:
+    """A single G-code movement. Positions in mm, feedrates in mm/s, temperatures in C. Writable properties update both the move and its G-code line."""
+
+    # Read/write
+    feedrate: float  # commanded feedrate (mm/s), written back as the F parameter
+    fan_speed: float  # fan percentage (0-100); a change emits M106 before the move and the original value is restored before the first unmodified extruding move that follows
+    temperature: float  # hotend temperature (C); a change emits M104 before the move and the original value is restored before the first unmodified extruding move that follows, unless it reads 0 (unknown)
+    delta_e: float  # filament displacement (mm), written back as the E parameter
+    width: float  # extrusion line width (mm), preview only
+    height: float  # extrusion height (mm), preview only
+    annotation: str  # comment appended to this move's G-code line when it is modified, overrides gcode.annotation
+
+    # Read-only
+    type: MoveType  # kind of move
+    role: ExtrusionRole  # feature type of the extrusion
+    extruder_id: int  # active extruder (0-based)
+    color_id: int  # sequential color change counter
+    mm3_per_mm: float  # volumetric rate constant (mm3 per mm of path)
+    actual_feedrate: float  # feedrate after acceleration limits (mm/s)
+    gcode_line_id: int  # 1-based line of this move in the virtual G-code file
+    layer_id: int  # index of the layer this move belongs to
+    internal_only: bool  # True for internal G2/G3 arc segments
+    x: float  # X position (mm)
+    y: float  # Y position (mm)
+    z: float  # Z position (mm)
+    volumetric_rate: float  # feedrate * mm3_per_mm (mm3/s)
+    actual_volumetric_rate: float  # actual_feedrate * mm3_per_mm (mm3/s)
+    time: float  # move duration in seconds (normal mode)
+    time_stealth: float  # move duration in seconds (stealth mode)
+    distance: float  # XYZ path length (mm)
+    junction_angle: float  # angle from the previous move (degrees, signed: positive right, negative left)
+    acceleration: float  # effective acceleration (mm/s2, normal mode)
+    acceleration_stealth: float  # effective acceleration (mm/s2, stealth mode)
+    max_entry_speed: float  # junction-limited entry speed (mm/s, normal mode)
+    max_entry_speed_stealth: float  # junction-limited entry speed (mm/s, stealth mode)
+    region_area: float  # fill region area (mm2): island for perimeters, fill surface for infill, 0 if not applicable
+    fill_pattern: str  # infill pattern name (Rectilinear, Gyroid, ...), empty for non-fill moves
+
+
+class Layer:
+    """All moves sharing one layer_id, with filters and layer-boundary G-code injection"""
+
+    # Read-only
+    id: int  # layer number
+    z: float  # Z height of this layer (mm)
+    height: float  # layer height (mm), delta from the previous layer
+    time: float  # total layer time in seconds (normal mode)
+    moves: List[Move]  # all moves in this layer
+    first_line: int  # 1-based id of the first raw G-code line belonging to this layer (the line after the previous layer's last move, so the layer-change block is included)
+    last_line: int  # 1-based id of the last raw G-code line of this layer (its last move); text after the final layer belongs to no layer
+
+    def prepend(self, gcode: str, comment: str = '') -> None:
+        """Insert G-code lines before the first move of this layer"""
+        ...
+
+    def append(self, gcode: str, comment: str = '') -> None:
+        """Insert G-code lines after the last move of this layer"""
+        ...
+
+    def moves_by_type(self, move_type: MoveType) -> List[Move]:
+        """Moves of this layer with the given type"""
+        ...
+
+    def moves_by_role(self, role: ExtrusionRole) -> List[Move]:
+        """Moves of this layer with the given extrusion role"""
+        ...
+
+    def extrusion_length(self) -> float:
+        """Total filament extruded in this layer (mm)"""
+        ...
+
+    def travel_distance(self) -> float:
+        """Total travel (non-extrusion) distance in this layer (mm)"""
+        ...
+
+    def find_line(self, text: str) -> int:
+        """1-based id of the first line of this layer containing text, 0 if none"""
+        ...
+
+    def find_lines(self, text: str) -> List[int]:
+        """1-based ids of every line of this layer containing text"""
+        ...
+
+    def lines(self) -> List[Tuple[int, str]]:
+        """every raw line of this layer as (line_id, text)"""
+        ...
 
 
 class Settings:
-    """All available slicer settings (from PrintConfig).
+    """All slicer settings (print, filament and printer) merged into one namespace.
 
-    Access via gcode.settings["key_name"]. Values are strings.
-    Auto-generated from PrintConfig.hpp at build time.
+    Access as gcode.settings.key or gcode.settings["key"]; every value is the
+    serialized string form of the option. Generated from PrintConfig.hpp.
     """
 
     auto_speed: str  # bool (0/1)
@@ -216,7 +227,6 @@ class Settings:
     cooling_perimeter_transition_distance: str  # semicolon-separated floats
     cooling_tube_length: str  # float
     cooling_tube_retraction: str  # float
-    counterbore_bridge_layers: str  # int
     currency_symbol: str
     custom_parameters_filament: str  # semicolon-separated
     custom_parameters_print: str
@@ -308,6 +318,7 @@ class Settings:
     first_layer_speed_over_raft: str  # float or percentage
     first_layer_temperature: str  # semicolon-separated ints
     first_layer_travel_speed: str  # float or percentage
+    first_travel_combine_z: str  # bool (0/1)
     full_fan_speed_layer: str  # semicolon-separated ints
     fuzzy_skin_first_layer: str  # bool (0/1)
     fuzzy_skin_octaves: str  # int
@@ -328,13 +339,11 @@ class Settings:
     infill_extruder: str  # int
     infill_extrusion_width: str  # float or percentage
     infill_first: str  # bool (0/1)
-    infill_only_where_needed: str  # bool (0/1)
     infill_overlap: str  # float or percentage
     infill_speed: str  # float
     interface_shells: str  # bool (0/1)
     interlock_perimeter_count: str  # int
     interlock_perimeter_overlap: str  # float or percentage
-    interlock_perimeter_strength: str  # percentage
     interlock_perimeters_enabled: str  # bool (0/1)
     interlock_regular_perimeters: str  # int
     interlock_solid_layers_bottom: str  # int
@@ -358,6 +367,7 @@ class Settings:
     machine_klipper_square_corner_velocity: str  # float
     machine_max_acceleration_e: str  # semicolon-separated floats
     machine_max_acceleration_extruding: str  # semicolon-separated floats
+    machine_max_acceleration_retracting: str  # semicolon-separated floats
     machine_max_acceleration_travel: str  # semicolon-separated floats
     machine_max_acceleration_x: str  # semicolon-separated floats
     machine_max_acceleration_y: str  # semicolon-separated floats
@@ -408,6 +418,7 @@ class Settings:
     min_layer_height: str  # semicolon-separated floats
     min_print_speed: str  # semicolon-separated floats
     min_skirt_length: str  # float
+    min_wall_length: str  # float or percentage
     mmu_segmented_region_interlocking_depth: str  # float
     mmu_segmented_region_max_width: str  # float
     multimaterial_purging: str  # float
@@ -480,8 +491,6 @@ class Settings:
     seam_gap_distance: str  # float or percentage
     seam_notch_angle: str  # float
     seam_notch_width: str  # float
-    seam_preferred_direction: str  # float
-    seam_preferred_direction_jitter: str  # float
     serpentine_depth: str  # float
     serpentine_enabled: str  # bool (0/1)
     serpentine_extrusion_width: str  # float or percentage
@@ -500,6 +509,7 @@ class Settings:
     skirts: str  # int
     slice_closing_radius: str  # float
     slowdown_below_layer_time: str  # semicolon-separated ints
+    small_perimeter_diameter: str  # float
     small_perimeter_speed: str  # float or percentage
     solid_infill_acceleration: str  # float
     solid_infill_below_area: str  # float
@@ -512,11 +522,14 @@ class Settings:
     standby_temperature_delta: str  # int
     start_filament_gcode: str  # semicolon-separated
     start_gcode: str
+    support_alerts: str  # bool (0/1)
     support_baobab_angle: str  # float
     support_baobab_angle_slow: str  # float
     support_baobab_canopy_density: str  # percentage
     support_baobab_max_canopy_angle: str  # float
+    support_baobab_min_opening: str  # float
     support_baobab_plant_on_model: str  # bool (0/1)
+    support_baobab_trunk_consolidation: str  # float
     support_baobab_trunk_diameter: str  # float
     support_baobab_trunk_diameter_angle: str  # float
     support_baobab_trunk_distance: str  # float
@@ -541,8 +554,8 @@ class Settings:
     support_material_min_area: str  # float
     support_material_spacing: str  # float
     support_material_speed: str  # float
-    support_material_synchronize_layers: str  # bool (0/1)
     support_material_threshold: str  # int
+    support_material_top_contact_extrusion_width: str  # percentage
     support_material_with_sheath: str  # bool (0/1)
     support_material_xy_spacing: str  # float or percentage
     support_tree_angle: str  # float
@@ -551,12 +564,11 @@ class Settings:
     support_tree_branch_diameter_angle: str  # float
     support_tree_branch_diameter_double_wall: str  # float
     support_tree_branch_distance: str  # float
+    support_tree_min_opening: str  # float
     support_tree_tip_diameter: str  # float
     support_tree_top_rate: str  # percentage
     temperature: str  # semicolon-separated ints
     template_custom_gcode: str
-    thick_bridges: str  # bool (0/1)
-    thin_walls: str  # bool (0/1)
     threads: str  # int
     thumbnails: str
     time_cost: str  # float
@@ -597,7 +609,6 @@ class Settings:
     wipe_tower_extra_spacing: str  # percentage
     wipe_tower_extruder: str  # int
     wipe_tower_no_sparse_layers: str  # bool (0/1)
-    wipe_tower_per_color_wipe: str  # float
     wipe_tower_width: str  # float
     wiping_volumes_matrix: str  # semicolon-separated floats
     wiping_volumes_use_custom_matrix: str  # bool (0/1)
@@ -606,98 +617,75 @@ class Settings:
 
 
 class GCode:
-    """Top-level object representing the entire sliced G-code.
+    """The sliced G-code handed to process(): layers, moves, statistics, settings and raw line editing"""
 
-    This is the root object passed to process(). It wraps
-    GCodeProcessorResult and provides structured access to
-    everything GCodeProcessor parsed.
-    """
+    # Read/write
+    annotation: str  # comment appended to every modified G-code line whose move has no annotation of its own
 
-    # Print geometry
-    layers: List[Layer]
-    moves: List[Move]            # flat access to all moves
-    max_print_height: float      # mm
-    z_offset: float              # mm
-    bed_shape: List[Tuple[float, float]]
-    spiral_vase_mode: bool
+    # Read-only
+    layers: List[Layer]  # all layers, indexed by layer_id
+    max_print_height: float  # maximum print height (mm)
+    extruder_count: int  # number of extruders
+    extruder_colors: List[str]  # extruder colors as hex strings (#FF8000)
+    spiral_vase_mode: bool  # True if spiral vase mode is active
+    time_estimate_normal: float  # total estimated print time in seconds (normal mode)
+    time_estimate_stealth: float  # total estimated print time in seconds (stealth mode)
+    first_layer_time: float  # first layer time in seconds
+    filament_cost: List[float]  # filament cost per extruder
+    time_cost: float  # machine time cost rate
+    currency_symbol: str  # currency symbol, e.g. $
+    preset_print: str  # active print profile name
+    preset_filament: List[str]  # active filament profile names
+    preset_printer: str  # active printer profile name
+    moves: List[Move]  # flat list of all live moves (removed and dead entries excluded)
+    line_count: int  # number of lines in the virtual G-code file
+    z_offset: float  # Z offset (mm)
+    bed_shape: List[Tuple[float, float]]  # bed outline as (x, y) points
+    settings: Settings  # every print, filament and printer setting as a string, by attribute or key
+    filament_diameters: List[float]  # filament diameter per extruder (mm)
+    filament_densities: List[float]  # filament density per extruder (g/cm3)
+    filament_by_role: Dict[ExtrusionRole, FilamentUsage]  # filament usage per extrusion role
+    filament_by_extruder: Dict[int, FilamentUsage]  # filament usage per extruder
+    filament_by_color_change: List[float]  # filament volume (mm3) per color change segment
+    custom_events: List[CustomEvent]  # custom G-code events (color changes, pauses, ...) by print Z
+    role_metrics: Dict[ExtrusionRole, dict]  # per-role {max_commands_per_sec, max_layer}
+    overall_metrics: dict  # {max_commands_per_sec, max_layer} over the whole print
+    conflict: Optional[dict]  # {object1, object2, height, layer} of the first object collision, or None
 
-    # Extruder configuration
-    extruder_count: int
-    extruder_colors: List[str]   # hex colors (#FF8000)
-    filament_diameters: List[float]
-    filament_densities: List[float]
-
-    # Timing
-    time_estimate_normal: float  # total seconds (normal mode)
-    time_estimate_stealth: float # total seconds (stealth mode)
-    first_layer_time: float      # first layer time (seconds)
-
-    # Cost
-    filament_cost: List[float]   # cost per extruder
-    time_cost: float             # machine time cost rate
-    currency_symbol: str         # currency symbol (e.g. "$")
-
-    # Active presets
-    preset_print: str            # print profile name
-    preset_filament: List[str]   # filament profile name(s)
-    preset_printer: str          # printer profile name
-
-    # Filament usage
-    filament_by_role: Dict[ExtrusionRole, FilamentUsage]
-    filament_by_extruder: Dict[int, FilamentUsage]
-    filament_by_color_change: List[float]  # volumes (mm3) per color segment
-
-    # Events
-    custom_events: List[CustomEvent]
-
-    # Performance metrics
-    role_metrics: Dict[ExtrusionRole, dict]  # {role: {max_commands_per_sec, max_layer}}
-    overall_metrics: dict        # {max_commands_per_sec, max_layer}
-    conflict: Optional[dict]     # {object1, object2, height, layer} or None
-
-    # Slicer settings (all print/printer/filament config as key-value strings)
-    # See _settings.py for full list of available keys with types (auto-generated at build)
-    settings: Settings         # e.g. settings["layer_height"], settings["nozzle_diameter"]
-
-    # Raw G-code access
-    line_count: int              # total lines in the virtual G-code file
-
-    # Global annotation (fallback for moves without per-move annotation)
-    annotation: str
-
-    def insert(self, line: int, gcode: str, position: str = "after", comment: str = "") -> None:
-        """Insert raw G-code before or after the specified line number.
-
-        position: "after" (default) or "before"
-        comment: optional comment appended to the line (prefixed with "; ")
-        """
+    def insert(self, line: int, gcode: str, position: str = 'after', comment: str = '') -> None:
+        """Insert raw G-code after (default) or before the given 1-based line; comment is appended as '; comment'"""
         ...
 
     def get_line(self, line_id: int) -> str:
-        """Read a raw G-code line from the virtual file (1-based line number)."""
+        """Text of a raw G-code line (1-based), empty if out of range"""
         ...
 
-    def rewrite(self, line_id: int, gcode: str, comment: str = "") -> None:
-        """Replace a raw G-code line in the virtual file.
-
-        comment: optional comment appended to the line (prefixed with "; ")
-        """
+    def rewrite(self, line_id: int, gcode: str, comment: str = '') -> None:
+        """Replace a raw G-code line (1-based)"""
         ...
 
-    def find_line(self, text: str) -> int:
-        """Find the first line containing text. Returns 1-based line_id, or 0 if not found."""
+    def find_line(self, text: str, start: int = 1, end: int = 0) -> int:
+        """1-based id of the first line containing text within lines start..end (end 0 = last line), 0 if none"""
         ...
 
-    def find_lines(self, text: str) -> List[int]:
-        """Find all lines containing text. Returns list of 1-based line_ids."""
+    def find_lines(self, text: str, start: int = 1, end: int = 0) -> List[int]:
+        """1-based ids of every line containing text within lines start..end (end 0 = last line)"""
         ...
 
-    def find_moves(self, type: MoveType = None, role: ExtrusionRole = None,
-                   extruder: int = None, z_min: float = None,
-                   z_max: float = None) -> List[Move]:
-        """Query moves by criteria. All parameters are optional filters."""
+    def find_moves(self, type: Optional[MoveType] = None, role: Optional[ExtrusionRole] = None, extruder: Optional[int] = None, z_min: Optional[float] = None, z_max: Optional[float] = None) -> List[Move]:
+        """Moves matching every given filter"""
         ...
 
     def remove_moves(self, predicate: Callable[[Move], bool]) -> int:
-        """Remove all moves matching predicate. Returns count removed."""
+        """Remove every move for which predicate returns True and return the count"""
         ...
+
+
+class ExportGCode:
+    """The final G-code handed to an Export to Script export() function"""
+
+    # Read/write
+    data: List[str]  # G-code lines, each with its trailing newline
+
+    # Read-only
+    filename: str  # suggested output filename, from the output filename format

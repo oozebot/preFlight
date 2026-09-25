@@ -3,14 +3,14 @@
 #/|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 #/|/
 #
-# This CMake project downloads, configures and builds PrusaSlicer dependencies on Unix and Windows.
+# This CMake project downloads, configures and builds preFlight dependencies on Unix and Windows.
 #
 # When using this script, it's recommended to perform an out-of-source build using CMake.
 #
 # All the dependencies are installed in a `destdir` directory in the root of the build directory,
 # in a traditional Unix-style prefix structure. The destdir can be used directly by CMake
-# when building PrusaSlicer - to do this, set the CMAKE_PREFIX_PATH to ${destdir}/usr/local.
-# Warning: On UNIX/Linux, you also need to set -DSLIC3R_STATIC=1 when building PrusaSlicer.
+# when building preFlight - to do this, set the CMAKE_PREFIX_PATH to ${destdir}/usr/local.
+# Warning: On UNIX/Linux, you also need to set -DPREFLIGHT_STATIC=1 when building preFlight.
 #
 # For better clarity of console output, it's recommended to _not_ use a parallelized build
 # for the top-level command, ie. use `make -j 1` or `ninja -j 1` to force single-threaded top-level
@@ -30,7 +30,7 @@ project(preFlight_deps)
 option(BUILD_SHARED_LIBS "Build shared libraries instead of static (experimental)" OFF)
 
 # List libraries to be excluded from build
-set(${PROJECT_NAME}_PACKAGE_EXCLUDES "" CACHE STRING "Exclude packages matching this regex pattern")
+set(${PROJECT_NAME}_PACKAGE_EXCLUDES "" CACHE STRING "Exclude packages whose whole name matches this regex pattern")
 
 # Support legacy parameter DESTDIR
 if (DESTDIR)
@@ -173,7 +173,8 @@ endfunction()
 set(SUPPORTED_PACKAGES "")
 foreach (pkg ${FOUND_PACKAGES})
     cmake_dependent_option(${PROJECT_NAME}_SELECT_${pkg} "Select package ${pkg} to be built." OFF  "NOT ${PROJECT_NAME}_SELECT_ALL" OFF)
-    if (NOT ${PROJECT_NAME}_PACKAGE_EXCLUDES MATCHES ${pkg} AND (${PROJECT_NAME}_SELECT_ALL OR ${PROJECT_NAME}_SELECT_${pkg}))
+    # The pattern is matched against the whole package name, so excluding TBBMallocProxy leaves TBB in.
+    if (NOT "${pkg}" MATCHES "^(${${PROJECT_NAME}_PACKAGE_EXCLUDES})$" AND (${PROJECT_NAME}_SELECT_ALL OR ${PROJECT_NAME}_SELECT_${pkg}))
         include(+${pkg}/${pkg}.cmake)
 
         list(APPEND SUPPORTED_PACKAGES ${pkg})
@@ -223,7 +224,8 @@ if (DEP_DEBUG AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
 
   # Exclude the libraries which have no problem to link to Debug builds in
   # Release mode (mostly C libraries)
-  set(DEP_DEBUG_EXCLUDES GMP MPFR OpenSSL NanoSVG TIFF JPEG ZLIB heatshrink OpenVDB Blosc OpenEXR Imath)
+  # TBBMallocProxy: release-only, the proxy cannot patch the debug CRT (ucrtbased).
+  set(DEP_DEBUG_EXCLUDES GMP MPFR OpenSSL NanoSVG TIFF JPEG ZLIB heatshrink TBBMallocProxy)
   if (UNIX)
     # Making a separate debug build on Unix of wx is a nightmare
     list(APPEND DEP_DEBUG_EXCLUDES wxWidgets)
@@ -233,7 +235,7 @@ if (DEP_DEBUG AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
   set(_build_list_dbg "")
   set(_build_list_filt ${_build_list})
   list(JOIN  DEP_DEBUG_EXCLUDES "|" _excl_regexp)
-  list(FILTER _build_list_filt EXCLUDE REGEX "${_excl_regexp}")
+  list(FILTER _build_list_filt EXCLUDE REGEX "^dep_(${_excl_regexp})$")
 
   foreach (t ${_build_list_filt})
     list(APPEND _build_list_dbg ${t}_debug)
@@ -257,7 +259,7 @@ if (DEP_DEBUG AND NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
       -DDEP_WX_GTK3=${DEP_WX_GTK3}
       -D${PROJECT_NAME}_DEP_DOWNLOAD_DIR=${${PROJECT_NAME}_DEP_DOWNLOAD_DIR}
       -D${PROJECT_NAME}_DEP_INSTALL_PREFIX=${${PROJECT_NAME}_DEP_INSTALL_PREFIX}
-      -D${PROJECT_NAME}_PACKAGE_EXCLUDES="${_excl_regexp}"
+      -D${PROJECT_NAME}_PACKAGE_EXCLUDES=${_excl_regexp}
       -D${PROJECT_NAME}_SELECT_ALL=${${PROJECT_NAME}_SELECT_ALL}
       -D${PROJECT_NAME}_DEP_BUILD_VERBOSE=${${PROJECT_NAME}_DEP_BUILD_VERBOSE}
       -DCMAKE_DEBUG_POSTFIX=d

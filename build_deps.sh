@@ -106,6 +106,43 @@ DESTDIR="$BUILD_DIR/destdir/usr/local"
 DEPS_PATH_FILE="$DEPS_DIR/build/.DEPS_PATH.txt"
 START_TIME=$SECONDS
 
+# Names every dependency under a deps build directory that was started but never reached its
+# "done" stamp. Stamp files sit directly in the stamp directory for single-config generators and
+# in a per-configuration subdirectory for multi-config generators, so the search is recursive.
+incomplete_deps() {
+    local root="$1" prefix name stamps
+    for prefix in "$root"/dep_*-prefix; do
+        [[ -d "$prefix" ]] || continue
+        name="$(basename "$prefix")"
+        name="${name%-prefix}"
+        stamps="$prefix/src/$name-stamp"
+        [[ -d "$stamps" ]] || continue
+        if [[ -n "$(find "$stamps" -name "$name-mkdir" 2>/dev/null)" \
+              && -z "$(find "$stamps" -name "$name-done" 2>/dev/null)" ]]; then
+            echo "**    ${name#dep_}"
+        fi
+    done
+}
+
+# Prints a banner naming the failed phase and the unfinished dependencies, then exits non-zero.
+# Called through "||" so that set -e does not end the script before the banner prints.
+fail_banner() {
+    local phase="$1" list
+    list="$(incomplete_deps "$BUILD_DIR")"
+    echo ""
+    echo "**********************************************************************"
+    echo "** ERROR: $phase failed."
+    if [[ -n "$list" ]]; then
+        echo "** Dependencies that did not finish:"
+        echo "$list"
+    fi
+    echo "** The first error is above this banner; search the output for 'error'."
+    echo "** Re-run this script WITHOUT -clean to resume: finished dependencies are"
+    echo "** skipped and only the unfinished ones are built again."
+    echo "**********************************************************************"
+    exit 1
+}
+
 echo "**********************************************************************"
 echo "** preFlight Dependency Build ($PLATFORM_LABEL)"
 echo "** Preset: $PRESET"
@@ -123,7 +160,7 @@ fi
 echo ""
 echo "** Configuring deps ..."
 cd "$DEPS_DIR"
-"$CMAKE_CMD" --preset "$PRESET"
+"$CMAKE_CMD" --preset "$PRESET" || fail_banner "deps configure"
 
 # Record deps path so the app build script can find it
 # On Windows, convert MSYS2 paths (/c/...) to native Windows paths (C:/...)
@@ -139,9 +176,9 @@ fi
 echo ""
 echo "** Building release deps (this will take a while) ..."
 if [[ $IS_WINDOWS -eq 1 ]]; then
-    "$CMAKE_CMD" --build "$BUILD_DIR" --target deps -j 1
+    "$CMAKE_CMD" --build "$BUILD_DIR" --target deps -j 1 || fail_banner "release deps build"
 else
-    "$CMAKE_CMD" --build "$BUILD_DIR" --target deps -j 1 -- -k
+    "$CMAKE_CMD" --build "$BUILD_DIR" --target deps -j 1 -- -k || fail_banner "release deps build"
 fi
 
 # Build debug deps (Windows/MSVC only, optional)
@@ -156,6 +193,11 @@ if [[ $IS_WINDOWS -eq 1 ]]; then
         echo ""
         echo "** WARNING: Debug deps build failed. Release and RelWithDebInfo"
         echo "** builds will work fine. Only pure Debug builds are affected."
+        list="$(incomplete_deps "$BUILD_DIR/_d")"
+        if [[ -n "$list" ]]; then
+            echo "** Debug dependencies that did not finish:"
+            echo "$list"
+        fi
         echo ""
         # Clean up partial debug config dirs that wxWidgets leaves behind,
         # otherwise FindwxWidgets will try to use debug libs that don't exist

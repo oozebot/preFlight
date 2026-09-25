@@ -7,6 +7,6 @@ Terminal=false
 Type=Application
 MimeType=model/stl;application/vnd.ms-3mfdocument;application/prs.wavefront-obj;application/x-amf;
 Categories=Graphics;3DGraphics;Engineering;
-Keywords=3D;Printing;Slicer;slice;3D;printer;convert;gcode;stl;obj;amf;SLA
+Keywords=3D;Printing;Slicer;slice;3D;printer;convert;gcode;stl;obj;amf
 StartupNotify=false
 StartupWMClass=preflight

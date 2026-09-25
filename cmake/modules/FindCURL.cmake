@@ -75,8 +75,8 @@ if (NOT CURL_FOUND)
     )
     mark_as_advanced(CURL_LIBRARY_DEBUG)
 
-    include(${CMAKE_CURRENT_LIST_DIR}/SelectLibraryConfigurations_SLIC3R.cmake)
-    select_library_configurations_SLIC3R(CURL)
+    include(${CMAKE_CURRENT_LIST_DIR}/SelectLibraryConfigurations_PREFLIGHT.cmake)
+    select_library_configurations_PREFLIGHT(CURL)
   endif()
 
   if(CURL_INCLUDE_DIR)
@@ -91,8 +91,8 @@ if (NOT CURL_FOUND)
     endforeach()
   endif()
 
-  include(${CMAKE_CURRENT_LIST_DIR}/FindPackageHandleStandardArgs_SLIC3R.cmake)
-  FIND_PACKAGE_HANDLE_STANDARD_ARGS_SLIC3R(CURL
+  include(${CMAKE_CURRENT_LIST_DIR}/FindPackageHandleStandardArgs_PREFLIGHT.cmake)
+  FIND_PACKAGE_HANDLE_STANDARD_ARGS_PREFLIGHT(CURL
                                     REQUIRED_VARS CURL_LIBRARY CURL_INCLUDE_DIR
                                     VERSION_VAR CURL_VERSION_STRING)
 

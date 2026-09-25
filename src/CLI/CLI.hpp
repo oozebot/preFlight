@@ -7,14 +7,14 @@
 #include <string>
 #include <vector>
 
-#include "libslic3r/Model.hpp"
+#include "luminary/model/scene/Model.hpp"
 #include "CLI_DynamicPrintConfig.hpp"
 
-#ifdef SLIC3R_GUI
-#include "slic3r/GUI/GUI_Init.hpp"
+#ifdef PREFLIGHT_GUI
+#include "DSKY/GUI/GUI_Init.hpp"
 #endif
 
-namespace Slic3r::CLI
+namespace Luminary::CLI
 {
 // struct which is filled from comand line input
 struct Data
@@ -28,6 +28,8 @@ struct Data
     CLI_DynamicPrintConfig actions_config;
 
     std::vector<std::string> input_files;
+    // Input files that loaded without a single object in them, counted while the models are read.
+    size_t empty_input_files = 0;
 
     bool empty()
     {
@@ -62,12 +64,12 @@ bool process_profiles_sharing(const Data &cli);
 bool process_actions(Data &cli, const DynamicPrintConfig &print_config, std::vector<Model> &models);
 
 // Implemented in GuiParams.cpp
-#ifdef SLIC3R_GUI
+#ifdef PREFLIGHT_GUI
 // set data for init GUI parameters
 // and return state of start_gui
-bool init_gui_params(GUI::GUI_InitParams &gui_params, int argc, char **argv, Data &cli);
-int start_gui_with_params(GUI::GUI_InitParams &params);
-int start_as_gcode_viewer(GUI::GUI_InitParams &gui_params);
+bool init_gui_params(DSKY::GUI_InitParams &gui_params, int argc, char **argv, Data &cli);
+int start_gui_with_params(DSKY::GUI_InitParams &params);
+int start_as_gcode_viewer(DSKY::GUI_InitParams &gui_params);
 #endif
 
-} // namespace Slic3r::CLI
+} // namespace Luminary::CLI

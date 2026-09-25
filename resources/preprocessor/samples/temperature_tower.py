@@ -45,10 +45,9 @@ def process(gcode: preFlight.GCode):
                 move.annotation = f"temp tower {target_temp}C"
                 move.temperature = target_temp
 
-        # Insert M104 at layer start for the transition
+        # The M104 for the transition is written automatically before the first
+        # move whose temperature changes; only count the step boundaries here.
         if (layer.id - SKIP_LAYERS - 1) % LAYERS_PER_STEP == 0:
-            layer.prepend(f"M104 S{target_temp}",
-                          comment=f"temp tower step {step + 1}: {target_temp}C")
             changes += 1
 
     print(f"[temp_tower] Applied {changes} temperature steps: "

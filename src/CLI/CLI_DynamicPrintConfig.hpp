@@ -4,9 +4,9 @@
 ///|/
 #pragma once
 
-#include "libslic3r/Config.hpp"
+#include "luminary/config/model/Config.hpp"
 
-namespace Slic3r::CLI
+namespace Luminary::CLI
 {
 enum class Type
 {
@@ -33,7 +33,7 @@ public:
 
     // Verify whether the opt_key has not been obsoleted or renamed.
     // Both opt_key and value may be modified by handle_legacy().
-    // If the opt_key is no more valid in this version of Slic3r, opt_key is cleared by handle_legacy().
+    // If the opt_key is no longer valid in this version, opt_key is cleared by handle_legacy().
     // handle_legacy() is called internally by set_deserialize().
     void handle_legacy(t_config_option_key &opt_key, std::string &value) const override
     {
@@ -47,4 +47,4 @@ private:
     Type m_type{Type::Undef};
     const ConfigDef *m_config_def{nullptr};
 };
-} // namespace Slic3r::CLI
+} // namespace Luminary::CLI

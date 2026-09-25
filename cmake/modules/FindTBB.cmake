@@ -1,6 +1,8 @@
 # This is a wrapper of FindTBB which prefers the config scripts if available in the system
 # but only if building with dynamic dependencies. The config scripts potentially belong
-# to TBB >= 2020 which is incompatible with OpenVDB in our static dependency bundle.
+# to TBB >= 2020. The incompatibility this guarded against was OpenVDB's, and OpenVDB left
+# the tree with the S0 dead set, so the constraint may now be liftable; it stays until
+# someone tests a newer TBB against the static bundle, because nothing here gates that.
 # This workaround is useful for package maintainers on Linux systems to use newer versions
 # of intel TBB (renamed to oneTBB from version 2021 up).
 set(_q "")

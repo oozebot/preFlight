@@ -48,7 +48,7 @@ add_subdirectory(stb_truetype)
 add_library(tcbspan INTERFACE)
 target_include_directories(tcbspan INTERFACE tcbspan)
 
-if (SLIC3R_GUI)
+if (PREFLIGHT_GUI)
     add_subdirectory(imgui)
     add_subdirectory(hidapi)
 endif ()

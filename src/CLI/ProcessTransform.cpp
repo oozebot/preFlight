@@ -18,21 +18,21 @@
 #include <boost/nowide/fstream.hpp>
 #include <boost/dll/runtime_symbol_info.hpp>
 
-#include "libslic3r/libslic3r.h"
-#if !SLIC3R_OPENGL_ES
+#include "luminary/core/Prelude.hpp"
+#if !PREFLIGHT_OPENGL_ES
 #include <boost/algorithm/string/split.hpp>
-#endif // !SLIC3R_OPENGL_ES
-#include "libslic3r/Config.hpp"
-#include "libslic3r/Geometry.hpp"
-#include "libslic3r/Model.hpp"
-#include "libslic3r/ModelProcessing.hpp"
-#include "libslic3r/CutUtils.hpp"
-#include <arrange-wrapper/ModelArrange.hpp>
-#include "libslic3r/MultipleBeds.hpp"
+#endif // !PREFLIGHT_OPENGL_ES
+#include "luminary/config/model/Config.hpp"
+#include "luminary/geometry/transform/Geometry.hpp"
+#include "luminary/model/scene/Model.hpp"
+#include "luminary/model/edit/ModelProcessing.hpp"
+#include "luminary/model/cut/CutUtils.hpp"
+#include <luminary/arrange/scene/ModelArrange.hpp>
+#include "luminary/model/beds/MultipleBeds.hpp"
 
 #include "CLI.hpp"
 
-namespace Slic3r::CLI
+namespace Luminary::CLI
 {
 
 bool process_transform(Data &cli, const DynamicPrintConfig &print_config, std::vector<Model> &models)
@@ -104,8 +104,9 @@ bool process_transform(Data &cli, const DynamicPrintConfig &print_config, std::v
         const double distance = print_config.opt_float("duplicate_distance");
         for (auto &model : models)
             model.duplicate_objects_grid(x, y,
-                                         (distance > 0) ? distance
-                                                        : 6); // TODO: this is not the right place for setting a default
+                                         (distance > 0)
+                                             ? distance
+                                             : 6); // fall back to 6 mm when duplicate_distance is not positive
     }
 
     if (transform.has("center"))
@@ -116,8 +117,6 @@ bool process_transform(Data &cli, const DynamicPrintConfig &print_config, std::v
             // this affects instances:
             model.center_instances_around_point(transform.option<ConfigOptionPoint>("center")->value);
             // this affects volumes:
-            //FIXME Vojtech: Who knows why the complete model should be aligned with Z as a single rigid body?
-            //model.align_to_ground();
             BoundingBoxf3 bbox;
             for (ModelObject *model_object : model.objects)
                 // We are interested into the Z span only, therefore it is sufficient to measure the bounding box of the 1st instance only.
@@ -206,7 +205,6 @@ bool process_transform(Data &cli, const DynamicPrintConfig &print_config, std::v
             new_models.push_back(new_model);
         }
 
-        // TODO: copy less stuff around using pointers
         models = new_models;
 
         if (actions.empty())
@@ -240,4 +238,4 @@ bool process_transform(Data &cli, const DynamicPrintConfig &print_config, std::v
     return true;
 }
 
-} // namespace Slic3r::CLI
+} // namespace Luminary::CLI

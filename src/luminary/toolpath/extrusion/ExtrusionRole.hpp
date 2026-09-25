@@ -1,0 +1,186 @@
+///|/ Copyright (c) preFlight 2025+ oozeBot, LLC
+///|/ Copyright (c) 2023 Robert Schiele @schiele
+///|/ Copyright (c) Prusa Research 2023 Vojtěch Bubník @bubnikv
+///|/
+///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
+///|/
+#pragma once
+
+#include "luminary/core/enum_bitmask.hpp"
+
+#include <string>
+#include <string_view>
+#include <cstdint>
+
+namespace Luminary
+{
+
+enum class ExtrusionRoleModifier : uint16_t
+{
+    // 1) Extrusion types
+    // Perimeter (external, inner, ...)
+    Perimeter,
+    // Infill (top / bottom / solid inner / sparse inner / bridging inner ...)
+    Infill,
+    // Variable width extrusion
+    Thin,
+    // Support material extrusion
+    Support,
+    Skirt,
+    Wipe,
+    // 2) Extrusion modifiers
+    External,
+    Solid,
+    Ironing,
+    Bridge,
+    OverBridge,
+    Interlocking,
+    // Serpentine fill: a single continuous extrusion forming the wall (and, in
+    // full mode, the infill). Diverts the G-code type and render color only.
+    Serpentine,
+    // 3) Special types
+    // Indicator that the extrusion role was mixed from multiple differing extrusion roles,
+    // for example from Support and SupportInterface.
+    Mixed,
+    // Stopper, there should be maximum 16 modifiers defined for uint16_t bit mask.
+    Count
+};
+// There should be maximum 16 modifiers defined for uint16_t bit mask.
+static_assert(int(ExtrusionRoleModifier::Count) <= 16,
+              "ExtrusionRoleModifier: there must be maximum 16 modifiers defined to fit a 16 bit bitmask");
+
+using ExtrusionRoleModifiers = enum_bitmask<ExtrusionRoleModifier>;
+ENABLE_ENUM_BITMASK_OPERATORS(ExtrusionRoleModifier);
+
+struct ExtrusionRole : public ExtrusionRoleModifiers
+{
+    constexpr ExtrusionRole(const ExtrusionRoleModifier bit) : ExtrusionRoleModifiers(bit) {}
+    constexpr ExtrusionRole(const ExtrusionRoleModifiers bits) : ExtrusionRoleModifiers(bits) {}
+
+    static constexpr const ExtrusionRoleModifiers None{};
+    // Internal perimeter, not bridging.
+    static constexpr const ExtrusionRoleModifiers Perimeter{ExtrusionRoleModifier::Perimeter};
+    // External perimeter, not bridging.
+    static constexpr const ExtrusionRoleModifiers ExternalPerimeter{ExtrusionRoleModifier::Perimeter |
+                                                                    ExtrusionRoleModifier::External};
+    // Interlocking perimeter for enhanced layer bonding through spacing variation.
+    static constexpr const ExtrusionRoleModifiers InterlockingPerimeter{ExtrusionRoleModifier::Perimeter |
+                                                                        ExtrusionRoleModifier::Interlocking};
+    // Perimeter, bridging. To be or'ed with ExtrusionRoleModifier::External for external bridging perimeter.
+    static constexpr const ExtrusionRoleModifiers OverhangPerimeter{ExtrusionRoleModifier::Perimeter |
+                                                                    ExtrusionRoleModifier::Bridge};
+    // Serpentine fill perimeter. Carries External and Perimeter so every speed,
+    // fan and flow path treats it exactly as an external perimeter; the
+    // Serpentine modifier only diverts the G-code type and render color.
+    static constexpr const ExtrusionRoleModifiers Serpentine{
+        ExtrusionRoleModifier::Perimeter | ExtrusionRoleModifier::External | ExtrusionRoleModifier::Serpentine};
+    // Serpentine fill perimeter that overhangs the layer below (set by the
+    // overhang pass). Carries Bridge but NOT External, so it is treated as an
+    // overhang perimeter (bridge speed/fan/accel) everywhere, not as external.
+    static constexpr const ExtrusionRoleModifiers SerpentineOverhang{
+        ExtrusionRoleModifier::Perimeter | ExtrusionRoleModifier::Serpentine | ExtrusionRoleModifier::Bridge};
+    // Sparse internal infill.
+    static constexpr const ExtrusionRoleModifiers InternalInfill{ExtrusionRoleModifier::Infill};
+    // Solid internal infill.
+    static constexpr const ExtrusionRoleModifiers SolidInfill{ExtrusionRoleModifier::Infill |
+                                                              ExtrusionRoleModifier::Solid};
+    // Top solid infill (visible).
+    static constexpr const ExtrusionRoleModifiers InfillOverBridge{
+        ExtrusionRoleModifier::Infill | ExtrusionRoleModifier::Solid | ExtrusionRoleModifier::OverBridge};
+    static constexpr const ExtrusionRoleModifiers TopSolidInfill{
+        ExtrusionRoleModifier::Infill | ExtrusionRoleModifier::Solid | ExtrusionRoleModifier::External};
+    // Ironing infill at the top surfaces.
+    static constexpr const ExtrusionRoleModifiers Ironing{ExtrusionRoleModifier::Infill | ExtrusionRoleModifier::Solid |
+                                                          ExtrusionRoleModifier::Ironing |
+                                                          ExtrusionRoleModifier::External};
+    // Visible bridging infill at the bottom of an object.
+    static constexpr const ExtrusionRoleModifiers BridgeInfill{
+        ExtrusionRoleModifier::Infill | ExtrusionRoleModifier::Solid | ExtrusionRoleModifier::Bridge |
+        ExtrusionRoleModifier::External};
+    //    static constexpr const ExtrusionRoleModifiers InternalBridgeInfill{ ExtrusionRoleModifier::Infill | ExtrusionRoleModifier::Solid | ExtrusionRoleModifier::Bridge };
+    // Gap fill extrusion, currently used for any variable width extrusion: Thin walls outside of the outer extrusion,
+    // gap fill in between perimeters, gap fill between the inner perimeter and infill.
+    static constexpr const ExtrusionRoleModifiers GapFill{
+        ExtrusionRoleModifier::Thin}; // | ExtrusionRoleModifier::External };
+    //    static constexpr const ExtrusionRoleModifiers ThinWall{ ExtrusionRoleModifier::Thin };
+    static constexpr const ExtrusionRoleModifiers Skirt{ExtrusionRoleModifier::Skirt};
+    // Support base material, printed with non-soluble plastic.
+    static constexpr const ExtrusionRoleModifiers SupportMaterial{ExtrusionRoleModifier::Support};
+    // Support interface material, printed with soluble plastic.
+    static constexpr const ExtrusionRoleModifiers SupportMaterialInterface{ExtrusionRoleModifier::Support |
+                                                                           ExtrusionRoleModifier::External};
+    // Wipe tower material.
+    static constexpr const ExtrusionRoleModifiers WipeTower{ExtrusionRoleModifier::Wipe};
+    // Extrusion role for a collection with multiple extrusion roles.
+    static constexpr const ExtrusionRoleModifiers Mixed{ExtrusionRoleModifier::Mixed};
+
+    bool is_perimeter() const { return this->ExtrusionRoleModifiers::has(ExtrusionRoleModifier::Perimeter); }
+    bool is_external_perimeter() const { return this->is_perimeter() && this->is_external(); }
+    bool is_infill() const { return this->ExtrusionRoleModifiers::has(ExtrusionRoleModifier::Infill); }
+    bool is_solid_infill() const
+    {
+        return this->is_infill() && this->ExtrusionRoleModifiers::has(ExtrusionRoleModifier::Solid);
+    }
+    bool is_sparse_infill() const
+    {
+        return this->is_infill() && !this->ExtrusionRoleModifiers::has(ExtrusionRoleModifier::Solid);
+    }
+    bool is_external() const { return this->ExtrusionRoleModifiers::has(ExtrusionRoleModifier::External); }
+    bool is_bridge() const { return this->ExtrusionRoleModifiers::has(ExtrusionRoleModifier::Bridge); }
+    bool is_serpentine() const { return this->ExtrusionRoleModifiers::has(ExtrusionRoleModifier::Serpentine); }
+
+    bool is_support() const { return this->ExtrusionRoleModifiers::has(ExtrusionRoleModifier::Support); }
+    bool is_support_base() const { return this->is_support() && !this->is_external(); }
+    bool is_support_interface() const { return this->is_support() && this->is_external(); }
+    bool is_mixed() const { return this->ExtrusionRoleModifiers::has(ExtrusionRoleModifier::Mixed); }
+
+    // Brim is currently marked as skirt.
+    bool is_skirt() const { return this->ExtrusionRoleModifiers::has(ExtrusionRoleModifier::Skirt); }
+};
+
+// Special flags describing loop
+enum ExtrusionLoopRole
+{
+    elrDefault,
+    elrContourInternalPerimeter,
+    elrSkirt,
+};
+
+// Be careful when editing this list as many parts of the code depend
+// on the values of these ordinars, for example
+// GCodeViewer::Extrusion_Role_Colors
+enum class GCodeExtrusionRole : uint8_t
+{
+    None,
+    // Serpentine fill types lead the list so they sort to the top of
+    // the G-code preview legend (the legend orders roles by enum ordinal).
+    Serpentine,
+    SerpentineOverhang,
+    Perimeter,
+    ExternalPerimeter,
+    OverhangPerimeter,
+    InterlockingPerimeter,
+    InternalInfill,
+    SolidInfill,
+    TopSolidInfill,
+    Ironing,
+    BridgeInfill,
+    GapFill,
+    Skirt,
+    SupportMaterial,
+    SupportMaterialInterface,
+    WipeTower,
+    // Custom (user defined) G-code block, for example start / end G-code.
+    Custom,
+    // Stopper to count number of enums.
+    Count
+};
+
+// Convert a rich bitmask based ExtrusionRole to a less expressive ordinal GCodeExtrusionRole.
+// GCodeExtrusionRole is to be serialized into G-code and deserialized by G-code viewer,
+GCodeExtrusionRole extrusion_role_to_gcode_extrusion_role(ExtrusionRole role);
+
+std::string gcode_extrusion_role_to_string(GCodeExtrusionRole role);
+GCodeExtrusionRole string_to_gcode_extrusion_role(const std::string_view role);
+
+} // namespace Luminary

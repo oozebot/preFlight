@@ -11,7 +11,7 @@
 
 #include "CLI.hpp"
 
-namespace Slic3r::CLI
+namespace Luminary::CLI
 {
 
 static void print_help(
@@ -145,14 +145,16 @@ static void print_help(
     }
 }
 
-void print_help(bool include_print_options /* = false*/, PrinterTechnology printer_technology /* = ptAny*/)
+// preFlight prints FFF only, so the technology argument selects nothing: there is one listing and
+// it is the FFF one.
+void print_help(bool include_print_options /* = false*/, PrinterTechnology /* = ptAny*/)
 {
-    boost::nowide::cout << SLIC3R_BUILD_ID << " " << "based on Slic3r"
-#ifdef SLIC3R_GUI
+    boost::nowide::cout << PREFLIGHT_BUILD_ID
+#ifdef PREFLIGHT_GUI
                         << " (with GUI support)"
-#else  /* SLIC3R_GUI */
+#else  /* PREFLIGHT_GUI */
                         << " (without GUI support)"
-#endif /* SLIC3R_GUI */
+#endif /* PREFLIGHT_GUI */
                         << std::endl
                         << "https://preflight3d.com/" << std::endl
                         << std::endl
@@ -185,18 +187,12 @@ void print_help(bool include_print_options /* = false*/, PrinterTechnology print
     if (include_print_options)
     {
         boost::nowide::cout << std::endl;
-        print_help(print_config_def, true,
-                   [printer_technology](const ConfigOptionDef &def)
-                   {
-                       return printer_technology == ptAny || def.printer_technology == ptAny ||
-                              printer_technology == def.printer_technology;
-                   });
+        print_help(print_config_def, true);
     }
     else
     {
-        boost::nowide::cout << std::endl
-                            << "Run --help-fff / --help-sla to see the full listing of print options." << std::endl;
+        boost::nowide::cout << std::endl << "Run --help-fff to see the full listing of print options." << std::endl;
     }
 }
 
-} // namespace Slic3r::CLI
+} // namespace Luminary::CLI

@@ -1,0 +1,120 @@
+--- a/src/tbbmalloc_proxy/function_replacement.cpp
++++ b/src/tbbmalloc_proxy/function_replacement.cpp
+@@ -568,6 +568,40 @@ bool IsPrologueKnown(const char* dllName, const char *funcName, const char **opc
+     return CheckOpcodes( opcodes, (void*)inpFunc, /*abortOnError=*/false, &functionInfo) != 0;
+ }
+ 
++// Dry run of the steps of ReplaceFunction that can fail for reasons other than the opcode
++// dictionary: the export must exist, its code page must accept the protection change the
++// trampoline insertion makes, and a location within jump distance must be obtainable and
++// made executable. Nothing is modified. Returns FRR_NOFUNC when the export is missing,
++// FRR_FAILED when a step is refused (the reason is recorded in the replacement log), else FRR_OK.
++FRR_TYPE ProbeFunction(const char* dllName, const char *funcName, HMODULE module)
++{
++    FARPROC inpFunc = GetProcAddress(module, funcName);
++    FunctionInfo functionInfo = { funcName, dllName };
++
++    if (!inpFunc)
++        return FRR_NOFUNC;
++
++    DWORD origProt = 0;
++    if (!VirtualProtect((void*)inpFunc, MAX_PROBE_SIZE, PAGE_EXECUTE_WRITECOPY, &origProt)) {
++        Log::record(functionInfo, "code page not writable", /*status*/ false);
++        return FRR_FAILED;
++    }
++    VirtualProtect((void*)inpFunc, MAX_PROBE_SIZE, origProt, &origProt);
++
++    UINT_PTR location = memProvider.GetLocation(Ptr2Addrint((void*)inpFunc));
++    if (!location) {
++        Log::record(functionInfo, "no trampoline location within jump distance", /*status*/ false);
++        return FRR_FAILED;
++    }
++    DWORD pageFlags = PAGE_EXECUTE_READWRITE;
++    if (!VirtualProtect(Addrint2Ptr(location), MAX_PROBE_SIZE, pageFlags, &pageFlags)) {
++        Log::record(functionInfo, "trampoline page not executable", /*status*/ false);
++        return FRR_FAILED;
++    }
++
++    return FRR_OK;
++}
++
+ // Public Windows API
+ extern "C" __declspec(dllexport) int TBB_malloc_replacement_log(char *** function_replacement_log_ptr)
+ {
+--- a/src/tbbmalloc_proxy/function_replacement.h
++++ b/src/tbbmalloc_proxy/function_replacement.h
+@@ -42,6 +42,7 @@ FRR_TYPE ReplaceFunctionA(const char *dllName, const char *funcName, FUNCPTR new
+ FRR_TYPE ReplaceFunctionW(const wchar_t *dllName, const char *funcName, FUNCPTR newFunc, const char ** opcodes, FUNCPTR* origFunc=nullptr);
+ 
+ bool IsPrologueKnown(const char* dllName, const char *funcName, const char **opcodes, HMODULE module);
++FRR_TYPE ProbeFunction(const char* dllName, const char *funcName, HMODULE module);
+ 
+ // Utilities to convert between ADDRESS and LPVOID
+ union Int2Ptr {
+--- a/src/tbbmalloc_proxy/proxy.cpp
++++ b/src/tbbmalloc_proxy/proxy.cpp
+@@ -482,7 +482,7 @@ const char* known_bytecodes[] = {
+       (FUNCPTR)__TBB_malloc_safer_##dest_func##_##CRT_VER##dbgsuffix, 0, nullptr );
+ 
+ #define __TBB_ORIG_ALLOCATOR_REPLACEMENT_CALL_IMPL(CRT_VER,dbgsuffix)                             \
+-    if (BytecodesAreKnown(#CRT_VER #dbgsuffix ".dll")) {                                          \
++    if (ReplacementIsPossible(#CRT_VER #dbgsuffix ".dll")) {                                      \
+       __TBB_ORIG_ALLOCATOR_REPLACEMENT_CALL_ENTRY(CRT_VER,free,dbgsuffix)                         \
+       __TBB_ORIG_ALLOCATOR_REPLACEMENT_CALL_ENTRY(CRT_VER,_msize,dbgsuffix)                       \
+       __TBB_ORIG_ALLOCATOR_REPLACEMENT_CALL_ENTRY_NO_FALLBACK(CRT_VER,realloc,dbgsuffix)          \
+@@ -668,6 +668,55 @@ bool BytecodesAreKnown(const unicode_char_t *dllName)
+     return true;
+ }
+ 
++static bool ProbeReplacement(const unicode_char_t *dllName, HMODULE module, const char *funcName, FRR_ON_ERROR on_error)
++{
++    FRR_TYPE res = ProbeFunction(dllName, funcName, module);
++
++    if (res == FRR_OK || (res == FRR_NOFUNC && on_error == FRR_IGNORE))
++        return true;
++
++    fprintf(stderr, "TBBmalloc: skip allocation functions replacement in " WCHAR_SPEC
++            ": cannot %s function %s\n", dllName, res == FRR_NOFUNC ? "find" : "replace", funcName);
++    return false;
++}
++
++// A required function that cannot be replaced after earlier ones in the same module already
++// were leaves the process with a split allocator, which is why ReplaceFunctionWithStore aborts.
++// This dry-runs every replacement the module is about to receive (the same functions as
++// doMallocReplacement) so that any refusal is found before the first byte is written; the
++// module is then skipped and the process keeps the runtime's own allocator.
++bool ReplacementIsPossible(const unicode_char_t *dllName)
++{
++    if (!BytecodesAreKnown(dllName))
++        return false;
++
++    HMODULE module = GetModuleHandle(dllName);
++    if (!module)
++        return false;
++
++    const char *storedFuncName[] = {"free", "_msize", "realloc", "_aligned_free", "_aligned_msize", "_aligned_realloc", 0};
++    for (int i=0; storedFuncName[i]; i++)
++        if (!ProbeReplacement(dllName, module, storedFuncName[i], FRR_FAIL))
++            return false;
++
++    for (size_t i = 0; i < arrayLength(c_routines_to_replace); i++)
++        if (!ProbeReplacement(dllName, module, c_routines_to_replace[i]._func, c_routines_to_replace[i]._on_error))
++            return false;
++
++    if (strcmp(dllName, "ucrtbase.dll") == 0) {
++        if (!ProbeReplacement(dllName, module, "_o_free", FRR_IGNORE))
++            return false;
++        if (!ProbeReplacement(dllName, module, "_free_base", FRR_IGNORE))
++            return false;
++    } else {
++        for (size_t i = 0; i < arrayLength(cxx_routines_to_replace); i++)
++            if (!ProbeReplacement(dllName, module, cxx_routines_to_replace[i]._func, cxx_routines_to_replace[i]._on_error))
++                return false;
++    }
++
++    return true;
++}
++
+ void SkipReplacement(const unicode_char_t *dllName)
+ {
+ #ifndef UNICODE

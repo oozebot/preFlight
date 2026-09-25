@@ -1,0 +1,23 @@
+///|/ Copyright (c) preFlight 2025+ oozeBot, LLC
+///|/ Copyright (c) Prusa Research 2018 - 2020 Lukáš Matěna @lukasmatena, Vojtěch Bubník @bubnikv
+///|/
+///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
+///|/
+#pragma once
+
+#include <string>
+
+namespace Luminary
+{
+
+// If possible, remove accents from accented latin characters.
+// This function is useful for generating file names to be processed by legacy firmwares.
+extern std::string fold_utf8_to_ascii(const std::string &src);
+
+// Convert the input UNICODE character to a string of maximum 4 output ASCII characters.
+// Return the end of the string written to the output.
+// The output buffer must be at least 4 characters long.
+extern wchar_t *fold_to_ascii(wchar_t c, wchar_t *out);
+
+} // namespace Luminary
+

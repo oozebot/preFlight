@@ -3,16 +3,15 @@
 ///|/
 ///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
 ///|/
-#ifndef slic3r_ProfilesSharingUtils_hpp_
-#define slic3r_ProfilesSharingUtils_hpp_
+#pragma once
 
 #include <string>
-#include "libslic3r/Config.hpp"
+#include "luminary/config/model/Config.hpp"
 
-namespace Slic3r
+namespace Luminary
 {
 
-std::string get_json_printer_models(PrinterTechnology printer_technology);
+std::string get_json_printer_models();
 //std::string get_json_printer_profiles(const std::string& printer_model, const std::string& printer_variant);
 std::string get_json_print_filament_profiles(const std::string &printer_profile);
 
@@ -29,6 +28,5 @@ std::string load_full_print_config(const std::string &print_preset_name,
                                    const std::string &printer_preset_name, DynamicPrintConfig &config,
                                    PrinterTechnology printer_technology = ptUnknown);
 
-} // namespace Slic3r
+} // namespace Luminary
 
-#endif // slic3r_ProfilesSharingUtils_hpp_

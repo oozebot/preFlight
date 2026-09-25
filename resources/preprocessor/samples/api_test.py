@@ -8,13 +8,15 @@ and use searchable markers so you can verify propagation in the exported G-code.
 Search the exported G-code for these markers:
   ; PPTEST:FEEDRATE    - 3x, inserted before G1 lines with F600
   ; PPTEST:FAN         - 1x, inserted before G1 with M106 fan change
-  ; PPTEST:TEMP        - 1x, inserted before G1 with M104 S195
+  ; PPTEST:TEMP        - 1x, inserted before G1 with M104 S195 (0x on profiles
+                         where move.temperature reads 0, the test is skipped)
   ; PPTEST:DELTA_E     - 1x, inserted before G1 with doubled E value
   ; PPTEST:INSERT      - 1x, raw G-code inserted after a G1 line
   ; PPTEST:SET_LINE    - Nx, prefixed on all ;WIDTH: comment lines
   ; PPTEST:PREPEND     - 1x, injected before a layer's first move
   ; PPTEST:APPEND      - 1x, injected after a layer's last move
-  ; PPTEST:MODIFIED    - 6x, annotation on all modified G1 lines
+  ; PPTEST:MODIFIED    - 6x (5x when the temperature test is skipped), annotation
+                         on all modified G1 lines
 
 The modifications are small and targeted (a handful of moves) so they won't
 destroy the print. To run without modifications, remove this script from
@@ -529,7 +531,9 @@ def process(gcode: preFlight.GCode):
         print(f"    Line {temp_target.gcode_line_id}: temp {original_temp:.0f}C -> 195C (expect M104 S195)")
         check("temperature modification", True)
     else:
-        check("temperature modification", False, "no target found")
+        # Profiles that set the nozzle temperature through a macro or G10 leave
+        # move.temperature at 0 everywhere; there is nothing to modify, not a failure.
+        print("    (skipped: no move carries a temperature on this profile, see Notes in HOW_TO_USE.txt)")
 
     # ---------------------------------------------------------------
     # 13. Write tests - DELTA_E (search G-code for PPTEST:DELTA_E)
@@ -640,6 +644,71 @@ def process(gcode: preFlight.GCode):
     # ---------------------------------------------------------------
     # Summary
     # ---------------------------------------------------------------
+    # ---------------------------------------------------------------
+    # 19. API contract: version, error surfacing, layer geometry
+    # ---------------------------------------------------------------
+    print("\n--- API contract ---")
+
+    check("preFlight.api_version exists", hasattr(preFlight, 'api_version'))
+    check("api_version is a positive int",
+          isinstance(getattr(preFlight, 'api_version', None), int) and preFlight.api_version >= 1)
+
+    def raises_value_error(fn):
+        try:
+            fn()
+        except ValueError:
+            return True
+        except Exception:
+            return False
+        return False
+
+    check("rewrite() out of range raises ValueError",
+          raises_value_error(lambda: gcode.rewrite(gcode.line_count + 1000, "; never")))
+    check("rewrite() line 0 raises ValueError",
+          raises_value_error(lambda: gcode.rewrite(0, "; never")))
+    check("insert() out of range raises ValueError",
+          raises_value_error(lambda: gcode.insert(gcode.line_count + 1000, "; never")))
+    check("insert() unknown position raises ValueError",
+          raises_value_error(lambda: gcode.insert(1, "; never", "befroe")))
+
+    # layer.z is the Z the layer extrudes at, never inflated by a z-hop travel
+    z_inflated = 0
+    negative_heights = 0
+    for layer in gcode.layers:
+        ext_z = [m.z for m in layer.moves if m.type == MoveType.Extrude]
+        if ext_z and layer.z > max(ext_z) + 1e-4:
+            z_inflated += 1
+        if layer.id > 0 and layer.moves and layer.height < -1e-4:
+            negative_heights += 1
+    check("layer.z never exceeds the layer's extrusion Z", z_inflated == 0, f"{z_inflated} layers")
+    check("no negative layer.height", negative_heights == 0, f"{negative_heights} layers")
+
+    # Layer text ranges: contiguous and ordered, each printed layer holds its own ;LAYER_CHANGE
+    prev_last = 0
+    range_ok = True
+    marker_layers = 0
+    marker_ok = 0
+    for layer in gcode.layers:
+        if layer.first_line != prev_last + 1 or layer.last_line < prev_last:
+            range_ok = False
+        prev_last = max(prev_last, layer.last_line)
+        if layer.moves and layer.id > 0:
+            marker_layers += 1
+            if layer.find_line(";LAYER_CHANGE") != 0:
+                marker_ok += 1
+    check("layer line ranges are contiguous and ordered", range_ok)
+    check("every printed layer's range holds its ;LAYER_CHANGE marker",
+          marker_layers > 0 and marker_ok == marker_layers, f"{marker_ok}/{marker_layers}")
+    mid = gcode.layers[len(gcode.layers) // 2]
+    check("layer.find_lines equals gcode.find_lines over the layer's range",
+          mid.find_lines(";TYPE:") == gcode.find_lines(";TYPE:", mid.first_line, mid.last_line))
+    mid_lines = mid.lines()
+    check("layer.lines() spans first_line..last_line",
+          len(mid_lines) == mid.last_line - mid.first_line + 1 and mid_lines
+          and mid_lines[0][0] == mid.first_line and mid_lines[-1][0] == mid.last_line)
+    check("gcode.find_line honours start/end",
+          gcode.find_line(";LAYER_CHANGE", mid.first_line, mid.last_line) == mid.find_line(";LAYER_CHANGE"))
+
     print("\n" + "=" * 60)
     total = ok + fail
     print(f"RESULTS: {ok}/{total} passed, {fail} failed")

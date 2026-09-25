@@ -19,7 +19,7 @@ uniform mat4 projection_matrix;
 uniform mat3 view_normal_matrix;
 uniform mat4 volume_world_matrix;
 
-// Clipping plane - general orientation. Used by the SLA gizmo.
+// Clipping plane - general orientation. Used by the gizmos.
 uniform vec4 clipping_plane;
 
 attribute vec3 v_position;

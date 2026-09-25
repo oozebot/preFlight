@@ -57,8 +57,17 @@ IDE autocomplete. See "IDE Setup" below.
 API Reference
 -------------
 
+The authoritative reference is preFlight.py in this folder: it is
+generated at build time from the binding source, so every member,
+type and enum value below is also in that file with a description.
+
 Module Constants:
-  preFlight.version           - preFlight version string (e.g. "0.9.13")
+  preFlight.version           - preFlight version string (e.g. "1.3.0")
+  preFlight.api_version       - script API version this build implements
+                                (currently 1; see Version Checking)
+  preFlight.exe_dir           - directory of the running preFlight executable
+  preFlight.user_packages_dir - per-user pip target directory (see Preferences
+                                > Preprocessing > Python Console); empty if unusable
 
 Enums:
   MoveType                    - Type of G-code move
@@ -76,6 +85,8 @@ Enums:
 
   ExtrusionRole               - Feature type of an extrusion move
     .NoRole                     no role assigned
+    .Serpentine                 Serpentine single-path island fill
+    .SerpentineOverhang         Serpentine fill over an unsupported area
     .Perimeter                  inner perimeter
     .ExternalPerimeter          outer perimeter (visible wall)
     .OverhangPerimeter          perimeter over unsupported area
@@ -145,15 +156,27 @@ GCode Object (gcode):
   Methods:
     gcode.get_line(line_id)     - read raw G-code line (1-based)
     gcode.rewrite(line_id, text, comment="")
-                                - replace a raw G-code line
+                                - replace a raw G-code line; raises
+                                  ValueError when line_id is out of range
     gcode.insert(line_id, text, position="after", comment="")
-                                - inject G-code before/after a line
-    gcode.find_line(text)       - first line containing text (0 = not found)
-    gcode.find_lines(text)      - all lines containing text
+                                - inject G-code before/after a line; raises
+                                  ValueError when line_id is out of range or
+                                  position is not "before" or "after"
+    gcode.find_line(text, start=1, end=0)
+                                - first line containing text within the
+                                  1-based range start..end (end 0 = last
+                                  line); 0 = not found
+    gcode.find_lines(text, start=1, end=0)
+                                - all lines containing text in that range
     gcode.find_moves(type=, role=, extruder=, z_min=, z_max=)
                                 - query moves by criteria (all optional)
     gcode.remove_moves(predicate)
-                                - remove moves matching lambda, returns count
+                                - remove moves matching lambda, returns count.
+                                  Removed moves disappear from gcode.moves,
+                                  layer.moves and find_moves() immediately;
+                                  in absolute E mode their filament is taken
+                                  out of the following E values so nothing
+                                  is re-extruded
 
 Move Object (move):
   Read/write (propagate to G-code):
@@ -161,6 +184,15 @@ Move Object (move):
     move.delta_e                - filament displacement (mm) -> E parameter
     move.fan_speed              - fan percentage (0-100) -> M106 insertion
     move.temperature            - hotend temperature (C) -> M104 insertion
+                                  Overrides are scoped: an M106/M104 is
+                                  written when the value changes, and the
+                                  original value is restored before the
+                                  first extruding move you did not change.
+                                  Setting the fan on the bridge moves boosts
+                                  the bridge only. A temperature restore is
+                                  skipped when the original reads 0 (see
+                                  Notes), so the override then stays in
+                                  effect.
 
   Read/write (preview only, no G-code propagation):
     move.width                  - extrusion line width (mm)
@@ -201,7 +233,8 @@ Move Object (move):
 Layer Object (layer):
   Properties (read-only):
     layer.id                    - layer number
-    layer.z                     - Z height (mm)
+    layer.z                     - Z the layer extrudes at (mm); z-hop
+                                  travels do not raise it
     layer.height                - layer height (mm) - delta from previous
     layer.moves                 - list of Move objects in this layer
     layer.time                  - total layer time (seconds, normal mode)
@@ -217,6 +250,20 @@ Layer Object (layer):
     layer.extrusion_length()    - total filament extruded (mm)
     layer.travel_distance()     - total travel distance (mm)
 
+  Raw text of the layer (1-based line ids, same as gcode.get_line):
+    layer.first_line            - first raw line owned by this layer: the
+                                  line after the previous layer's last move,
+                                  so the ;LAYER_CHANGE block is included
+    layer.last_line             - the layer's last move; text after the final
+                                  layer (end G-code) belongs to no layer
+    layer.find_line(text)       - first line in the layer containing text
+                                  (0 = not found)
+    layer.find_lines(text)      - all such lines
+    layer.lines()               - every raw line as (line_id, text)
+  Walking the file layer by layer and editing around the ";TYPE:" markers
+  found inside each layer is the intended way to reach text the move API
+  does not cover; see samples/layer_summary.py.
+
 FilamentUsage Object:
     .meters                     - filament length (m)
     .grams                      - filament weight (g)
@@ -229,6 +276,35 @@ CustomEvent Object:
     .extruder                   - extruder index
     .color                      - color string
     .extra                      - custom G-code text
+
+Export Scripts (Export to Script)
+---------------------------------
+Print Settings > Output options can name one export script
+(export_script) and enable it (export_script_enabled). The Export
+menu then offers "Export to Script": instead of writing a .gcode
+file, preFlight calls the script's export() function with the final
+G-code text and the script decides where it goes (disk, FTP, a
+printer API, ...). Export scripts use the same consent as
+preprocessing scripts.
+
+    import preFlight
+
+    def export(gcode: preFlight.ExportGCode):
+        with open(gcode.filename, "w") as f:
+            f.writelines(gcode.data)
+
+ExportGCode Object (gcode):
+    gcode.data                  - list of G-code lines, each with its
+                                  trailing newline (read/write)
+    gcode.filename              - suggested output filename from the
+                                  output filename format (read-only)
+
+Export notes:
+- export() runs synchronously in the application; a slow or hung
+  export blocks preFlight until it returns.
+- Do not call sys.exit(); raise RuntimeError(...) to report failure.
+- A script file named like a standard-library module (os, json,
+  logging, ...) is rejected; rename it.
 
 IDE Setup (VS Code)
 -------------------
@@ -301,21 +377,27 @@ Available samples:
 
   Analysis scripts (read-only, no G-code changes):
     print_analyzer.py         - print statistics and feature breakdown
+    layer_summary.py          - walks the file layer by layer through the layer
+                                text ranges and annotates each layer (comments only)
     numpy_analysis.py         - vectorized analysis with numpy (requires pip install)
 
   Demo / reference:
     m73_progress.py           - proof-of-concept M73 insertion (use built-in instead)
-    api_test.py               - exercises all 146 API bindings with PASS/FAIL report
+    api_test.py               - exercises every API binding with a PASS/FAIL report
 
 Testing
 -------
 Add samples/api_test.py to any profile's Preprocessing tab to run
 a comprehensive test of every API binding. It tests all move
 properties, layer methods, queries, write operations, and enums.
-Results are printed to the console - run preFlight-console.exe
-or capture to a file:
+Results are printed to the console. preFlight-console does not
+read the GUI consent setting; it runs scripts only when you grant
+consent on the command line with --allow-scripts:
 
-  c:\preFlight\preFlight-console.exe > C:\preFlight\debug.txt 2>&1
+  preFlight-console.exe --allow-scripts --export-gcode -o out.gcode project.3mf > log.txt 2>&1
+
+Without the flag, profiles with scripts enabled slice with a
+warning and no script runs.
 
 The test makes small, targeted modifications (a handful of moves)
 marked with PPTEST: comments so you can verify propagation in
@@ -336,14 +418,47 @@ top of process() and bail out with a message if it's too old:
 
 See motion_optimizer.py for a working example.
 
+The API itself is versioned separately: preFlight.api_version is 1
+and every binding in preFlight.py is part of that contract. It is
+bumped only when a published binding changes meaning or disappears;
+additions keep the number. A script may declare the version it was
+written for in a comment within its first 20 lines:
+
+    # preflight-api: 1
+
+A script declaring a newer version than the build provides is not
+run and the slice reports why.
+
+Script file names: a preprocessing or export script cannot be named
+like a standard-library module (json.py, logging.py, os.py, ...).
+Such a script is refused with an error; rename it. The script's
+folder is appended to the end of the module search path, so helper
+modules beside the script are importable but cannot shadow the
+standard library either.
+
 Notes
 -----
 - All feedrate values are in mm/s (not mm/min). The API converts
   automatically when writing to G-code (F parameter = mm/s * 60).
 - Read-only scripts (no modifications) have zero G-code overhead.
+- When scripts change anything, preFlight parses the modified G-code a
+  second time so the time estimate, the statistics and the M73 progress
+  lines describe the print as modified (a few seconds on a large file).
 - print() output goes to preFlight-console's stdout.
 - Script errors are logged but don't abort the slice.
-- Press Cancel Slicing to interrupt a running script.
+- Cancel Slicing interrupts a running script (KeyboardInterrupt is
+  raised inside it) and stops the slice.
+- Every script call has a time limit (Preferences > Preprocessing,
+  app setting preprocessing_timeout_minutes, default 5, 0 = none;
+  preFlight-console --script-timeout <minutes>). A script past the
+  limit gets preFlight.ScriptTimeout raised inside it and the slice
+  fails with "Preprocessing timed out", returning you to Prepare.
+  Do not catch ScriptTimeout or KeyboardInterrupt: a script that
+  keeps running two seconds after one was raised (for example a
+  retry loop with a bare "except:") is stopped anyway, every line
+  it executes then raises. A script stuck inside one long native
+  call (a socket read, a large numpy operation) is interrupted
+  when that call returns.
 - move.temperature reads 0 on printers with autoemit_temperature_commands
   disabled (e.g. Klipper). Setting move.temperature still works and
   will insert an M104 command.

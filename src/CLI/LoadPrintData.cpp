@@ -11,16 +11,17 @@
 #include <boost/nowide/args.hpp>
 #include <boost/nowide/iostream.hpp>
 
-#include "libslic3r/libslic3r.h"
-#include "libslic3r/Config.hpp"
-#include "libslic3r/GCode/PostProcessor.hpp"
-#include "libslic3r/Model.hpp"
-#include "libslic3r/FileReader.hpp"
+#include "luminary/core/Prelude.hpp"
+#include "luminary/config/model/Config.hpp"
+#include "luminary/core/diagnostics/DebugCounters.hpp"
+#include "luminary/gcode/postprocess/PostProcessor.hpp"
+#include "luminary/model/scene/Model.hpp"
+#include "luminary/format/reader/FileReader.hpp"
 
 #include "CLI/CLI.hpp"
 #include "CLI/ProfilesSharingUtils.hpp"
 
-namespace Slic3r::CLI
+namespace Luminary::CLI
 {
 
 PrinterTechnology get_printer_technology(const DynamicConfig &config)
@@ -30,22 +31,14 @@ PrinterTechnology get_printer_technology(const DynamicConfig &config)
     return (opt == nullptr) ? ptUnknown : opt->value;
 }
 
-// may be "validate_and_apply_printer_technology" will be better?
-static bool can_apply_printer_technology(PrinterTechnology &printer_technology,
-                                         const PrinterTechnology &other_printer_technology)
+// preFlight prints FFF only, so a source naming another technology is not a load error. The value
+// travels to finalize_print_config, which counts it and reads it as FFF; the last source that names
+// a technology wins, so a value the build does not print always reaches the counter.
+static void adopt_printer_technology(PrinterTechnology &printer_technology, const DynamicConfig &config)
 {
-    if (printer_technology == ptUnknown)
-    {
+    const PrinterTechnology other_printer_technology = get_printer_technology(config);
+    if (other_printer_technology != ptUnknown)
         printer_technology = other_printer_technology;
-        return true;
-    }
-
-    bool invalid_other_pt = printer_technology != other_printer_technology && other_printer_technology != ptUnknown;
-
-    if (invalid_other_pt)
-        boost::nowide::cerr << "Mixing configurations for FFF and SLA technologies" << std::endl;
-
-    return !invalid_other_pt;
 }
 
 static void print_config_substitutions(const ConfigSubstitutions &config_substitutions, const std::string &file)
@@ -97,8 +90,7 @@ static bool load_print_config(DynamicPrintConfig &print_config, PrinterTechnolog
                 return false;
             }
 
-            if (!can_apply_printer_technology(printer_technology, get_printer_technology(config)))
-                return false;
+            adopt_printer_technology(printer_technology, config);
 
             print_config_substitutions(config_substitutions, file);
 
@@ -113,18 +105,17 @@ static bool load_print_config(DynamicPrintConfig &print_config, PrinterTechnolog
     {
         DynamicPrintConfig config;
         // load config from profiles set
-        std::string errors =
-            Slic3r::load_full_print_config(cli.input_config.opt_string("print-profile"),
-                                           cli.input_config.option<ConfigOptionStrings>("material-profile")->values,
-                                           cli.input_config.opt_string("printer-profile"), config, printer_technology);
+        std::string errors = Luminary::load_full_print_config(
+            cli.input_config.opt_string("print-profile"),
+            cli.input_config.option<ConfigOptionStrings>("material-profile")->values,
+            cli.input_config.opt_string("printer-profile"), config, printer_technology);
         if (!errors.empty())
         {
             boost::nowide::cerr << "Error while loading config from profiles: " << errors << std::endl;
             return false;
         }
 
-        if (!can_apply_printer_technology(printer_technology, get_printer_technology(config)))
-            return false;
+        adopt_printer_technology(printer_technology, config);
 
         config.normalize_fdm();
 
@@ -170,12 +161,11 @@ static bool process_input_files(std::vector<Model> &models, DynamicPrintConfig &
                         ->value);
                 boost::optional<Semver> generator_version;
 
-                //FIXME should we check the version here? // | Model::LoadAttribute::CheckVersion ?
+                // No version gate on the console path: a project written by a newer build still loads.
                 model = FileReader::load_model_with_config(file, &config, &config_substitutions_ctxt, generator_version,
                                                            FileReader::LoadAttribute::AddDefaultInstances);
 
-                if (!can_apply_printer_technology(printer_technology, get_printer_technology(config)))
-                    return false;
+                adopt_printer_technology(printer_technology, config);
 
                 print_config_substitutions(config_substitutions_ctxt.substitutions, file);
 
@@ -200,6 +190,7 @@ static bool process_input_files(std::vector<Model> &models, DynamicPrintConfig &
         if (model.objects.empty())
         {
             boost::nowide::cerr << "Error: file is empty: " << file << std::endl;
+            ++cli.empty_input_files;
             continue;
         }
         models.push_back(model);
@@ -217,34 +208,20 @@ static bool finalize_print_config(DynamicPrintConfig &print_config, PrinterTechn
     // Normalizing after importing the 3MFs / AMFs
     print_config.normalize_fdm();
 
-    if (printer_technology == ptUnknown)
-        printer_technology = cli.actions_config.has("export_sla") ? ptSLA : ptFFF;
+    // preFlight prints FFF only. A project or profile asking for another technology is counted and
+    // read as FFF, so the file still loads and slices. The --export-sla action is refused outright
+    // elsewhere, because that is a request for a capability rather than an old file.
+    if (printer_technology != ptFFF)
+    {
+        if (printer_technology != ptUnknown)
+            DBG_COUNT_LOAD("PRINTER_TECHNOLOGY_SLA_REJECTED");
+        printer_technology = ptFFF;
+    }
     print_config.option<ConfigOptionEnum<PrinterTechnology>>("printer_technology", true)->value = printer_technology;
 
-    // Initialize full print configs for both the FFF and SLA technologies.
     FullPrintConfig fff_print_config;
-    SLAFullPrintConfig sla_print_config;
-
-    // Synchronize the default parameters and the ones received on the command line.
-    if (printer_technology == ptFFF)
-    {
-        fff_print_config.apply(print_config, true);
-        print_config.apply(fff_print_config, true);
-    }
-    else
-    {
-        assert(printer_technology == ptSLA);
-        sla_print_config.output_filename_format.value = "[input_filename_base].sl1";
-
-        // The default bed shape should reflect the default display parameters
-        // and not the fff defaults.
-        double w = sla_print_config.display_width.getFloat();
-        double h = sla_print_config.display_height.getFloat();
-        sla_print_config.bed_shape.values = {Vec2d(0, 0), Vec2d(w, 0), Vec2d(w, h), Vec2d(0, h)};
-
-        sla_print_config.apply(print_config, true);
-        print_config.apply(sla_print_config, true);
-    }
+    fff_print_config.apply(print_config, true);
+    print_config.apply(fff_print_config, true);
 
     // validate print configuration
     std::string validity = print_config.validate();
@@ -295,4 +272,4 @@ bool is_needed_post_processing(const DynamicPrintConfig &print_config)
     return false;
 }
 
-} // namespace Slic3r::CLI
+} // namespace Luminary::CLI

@@ -13,7 +13,7 @@ set(LIBNEST2D_SRCFILES
     include/libnest2d/placers/nfpplacer.hpp
     include/libnest2d/selections/selection_boilerplate.hpp
     include/libnest2d/selections/firstfit.hpp
-    include/libnest2d/backends/libslic3r/geometries.hpp
+    include/libnest2d/backends/luminary/geometries.hpp
     include/libnest2d/optimizers/nlopt/nlopt_boilerplate.hpp
     include/libnest2d/optimizers/nlopt/simplex.hpp
     include/libnest2d/optimizers/nlopt/subplex.hpp
@@ -23,5 +23,5 @@ set(LIBNEST2D_SRCFILES
 add_library(libnest2d INTERFACE)
 
 target_include_directories(libnest2d INTERFACE ${CMAKE_CURRENT_LIST_DIR}/include)
-target_link_libraries(libnest2d INTERFACE NLopt::nlopt TBB::tbb TBB::tbbmalloc Boost::boost libslic3r)
-target_compile_definitions(libnest2d INTERFACE LIBNEST2D_THREADING_tbb LIBNEST2D_STATIC LIBNEST2D_OPTIMIZER_nlopt LIBNEST2D_GEOMETRIES_libslic3r)
+target_link_libraries(libnest2d INTERFACE NLopt::nlopt TBB::tbb TBB::tbbmalloc Boost::boost luminary)
+target_compile_definitions(libnest2d INTERFACE LIBNEST2D_THREADING_tbb LIBNEST2D_STATIC LIBNEST2D_OPTIMIZER_nlopt LIBNEST2D_GEOMETRIES_luminary)

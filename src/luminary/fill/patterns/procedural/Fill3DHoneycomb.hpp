@@ -1,0 +1,37 @@
+///|/ Copyright (c) preFlight 2025+ oozeBot, LLC
+///|/ Copyright (c) Prusa Research 2016 - 2020 Vojtěch Bubník @bubnikv
+///|/ Copyright (c) Slic3r 2016 Alessandro Ranellucci @alranel
+///|/
+///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
+///|/
+#pragma once
+
+#include <map>
+#include <utility>
+
+#include "luminary/core/Prelude.hpp"
+#include "luminary/fill/contract/FillBase.hpp"
+#include "luminary/geometry/contours/ExPolygon.hpp"
+#include "luminary/geometry/contours/Polyline.hpp"
+
+namespace Luminary
+{
+class Point;
+
+class Fill3DHoneycomb : public Fill
+{
+public:
+    Fill *clone() const override { return new Fill3DHoneycomb(*this); };
+    ~Fill3DHoneycomb() override {}
+
+    // require bridge flow since most of this pattern hangs in air
+    bool use_bridge_flow() const override { return true; }
+    bool is_self_crossing() override { return false; }
+
+protected:
+    void _fill_surface_single(const FillParams &params, unsigned int thickness_layers,
+                              const std::pair<float, Point> &direction, ExPolygon expolygon,
+                              Polylines &polylines_out) override;
+};
+
+} // namespace Luminary

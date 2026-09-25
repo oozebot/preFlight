@@ -1,9 +1,9 @@
+///|/ Copyright (c) preFlight 2025+ oozeBot, LLC
 ///|/ Copyright (c) Prusa Research 2021 - 2022 Tomáš Mészáros @tamasmeszaros, Lukáš Hejl @hejllukas, Vojtěch Bubník @bubnikv, Lukáš Matěna @lukasmatena
 ///|/
-///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
+///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
 ///|/
-#ifndef slic3r_LocalesUtils_hpp_
-#define slic3r_LocalesUtils_hpp_
+#pragma once
 
 #include <string>
 #include <clocale>
@@ -15,7 +15,7 @@
 #include <xlocale.h>
 #endif
 
-namespace Slic3r {
+namespace Luminary {
 
 // RAII wrapper that sets LC_NUMERIC to "C" on construction
 // and restores the old value on destruction.
@@ -67,6 +67,4 @@ inline void set_c_locales()
 #endif
 }
 
-} // namespace Slic3r
-
-#endif // slic3r_LocalesUtils_hpp_
+} // namespace Luminary

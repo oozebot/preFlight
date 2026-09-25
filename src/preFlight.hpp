@@ -3,12 +3,9 @@
 ///|/
 ///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
 ///|/
-#ifndef PREFLIGHT_HPP
-#define PREFLIGHT_HPP
+#pragma once
 
-namespace Slic3r::CLI
+namespace Luminary::CLI
 {
 int run(int argc, char **argv);
 }
-
-#endif

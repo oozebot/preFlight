@@ -32,51 +32,60 @@ include("version.inc")
 include(GNUInstallDirs)
 include(CMakeDependentOption)
 
-set(SLIC3R_RESOURCES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/resources")
-file(TO_NATIVE_PATH "${SLIC3R_RESOURCES_DIR}" SLIC3R_RESOURCES_DIR_WIN)
+set(PREFLIGHT_RESOURCES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/resources")
+file(TO_NATIVE_PATH "${PREFLIGHT_RESOURCES_DIR}" PREFLIGHT_RESOURCES_DIR_WIN)
 
 if (NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
   message(STATUS "No build type selected, default to Release")
   set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type (default Release)" FORCE)
 endif()
 
-if(DEFINED ENV{SLIC3R_STATIC})
-        set(SLIC3R_STATIC_INITIAL $ENV{SLIC3R_STATIC})
+if(DEFINED ENV{PREFLIGHT_STATIC})
+        set(PREFLIGHT_STATIC_INITIAL $ENV{PREFLIGHT_STATIC})
 else()
         if (MSVC OR MINGW OR APPLE)
-                set(SLIC3R_STATIC_INITIAL 1)
+                set(PREFLIGHT_STATIC_INITIAL 1)
         else()
-                set(SLIC3R_STATIC_INITIAL 0)
+                set(PREFLIGHT_STATIC_INITIAL 0)
         endif()
 endif()
 
-option(SLIC3R_STATIC 			"Compile preFlight with static libraries (Boost, TBB, glew)" ${SLIC3R_STATIC_INITIAL})
-option(SLIC3R_GUI    			"Compile preFlight with GUI components (OpenGL, wxWidgets)" 1)
-option(SLIC3R_FHS               "Assume preFlight is to be installed in a FHS directory structure" 0)
-option(SLIC3R_PCH               "Use precompiled headers" 1)
-option(SLIC3R_MSVC_COMPILE_PARALLEL "Compile on Visual Studio in parallel" 1)
-option(SLIC3R_ASAN              "Enable ASan on Clang and GCC" 0)
-option(SLIC3R_UBSAN             "Enable UBSan on Clang and GCC" 0)
-option(SLIC3R_ENABLE_FORMAT_STEP "Enable compilation of STEP file support" ON)
-option(SLIC3R_LOG_TO_FILE       "Enable logging into file")
-option(SLIC3R_REPO_URL          "Preset repo URL")
+option(PREFLIGHT_STATIC 			"Compile preFlight with static libraries (Boost, TBB, glew)" ${PREFLIGHT_STATIC_INITIAL})
+option(PREFLIGHT_GUI    			"Compile preFlight with GUI components (OpenGL, wxWidgets)" 1)
+option(PREFLIGHT_FHS               "Assume preFlight is to be installed in a FHS directory structure" 0)
+option(PREFLIGHT_PCH               "Use precompiled headers" 1)
+option(PREFLIGHT_MSVC_COMPILE_PARALLEL "Compile on Visual Studio in parallel" 1)
+option(PREFLIGHT_ASAN              "Enable ASan on Clang and GCC" 0)
+option(PREFLIGHT_UBSAN             "Enable UBSan on Clang and GCC" 0)
+option(PREFLIGHT_ENABLE_FORMAT_STEP "Enable compilation of STEP file support" ON)
+option(PREFLIGHT_LOG_TO_FILE       "Enable logging into file")
+option(PREFLIGHT_BUILD_TESTS       "Build the in-process unit test suite (tests/unit, Catch2)" OFF)
+option(PREFLIGHT_REPO_URL          "Preset repo URL")
 # Legacy Clipper 6.4.2 support has been removed
 
-# SLIC3R_OPENGL_ES can be enabled only if SLIC3R_GUI is enabled.
-CMAKE_DEPENDENT_OPTION(SLIC3R_OPENGL_ES "Compile preFlight targeting OpenGL ES" OFF "SLIC3R_GUI" OFF)
+# PREFLIGHT_OPENGL_ES can be enabled only if PREFLIGHT_GUI is enabled.
+CMAKE_DEPENDENT_OPTION(PREFLIGHT_OPENGL_ES "Compile preFlight targeting OpenGL ES" OFF "PREFLIGHT_GUI" OFF)
 
 # Desktop integration: when ON, the app can prompt the user to create .desktop files and icons at runtime.
 # The upstream logic forced this OFF for FHS builds, but preFlight needs it ON for Flatpak.
-option(SLIC3R_DESKTOP_INTEGRATION "Allow performing desktop integration during runtime" ON)
-option(SLIC3R_PYTHON_PREPROCESSOR "Enable Python pre-processor scripting via embedded interpreter" ON)
+option(PREFLIGHT_DESKTOP_INTEGRATION "Allow performing desktop integration during runtime" ON)
+option(PREFLIGHT_PYTHON_PREPROCESSOR "Enable Python pre-processor scripting via embedded interpreter" ON)
+# Replaces the process-wide malloc/free with TBB's scalable allocator at load time.
+# Requires the deps-built shared tbbmalloc.dll + tbbmalloc_proxy.dll (deps/+TBBMallocProxy),
+# deployed next to the executables. Windows-only; measured 10-17% faster slicing.
+# oneTBB does not build tbbmalloc_proxy for Windows ARM64, so that target keeps the CRT allocator.
+if (WIN32 AND NOT CMAKE_CXX_COMPILER_ARCHITECTURE_ID MATCHES "ARM64")
+    set(_tbbmalloc_proxy_default ON)
+else ()
+    set(_tbbmalloc_proxy_default OFF)
+endif ()
+option(PREFLIGHT_TBBMALLOC_PROXY "Route the process allocator through tbbmalloc_proxy (Windows only)" ${_tbbmalloc_proxy_default})
 
-set(OPENVDB_FIND_MODULE_PATH "" CACHE PATH "Path to OpenVDB installation's find modules.")
-
-set(SLIC3R_GTK "2" CACHE STRING "GTK version to use with wxWidgets on Linux")
+set(PREFLIGHT_GTK "2" CACHE STRING "GTK version to use with wxWidgets on Linux")
 
 set(IS_CROSS_COMPILE FALSE)
 
-if (SLIC3R_STATIC)
+if (PREFLIGHT_STATIC)
     # Prefer config scripts over find modules. This is helpful when building with
     # the static dependencies. Many libraries have their own export scripts
     # while having a Find<PkgName> module in standard cmake installation.
@@ -104,31 +113,31 @@ endif ()
 
 # preFlight does not build or use the test suite or sandboxes
 
-# Print out the SLIC3R_* cache options
+# Print out the PREFLIGHT_* cache options
 get_cmake_property(_cache_vars CACHE_VARIABLES)
 list (SORT _cache_vars)
 foreach (_cache_var ${_cache_vars})
-    if("${_cache_var}" MATCHES "^SLIC3R_")
+    if("${_cache_var}" MATCHES "^PREFLIGHT_")
         message(STATUS "${_cache_var}: ${${_cache_var}}")
     endif ()
 endforeach()
 
-if (SLIC3R_LOG_TO_FILE)
-    add_definitions(-DSLIC3R_LOG_TO_FILE)
+if (PREFLIGHT_LOG_TO_FILE)
+    add_definitions(-DPREFLIGHT_LOG_TO_FILE)
 endif ()
-if (SLIC3R_REPO_URL)
-    add_definitions(-DSLIC3R_REPO_URL="${SLIC3R_REPO_URL}")
+if (PREFLIGHT_REPO_URL)
+    add_definitions(-DPREFLIGHT_REPO_URL="${PREFLIGHT_REPO_URL}")
 endif()
-if (SLIC3R_GUI)
-    add_definitions(-DSLIC3R_GUI)
+if (PREFLIGHT_GUI)
+    add_definitions(-DPREFLIGHT_GUI)
 endif ()
 
-if (SLIC3R_OPENGL_ES)
-    add_definitions(-DSLIC3R_OPENGL_ES)
+if (PREFLIGHT_OPENGL_ES)
+    add_definitions(-DPREFLIGHT_OPENGL_ES)
 endif()
 
-if(SLIC3R_DESKTOP_INTEGRATION)
-    add_definitions(-DSLIC3R_DESKTOP_INTEGRATION)
+if(PREFLIGHT_DESKTOP_INTEGRATION)
+    add_definitions(-DPREFLIGHT_DESKTOP_INTEGRATION)
 endif ()
 
 if (MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL Clang)
@@ -144,8 +153,8 @@ else ()
 endif ()
 
 if (MSVC)
-    # preFlight: /MP disabled — Ninja already handles parallel compilation.
-    # Having both causes N×M compiler processes that exhaust heap memory.
+    # /MP is left off: Ninja already runs the compiles in parallel, and both together
+    # spawn N*M compiler processes that exhaust heap memory.
     # /bigobj (Increase Number of Sections in .Obj file)
     # error C3859: virtual memory range for PCH exceeded; please recompile with a command line option of '-Zm90' or greater
     # Generate symbols at every build target, even for the release.
@@ -171,7 +180,7 @@ if (NOT MSVC)
 endif ()
 
 # Display and check CMAKE_PREFIX_PATH
-message(STATUS "SLIC3R_STATIC: ${SLIC3R_STATIC}")
+message(STATUS "PREFLIGHT_STATIC: ${PREFLIGHT_STATIC}")
 if (NOT "${CMAKE_PREFIX_PATH}" STREQUAL "")
     message(STATUS "CMAKE_PREFIX_PATH: ${CMAKE_PREFIX_PATH} (from cache or command line)")
     set(PREFIX_PATH_CHECK ${CMAKE_PREFIX_PATH})
@@ -305,7 +314,7 @@ if (NOT MSVC AND ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "GNU" OR "${CMAKE_CXX_COMP
 
 endif()
 
-if (SLIC3R_ASAN)
+if (PREFLIGHT_ASAN)
     # ASAN should be available on MSVC starting with Visual Studio 2019 16.9
     # https://devblogs.microsoft.com/cppblog/address-sanitizer-for-msvc-now-generally-available/
     add_compile_options(-fsanitize=address)
@@ -322,11 +331,11 @@ if (SLIC3R_ASAN)
     endif ()
 endif ()
 
-if (SLIC3R_UBSAN)
+if (PREFLIGHT_UBSAN)
     # Stacktrace for every report is enabled by default. It can be disabled by running preFlight with "UBSAN_OPTIONS=print_stacktrace=0".
 
-    # Define macro SLIC3R_UBSAN to allow detection in the source code if this sanitizer is enabled.
-    add_compile_definitions(SLIC3R_UBSAN)
+    # Define macro PREFLIGHT_UBSAN to allow detection in the source code if this sanitizer is enabled.
+    add_compile_definitions(PREFLIGHT_UBSAN)
 
     # Clang supports much more useful checks than GCC, so when Clang is detected, another checks will be enabled.
     # List of what GCC is checking: https://gcc.gnu.org/onlinedocs/gcc/Instrumentation-Options.html
@@ -415,7 +424,7 @@ add_definitions(-DwxUSE_UNICODE -D_UNICODE -DUNICODE -DWXINTL_NO_GETTEXT_MACRO)
 add_definitions(-DwxNO_UNSAFE_WXSTRING_CONV)
 
 # Find and configure boost
-if(SLIC3R_STATIC)
+if(PREFLIGHT_STATIC)
     # Use static boost libraries.
     set(Boost_USE_STATIC_LIBS ON)
     # Use boost libraries linked statically to the C++ runtime.
@@ -429,7 +438,7 @@ set(MINIMUM_BOOST_VERSION "1.83.0")
 set(_boost_components "filesystem;thread;log;log_setup;locale;regex;chrono;atomic;date_time;iostreams;nowide;process")
 find_package(Boost ${MINIMUM_BOOST_VERSION} REQUIRED COMPONENTS ${_boost_components})
 
-find_package(Eigen3 3.3.7...<6.0 REQUIRED) # preFlight: accept Eigen 5.x (jumped from 3.x)
+find_package(Eigen3 3.3.7...<6.0 REQUIRED) # the range accepts Eigen 5.x
 
 add_library(boost_libs INTERFACE)
 add_library(boost_headeronly INTERFACE)
@@ -439,13 +448,13 @@ if (APPLE)
     target_compile_definitions(boost_headeronly INTERFACE BOOST_ASIO_DISABLE_KQUEUE)
 endif()
 
-if(SLIC3R_STATIC)
+if(PREFLIGHT_STATIC)
     target_compile_definitions(boost_headeronly INTERFACE BOOST_LOG_STATIC_LINK)
 else()
     target_compile_definitions(boost_headeronly INTERFACE BOOST_LOG_DYN_LINK)
 endif()
 
-function(slic3r_remap_configs targets from_Cfg to_Cfg)
+function(preflight_remap_configs targets from_Cfg to_Cfg)
     if(MSVC)
         string(TOUPPER ${from_Cfg} from_CFG)
     
@@ -472,7 +481,7 @@ if(TARGET Boost::system)
         boost_headeronly # includes the custom compile definitions as well
         ${_boost_targets}
         )
-    slic3r_remap_configs("${_boost_targets}" RelWithDebInfo Release)
+    preflight_remap_configs("${_boost_targets}" RelWithDebInfo Release)
 else()
     target_include_directories(boost_headeronly INTERFACE ${Boost_INCLUDE_DIRS})
     target_link_libraries(boost_libs INTERFACE boost_headeronly ${Boost_LIBRARIES})
@@ -481,13 +490,13 @@ endif()
 
 
 # Find and configure intel-tbb
-if(SLIC3R_STATIC)
+if(PREFLIGHT_STATIC)
     set(TBB_STATIC 1)
 endif()
 set(TBB_DEBUG 1)
 find_package(TBB REQUIRED)
-slic3r_remap_configs(TBB::tbb RelWithDebInfo Release)
-slic3r_remap_configs(TBB::tbbmalloc RelWithDebInfo Release)
+preflight_remap_configs(TBB::tbb RelWithDebInfo Release)
+preflight_remap_configs(TBB::tbbmalloc RelWithDebInfo Release)
 # include_directories(${TBB_INCLUDE_DIRS})
 # add_definitions(${TBB_DEFINITIONS})
 # if(MSVC)
@@ -526,14 +535,48 @@ elseif(TARGET expat::expat) # found by a config script
 else() # found by an older Find script
     target_link_libraries(libexpat INTERFACE ${EXPAT_LIBRARIES})
 endif ()
+# The deps build expat as a static library, and its headers declare every function dllimport on
+# Windows unless XML_STATIC is defined; only the CONFIG-mode find carries that definition, so it is
+# set here for every consumer and the link no longer depends on which find script succeeded.
+if (WIN32)
+    target_compile_definitions(libexpat INTERFACE XML_STATIC)
+endif ()
 
 find_package(PNG REQUIRED)
+
+# libjpeg, beside libpng because both engine targets now compile a thumbnail encoder and a target
+# created inside one subdirectory is not visible to a subdirectory CMake processed before it.
+# libjpeg-turbo static builds produce jpeg-static.lib which FindJPEG cannot locate; when building
+# against system libjpeg (distro packaging) the config package may not exist, so fall back to
+# FindJPEG and create the expected target.
+find_package(libjpeg-turbo CONFIG QUIET)
+if(TARGET libjpeg-turbo::jpeg-static)
+    if(NOT TARGET JPEG::JPEG)
+        add_library(JPEG::JPEG ALIAS libjpeg-turbo::jpeg-static)
+    endif()
+else()
+    find_package(JPEG REQUIRED)
+endif()
 
 set(OpenGL_GL_PREFERENCE "LEGACY")
 find_package(OpenGL REQUIRED)
 
-# GLEW is no longer used - GLAD is bundled in libvgcode and exported as PUBLIC
-# find_package(GLEW REQUIRED) - removed
+# GLAD is bundled in src/viewer and exported as PUBLIC, so GLEW is not searched for here.
+
+# NanoSVG, resolved here rather than only inside src/DSKY, because the engine header
+# luminary/model/schema/emboss/EmbossShape.hpp includes nanosvg/nanosvg.h and holds an NSVGimage.
+# The guard keeps the GUI's own call harmless if this ever runs after it.
+if (NOT TARGET NanoSVG::nanosvg)
+    find_package(NanoSVG REQUIRED)
+endif ()
+
+# nlohmann_json, resolved here rather than inside src/luminary, because
+# luminary/macro/custom_parameters/CustomParametersHandling.cpp includes nlohmann/json.hpp and the
+# target a find_package creates is visible only in the directory that made the call and below.
+# The guard keeps a second call elsewhere harmless.
+if (NOT TARGET nlohmann_json::nlohmann_json)
+    find_package(nlohmann_json REQUIRED)
+endif ()
 
 # Find the Cereal serialization library
 find_package(cereal REQUIRED)
@@ -545,12 +588,12 @@ else()
 endif()
 
 # l10n
-set(L10N_DIR "${SLIC3R_RESOURCES_DIR}/localization")
+set(L10N_DIR "${PREFLIGHT_RESOURCES_DIR}/localization")
 add_custom_target(gettext_make_pot
     COMMAND xgettext --keyword=L --keyword=_L --keyword=_u8L --keyword=L_CONTEXT:1,2c --keyword=_L_PLURAL:1,2 --add-comments=TRN --from-code=UTF-8 --debug --boost
         -f "${L10N_DIR}/list.txt"
         -o "${L10N_DIR}/preFlight.pot"
-    COMMAND hintsToPot ${SLIC3R_RESOURCES_DIR} ${L10N_DIR}
+    COMMAND hintsToPot ${PREFLIGHT_RESOURCES_DIR} ${L10N_DIR}
     WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
     COMMENT "Generate pot file from strings in the source tree"
 )
@@ -607,32 +650,26 @@ foreach(po_file ${L10N_PO_FILES})
 endforeach()
 
 find_package(NLopt 1.4 REQUIRED)
-slic3r_remap_configs(NLopt::nlopt RelWithDebInfo Release)
+preflight_remap_configs(NLopt::nlopt RelWithDebInfo Release)
 
-if(SLIC3R_STATIC)
-    set(OPENVDB_USE_STATIC_LIBS ON)
-    set(USE_BLOSC TRUE)
-endif ()
-
-find_package(OpenVDB 5.0 COMPONENTS openvdb)
-if(OpenVDB_FOUND)
-    # OpenEXR 3.x uses Imath::Imath, OpenEXR 2.x uses IlmBase::Half
-    if(TARGET Imath::Imath)
-        slic3r_remap_configs(Imath::Imath RelWithDebInfo Release)
-    elseif(TARGET IlmBase::Half)
-        slic3r_remap_configs(IlmBase::Half RelWithDebInfo Release)
-    endif()
-    if(TARGET Blosc::blosc)
-        slic3r_remap_configs(Blosc::blosc RelWithDebInfo Release)
-    endif()
-else ()
-    message(FATAL_ERROR "OpenVDB could not be found with the bundled find module. "
-                   "You can try to specify the find module location of your "
-                   "OpenVDB installation with the OPENVDB_FIND_MODULE_PATH cache variable.")
+# Z3, the SMT solver the sequential-print scheduler builds its model over, resolved here rather than
+# inside a subdirectory because luminary/arrange/sequential/ compiles against z3++.h and CMake
+# processes src/luminary before any directory that used to create the imported target. The guard
+# keeps a later call harmless.
+if (NOT TARGET z3::libz3)
+    find_package(Z3 REQUIRED)
+    preflight_remap_configs("z3::libz3" RelWithDebInfo Release)
 endif ()
 
 # Python pre-processor: embedded interpreter for G-code pre-processing scripts
-if (SLIC3R_PYTHON_PREPROCESSOR)
+if (PREFLIGHT_PYTHON_PREPROCESSOR)
+    # CMake 4.3.0 through 4.3.2 misspell the variable that marks an ARM target in FindPython's
+    # interpreter check, so on Windows ARM64 every ARM64 interpreter is rejected as the wrong
+    # architecture. Defining the misspelled name makes that check see the ARM target.
+    if (WIN32 AND CMAKE_CXX_COMPILER_ARCHITECTURE_ID MATCHES "ARM"
+        AND CMAKE_VERSION VERSION_GREATER_EQUAL 4.3 AND CMAKE_VERSION VERSION_LESS 4.4)
+        set("_$_PYTHON_PREFIX}_ARCHITECTURE_ID" "${CMAKE_CXX_COMPILER_ARCHITECTURE_ID}")
+    endif ()
     find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Embed)
     find_package(pybind11 CONFIG REQUIRED)
     message(STATUS "Python pre-processor: ON (Python ${Python3_VERSION})")
@@ -685,32 +722,35 @@ endfunction()
 
 add_subdirectory(build-utils)
 add_subdirectory(bundled_deps)
-# libslic3r, preFlight GUI and the preFlight executable.
+# The Luminary engine, the preFlight GUI and the preFlight executable.
 add_subdirectory(src)
+if (PREFLIGHT_BUILD_TESTS)
+    add_subdirectory(tests/unit)
+endif ()
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT preFlight_app_console)
 
 add_dependencies(gettext_make_pot hintsToPot)
 
 if (WIN32)
-    install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/resources")
-elseif (SLIC3R_FHS)
+    install(DIRECTORY "${PREFLIGHT_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/resources")
+elseif (PREFLIGHT_FHS)
     # CMAKE_INSTALL_FULL_DATAROOTDIR: read-only architecture-independent data root (share)
-    set(SLIC3R_FHS_RESOURCES "${CMAKE_INSTALL_FULL_DATAROOTDIR}/preFlight")
-    install(DIRECTORY ${SLIC3R_RESOURCES_DIR}/ DESTINATION ${SLIC3R_FHS_RESOURCES}
+    set(PREFLIGHT_FHS_RESOURCES "${CMAKE_INSTALL_FULL_DATAROOTDIR}/preFlight")
+    install(DIRECTORY ${PREFLIGHT_RESOURCES_DIR}/ DESTINATION ${PREFLIGHT_FHS_RESOURCES}
         PATTERN "*/udev" EXCLUDE
     )
     install(FILES src/platform/unix/preFlight.desktop DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications)
     install(FILES src/platform/unix/preFlightGcodeviewer.desktop DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications)
-    install(FILES ${SLIC3R_RESOURCES_DIR}/icons/preFlight.svg
+    install(FILES ${PREFLIGHT_RESOURCES_DIR}/icons/preFlight.svg
         DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps RENAME preFlight.svg
     )
-    install(FILES ${SLIC3R_RESOURCES_DIR}/icons/preFlight-gcodeviewer.svg
+    install(FILES ${PREFLIGHT_RESOURCES_DIR}/icons/preFlight-gcodeviewer.svg
         DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps RENAME preFlight-gcodeviewer.svg
     )
-    install(DIRECTORY ${SLIC3R_RESOURCES_DIR}/udev/ DESTINATION lib/udev/rules.d)
-    target_compile_definitions(preFlight PUBLIC SLIC3R_FHS SLIC3R_FHS_RESOURCES="${SLIC3R_FHS_RESOURCES}")
+    install(DIRECTORY ${PREFLIGHT_RESOURCES_DIR}/udev/ DESTINATION lib/udev/rules.d)
+    target_compile_definitions(preFlight PUBLIC PREFLIGHT_FHS PREFLIGHT_FHS_RESOURCES="${PREFLIGHT_FHS_RESOURCES}")
 else ()
     install(FILES src/platform/unix/preFlight.desktop DESTINATION ${CMAKE_INSTALL_PREFIX}/resources/applications)
     install(FILES src/platform/unix/preFlightGcodeviewer.desktop DESTINATION ${CMAKE_INSTALL_PREFIX}/resources/applications)
-    install(DIRECTORY "${SLIC3R_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/resources")
+    install(DIRECTORY "${PREFLIGHT_RESOURCES_DIR}/" DESTINATION "${CMAKE_INSTALL_PREFIX}/resources")
 endif ()

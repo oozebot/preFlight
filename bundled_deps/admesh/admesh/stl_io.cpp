@@ -31,7 +31,7 @@
 
 void stl_stats_out(stl_file *stl, FILE *file, char *input_file)
 {
-  	// This is here for Slic3r, without our config.h it won't use this part of the code anyway.
+  	// ADMesh's own config.h defines VERSION; this build has none.
 #ifndef VERSION
 #define VERSION "unknown"
 #endif

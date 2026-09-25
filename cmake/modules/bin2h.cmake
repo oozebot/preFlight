@@ -1,5 +1,5 @@
 # Source: https://gist.github.com/sivachandran/3a0de157dccef822a230#file-bin2h-cmake
-# Added modifications to suit prusaslicer
+# Added modifications to suit preFlight
 include(CMakeParseArguments)
 
 # Function to wrap a given string into multiple lines at the given column position.

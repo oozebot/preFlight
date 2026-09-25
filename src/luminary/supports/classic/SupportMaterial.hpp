@@ -1,0 +1,117 @@
+///|/ Copyright (c) preFlight 2025+ oozeBot, LLC
+///|/ Copyright (c) Prusa Research 2016 - 2023 Vojtěch Bubník @bubnikv, Lukáš Matěna @lukasmatena
+///|/ Copyright (c) Slic3r 2014 Alessandro Ranellucci @alranel
+///|/
+///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
+///|/
+#pragma once
+
+#include <vector>
+
+#include "luminary/toolpath/flow/Flow.hpp"
+#include "luminary/config/catalog/PrintConfig.hpp"
+#include "luminary/model/slicing/Slicing.hpp"
+#include "luminary/supports/model/SupportLayer.hpp"
+#include "luminary/supports/model/SupportParameters.hpp"
+#include "luminary/geometry/contours/Polygon.hpp"
+#include "luminary/core/Prelude.hpp"
+
+namespace Luminary
+{
+
+class PrintObject;
+
+// This class manages raft and supports for a single PrintObject.
+// Instantiated by Luminary::Print::Object->_support_material()
+// This class is instantiated before the slicing starts as Object.pm will query
+// the parameters of the raft to determine the 1st layer height and thickness.
+class PrintObjectSupportMaterial
+{
+public:
+    PrintObjectSupportMaterial(const PrintObject *object, const SlicingParameters &slicing_params);
+
+    // Is raft enabled?
+    bool has_raft() const { return m_slicing_params.has_raft(); }
+    // Has any support?
+    bool has_support() const { return m_object_config->support_material.value; }
+    // Auto supports only: painted snug and grid supports are placed exactly where painted.
+    bool build_plate_only() const
+    {
+        return this->has_support() && m_object_config->support_material_auto.value &&
+               m_object_config->support_material_buildplate_only.value;
+    }
+
+    bool has_contact_loops() const { return m_object_config->support_material_interface_contact_loops.value; }
+
+    // Generate support material for the object.
+    // New support layers will be added to the object,
+    // with extrusion paths and islands filled in for each support layer.
+    void generate(PrintObject &object);
+
+private:
+    using SupportGeneratorLayersPtr = FFFSupport::SupportGeneratorLayersPtr;
+    using SupportGeneratorLayerStorage = FFFSupport::SupportGeneratorLayerStorage;
+    using SupportParameters = FFFSupport::SupportParameters;
+
+    std::vector<Polygons> buildplate_covered(const PrintObject &object) const;
+
+    // Generate top contact layers supporting overhangs.
+    // For a soluble interface material synchronize the layer heights with the object, otherwise leave the layer height undefined.
+    // If supports over bed surface only are requested, don't generate contact layers over an object.
+    SupportGeneratorLayersPtr top_contact_layers(const PrintObject &object,
+                                                 const std::vector<Polygons> &buildplate_covered,
+                                                 SupportGeneratorLayerStorage &layer_storage) const;
+
+    // Generate bottom contact layers supporting the top contact layers.
+    // For a soluble interface material synchronize the layer heights with the object,
+    // otherwise set the layer height to the support interface flow.
+    SupportGeneratorLayersPtr bottom_contact_layers_and_layer_support_areas(
+        const PrintObject &object, const SupportGeneratorLayersPtr &top_contacts,
+        std::vector<Polygons> &buildplate_covered, SupportGeneratorLayerStorage &layer_storage,
+        std::vector<Polygons> &layer_support_areas) const;
+
+    // Fast path for painted-only supports (no auto-detection).
+    // Precomputes the downward projection and processes layers in parallel.
+    SupportGeneratorLayersPtr bottom_contact_layers_painted_fast(const PrintObject &object,
+                                                                 const SupportGeneratorLayersPtr &top_contacts,
+                                                                 SupportGeneratorLayerStorage &layer_storage,
+                                                                 std::vector<Polygons> &layer_support_areas) const;
+
+    // Trim the top_contacts layers with the bottom_contacts layers if they overlap, so there would not be enough vertical space for both of them.
+    void trim_top_contacts_by_bottom_contacts(const PrintObject &object,
+                                              const SupportGeneratorLayersPtr &bottom_contacts,
+                                              SupportGeneratorLayersPtr &top_contacts) const;
+
+    // Generate raft layers and the intermediate support layers between the bottom contact and top contact surfaces.
+    SupportGeneratorLayersPtr raft_and_intermediate_support_layers(const SupportGeneratorLayersPtr &bottom_contacts,
+                                                                   const SupportGeneratorLayersPtr &top_contacts,
+                                                                   SupportGeneratorLayerStorage &layer_storage) const;
+
+    // Fill in the base layers with polygons.
+    void generate_base_layers(const PrintObject &object, const SupportGeneratorLayersPtr &bottom_contacts,
+                              const SupportGeneratorLayersPtr &top_contacts,
+                              SupportGeneratorLayersPtr &intermediate_layers,
+                              const std::vector<Polygons> &layer_support_areas) const;
+
+    // Trim support layers by an object to leave a defined gap between
+    // the support volume and the object.
+    void trim_support_layers_by_object(const PrintObject &object, SupportGeneratorLayersPtr &support_layers,
+                                       const coordf_t gap_extra_above, const coordf_t gap_extra_below,
+                                       const coordf_t gap_xy) const;
+
+    /*
+	void generate_pillars_shape();
+	void clip_with_shape();
+*/
+
+    // Following objects are not owned by SupportMaterial class.
+    const PrintConfig *m_print_config;
+    const PrintObjectConfig *m_object_config;
+    // Pre-calculated parameters shared between the object slicer and the support generator,
+    // carrying information on a raft, 1st layer height, 1st object layer height, gap between the raft and object etc.
+    SlicingParameters m_slicing_params;
+    // Various precomputed support parameters to be shared with external functions.
+    SupportParameters m_support_params;
+};
+
+} // namespace Luminary
