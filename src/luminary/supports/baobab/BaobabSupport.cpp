@@ -16,8 +16,9 @@ namespace Luminary
 
 namespace
 {
-// Read a knob override from the environment once, else keep the default. Zero is a valid
-// value and disables the knob; only a negative or unparseable value falls back.
+#ifdef PREFLIGHT_TEST_HOOKS
+// A knob's override from the environment, else the default. Zero is a valid value and disables the
+// knob; only a negative or unparseable value falls back.
 double env_knob(const char *name, double fallback)
 {
     const char *raw = std::getenv(name);
@@ -26,7 +27,16 @@ double env_knob(const char *name, double fallback)
     const double parsed = std::atof(raw);
     return parsed >= 0. ? parsed : fallback;
 }
+#endif
 } // namespace
+
+// A knob's value: in a build with the test hooks, its environment override when set; otherwise the
+// default, the variable's name compiled out with the rest
+#ifdef PREFLIGHT_TEST_HOOKS
+#define BAOBAB_KNOB(name, fallback) env_knob(name, fallback)
+#else
+#define BAOBAB_KNOB(name, fallback) static_cast<double>(fallback)
+#endif
 
 bool is_baobab_object(const PrintObject &print_object)
 {
@@ -43,7 +53,7 @@ bool is_baobab_object(const PrintObject &print_object)
 
 double baobab_taper_angle_deg()
 {
-    static const double value = env_knob("PREFLIGHT_BAOBAB_TAPER_DEG", Baobab::taper_angle_deg);
+    static const double value = BAOBAB_KNOB("PREFLIGHT_BAOBAB_TAPER_DEG", Baobab::taper_angle_deg);
     return value;
 }
 
@@ -84,22 +94,22 @@ Polygon baobab_disk(const Point &center, coord_t radius)
 void baobab_apply_tree_settings(FFFTreeSupport::TreeSupportMeshGroupSettings &settings, const PrintObjectConfig &config)
 {
     // Baobab has its own settings group: every routing value comes from the support_baobab_*
-    // options, so the Organic options cannot retune a baobab object. The environment knobs
-    // remain as no-rebuild sweep overrides. Only baobab objects route through this function,
-    // so stock organic is untouched.
+    // options, so the Organic options cannot retune a baobab object. In a build with the test hooks,
+    // environment variables override four of them without a rebuild (BAOBAB_KNOB). Only baobab objects
+    // route through this function, so stock organic is untouched.
     settings.support_tree_angle = std::clamp<double>(config.support_baobab_angle * M_PI / 180., 0.,
                                                      0.5 * M_PI - EPSILON);
     settings.support_tree_angle_slow = std::clamp<double>(config.support_baobab_angle_slow * M_PI / 180., 0.,
                                                           settings.support_tree_angle - EPSILON);
     settings.support_tree_branch_diameter = scaled<coord_t>(
-        env_knob("PREFLIGHT_BAOBAB_TRUNK_MM", config.support_baobab_trunk_diameter));
+        BAOBAB_KNOB("PREFLIGHT_BAOBAB_TRUNK_MM", config.support_baobab_trunk_diameter));
     settings.support_tree_branch_diameter_angle = std::clamp<double>(config.support_baobab_trunk_diameter_angle * M_PI /
                                                                          180.,
                                                                      0., 0.5 * M_PI - EPSILON);
     settings.support_tree_branch_distance = scaled<coord_t>(
-        env_knob("PREFLIGHT_BAOBAB_GATHER_MM", config.support_baobab_trunk_distance));
+        BAOBAB_KNOB("PREFLIGHT_BAOBAB_GATHER_MM", config.support_baobab_trunk_distance));
     settings.support_baobab_trunk_consolidation = scaled<coord_t>(
-        env_knob("PREFLIGHT_BAOBAB_BRIDGE_MM", config.support_baobab_trunk_consolidation));
+        BAOBAB_KNOB("PREFLIGHT_BAOBAB_BRIDGE_MM", config.support_baobab_trunk_consolidation));
     // Branch density has no baobab meaning (tips are seeded by the trunk distance), but it
     // feeds the along-a-line sampling distance, which stays at its stock value: pin it so the
     // Organic option cannot retune it.
@@ -110,9 +120,12 @@ void baobab_apply_tree_settings(FFFTreeSupport::TreeSupportMeshGroupSettings &se
     settings.support_tree_tip_diameter = std::min(coord_t(2 * settings.support_line_width),
                                                   settings.support_tree_branch_diameter);
     settings.support_tree_min_opening = scaled<coord_t>(std::max(0., config.support_baobab_min_opening.value));
-    const char *plant_env = std::getenv("PREFLIGHT_BAOBAB_PLANT");
-    settings.support_baobab_plant_on_model = plant_env != nullptr ? std::atoi(plant_env) != 0
-                                                                  : config.support_baobab_plant_on_model.value;
+    settings.support_baobab_plant_on_model = config.support_baobab_plant_on_model.value;
+#ifdef PREFLIGHT_TEST_HOOKS
+    // Its override from the environment, in a build with the test hooks
+    if (const char *plant_env = std::getenv("PREFLIGHT_BAOBAB_PLANT"); plant_env != nullptr)
+        settings.support_baobab_plant_on_model = std::atoi(plant_env) != 0;
+#endif
     // Planting is baobab's own permission to touch the model; buildplate-only stays an
     // auto-supports option and has no say here. support_rests_on_model derives from this
     // field downstream, so overwriting it is the whole decoupling.

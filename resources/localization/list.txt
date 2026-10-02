@@ -106,6 +106,7 @@ src/DSKY/GUI/PresetHints.cpp
 src/DSKY/GUI/PrintHostDialogs.cpp
 src/DSKY/GUI/ProgressStatusBar.cpp
 src/DSKY/GUI/RammingChart.cpp
+src/DSKY/GUI/RenderCrashGuard.cpp
 src/DSKY/GUI/SavePresetDialog.cpp
 src/DSKY/GUI/Search.cpp
 src/DSKY/GUI/Selection.cpp

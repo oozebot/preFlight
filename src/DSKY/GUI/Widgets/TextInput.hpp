@@ -24,9 +24,6 @@ class TextInput : public wxNavigationEnabled<StaticBox>
     StateColor text_color;
     DSKY::ThemedTextCtrl *text_ctrl{nullptr};
     ScrollBar *m_scrollbar{nullptr}; // Custom themed scrollbar for multiline
-#ifdef _WIN32
-    HBRUSH m_hEditBgBrush = NULL; // Native GDI brush for WM_CTLCOLOREDIT response
-#endif
 
     static const int TextInputWidth = 200;
     static const int TextInputHeight = 50;

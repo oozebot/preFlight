@@ -14,11 +14,7 @@
 #include "luminary/presets/bundle/PresetBundle.hpp"
 #include "luminary/model/scene/Model.hpp"
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 namespace DSKY
 {
@@ -182,20 +178,14 @@ void GLGizmoRotate::on_render()
 
     m_grabbers.front().matrix = local_transform(selection);
 
-#if !PREFLIGHT_OPENGL_ES
     if (!OpenGLManager::get_gl_info().is_core_profile())
     {
         const float scale = m_imgui->get_style_scaling();
         glsafe(::glLineWidth((m_hover_id != -1) ? 2.0f * scale : 1.5f * scale));
     }
-#endif // !PREFLIGHT_OPENGL_ES
 
-#if PREFLIGHT_OPENGL_ES
-    GLShaderProgram *shader = m_parent.get_shader("dashed_lines");
-#else
     GLShaderProgram *shader = OpenGLManager::get_gl_info().is_core_profile() ? m_parent.get_shader("dashed_thick_lines")
                                                                              : m_parent.get_shader("flat");
-#endif // PREFLIGHT_OPENGL_ES
     if (shader != nullptr)
     {
         shader->start_using();
@@ -204,17 +194,13 @@ void GLGizmoRotate::on_render()
         const Transform3d view_model_matrix = camera.get_view_matrix() * m_grabbers.front().matrix;
         shader->set_uniform("view_model_matrix", view_model_matrix);
         shader->set_uniform("projection_matrix", camera.get_projection_matrix());
-#if !PREFLIGHT_OPENGL_ES
         if (OpenGLManager::get_gl_info().is_core_profile())
         {
-#endif // !PREFLIGHT_OPENGL_ES
             const std::array<int, 4> &viewport = camera.get_viewport();
             shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
             shader->set_uniform("width", 0.25f);
             shader->set_uniform("gap_size", 0.0f);
-#if !PREFLIGHT_OPENGL_ES
         }
-#endif // !PREFLIGHT_OPENGL_ES
 
         const bool radius_changed = std::abs(m_old_radius - m_radius) > EPSILON;
         m_old_radius = m_radius;

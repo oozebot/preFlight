@@ -6,6 +6,7 @@
 ///|/
 #include "OctoPrint.hpp"
 #include "luminary/core/diagnostics/DebugCounters.hpp"
+#include "luminary/core/text/Json.hpp"
 
 #include <algorithm>
 #include <sstream>
@@ -205,9 +206,8 @@ bool OctoPrint::test_with_resolved_ip(wxString &msg) const
 
                 try
                 {
-                    std::stringstream ss(body);
                     pt::ptree ptree;
-                    pt::read_json(ss, ptree);
+                    read_json_bounded(body, ptree);
 
                     if (!ptree.get_optional<std::string>("api"))
                     {
@@ -263,9 +263,8 @@ bool OctoPrint::test(wxString &msg) const
 
                 try
                 {
-                    std::stringstream ss(body);
                     pt::ptree ptree;
-                    pt::read_json(ss, ptree);
+                    read_json_bounded(body, ptree);
 
                     if (!ptree.get_optional<std::string>("api"))
                     {
@@ -698,9 +697,8 @@ bool PrusaLink::test(wxString &msg) const
 
                 try
                 {
-                    std::stringstream ss(body);
                     pt::ptree ptree;
-                    pt::read_json(ss, ptree);
+                    read_json_bounded(body, ptree);
 
                     if (!ptree.get_optional<std::string>("api"))
                     {
@@ -781,9 +779,8 @@ bool PrusaLink::get_storage(wxArrayString &storage_path, wxArrayString &storage_
                 BOOST_LOG_TRIVIAL(debug) << boost::format("%1%: Got storage: %2%") % name % body;
                 try
                 {
-                    std::stringstream ss(body);
                     pt::ptree ptree;
-                    pt::read_json(ss, ptree);
+                    read_json_bounded(body, ptree);
 
                     // what if there is more structure added in the future? Enumerate all elements?
                     if (ptree.front().first != "storage_list")
@@ -892,9 +889,8 @@ bool PrusaLink::test_with_method_check(wxString &msg, bool &use_put) const
 
                 try
                 {
-                    std::stringstream ss(body);
                     pt::ptree ptree;
-                    pt::read_json(ss, ptree);
+                    read_json_bounded(body, ptree);
 
                     if (!ptree.get_optional<std::string>("api"))
                     {
@@ -983,9 +979,8 @@ bool PrusaLink::test_with_resolved_ip_and_method_check(wxString &msg, bool &use_
 
                 try
                 {
-                    std::stringstream ss(body);
                     pt::ptree ptree;
-                    pt::read_json(ss, ptree);
+                    read_json_bounded(body, ptree);
 
                     if (!ptree.get_optional<std::string>("api"))
                     {

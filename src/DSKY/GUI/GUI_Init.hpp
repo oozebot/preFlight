@@ -43,15 +43,12 @@ struct GUI_InitParams
     bool start_downloader{false};
     bool delete_after_load{false};
     std::string download_url;
-#if !PREFLIGHT_OPENGL_ES
     std::pair<int, int> opengl_version{0, 0};
     bool opengl_debug{false};
     bool opengl_compatibility_profile{false};
-#endif // !PREFLIGHT_OPENGL_ES
     bool opengl_aa{false};
 };
 
 int GUI_Run(GUI_InitParams &params);
 
 } // namespace DSKY
-

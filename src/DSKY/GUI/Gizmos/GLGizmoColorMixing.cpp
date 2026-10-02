@@ -22,11 +22,7 @@
 #include "DSKY/GUI/EventTypes.hpp"
 #include "DSKY/GUI/EventBridge.hpp"
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 namespace DSKY
 {
@@ -242,8 +238,8 @@ void GLGizmoColorMixing::data_changed(bool is_serializing)
 // Eyedropper: Alt+Left / Alt+Right picks the state under the cursor into the first/second
 // brush slot. Falls through to the base for every other action so the existing paint, line,
 // eraser, and fill paths keep working.
-bool GLGizmoColorMixing::gizmo_event(GizmoEventType action, const Vec2d &mouse_position, bool shift_down,
-                                     bool alt_down, bool control_down)
+bool GLGizmoColorMixing::gizmo_event(GizmoEventType action, const Vec2d &mouse_position, bool shift_down, bool alt_down,
+                                     bool control_down)
 {
     const bool is_pick = alt_down && !shift_down && !control_down &&
                          (action == GizmoEventType::LeftDown || action == GizmoEventType::RightDown);

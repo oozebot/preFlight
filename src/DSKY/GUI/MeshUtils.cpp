@@ -17,11 +17,7 @@
 #include "DSKY/GUI/Camera.hpp"
 #include "DSKY/GUI/CameraUtils.hpp"
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 #include <igl/unproject.h>
 

@@ -23,11 +23,7 @@
 #include "luminary/model/schema/emboss/TextConfiguration.hpp"
 
 #include <imgui/imgui.h>
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 class wxFont;
 namespace Luminary

@@ -24,6 +24,11 @@ using namespace Luminary;
 
 class PresetComboBox;
 
+// Reads a physical printer's credentials from the system password store. A failure is logged and
+// counted; `report_errors` also shows it in a dialog.
+bool load_secret(const std::string &id, const std::string &opt, std::string &usr, std::string &psswd,
+                 bool report_errors = true);
+
 //------------------------------------------
 //          PresetForPrinter
 //------------------------------------------

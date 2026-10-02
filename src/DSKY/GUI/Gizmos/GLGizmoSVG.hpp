@@ -22,11 +22,7 @@
 #include "luminary/model/scene/Model.hpp"
 
 #include <imgui/imgui.h>
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 namespace Luminary
 {

@@ -265,6 +265,9 @@ public:
     PrinterWebViewPanel *m_printer_webview_panel{nullptr};
     bool m_printer_webview_tab_added{false};
     wxString m_printer_url; // Stored URL for external browser fallback when webview is unavailable
+    // The selected physical printer's config with its stored password filled in, for the web view's
+    // login and the connection check; the printer's own config keeps "stored"
+    DynamicPrintConfig m_printer_webview_config;
     // The embedded view's content process died twice in a minute: the tab opens the system browser
     // for the rest of the session
     bool m_printer_webview_embed_failed{false};

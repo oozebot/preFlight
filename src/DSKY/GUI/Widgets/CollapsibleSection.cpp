@@ -3,6 +3,7 @@
 ///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
 ///|/
 #include "CollapsibleSection.hpp"
+#include "GdiCache.hpp"
 #include "UIColors.hpp"
 #include "../GUI_App.hpp"
 #include "../wxExtensions.hpp"
@@ -160,10 +161,11 @@ void CollapsibleSection::CreateHeader()
     m_title_text = new wxStaticText(m_header_panel, wxID_ANY, m_title, wxDefaultPosition, wxDefaultSize,
                                     wxST_ELLIPSIZE_END);
     m_title_text->SetMinSize(wxSize(std::max(1, em / 10), -1)); // Allow title to shrink (scaled)
+    // One shared font per description, not one native font per section
     if (m_compact)
-        m_title_text->SetFont(m_title_text->GetFont().Scaled(0.85f));
+        m_title_text->SetFont(GdiCache::shared_font(m_title_text->GetFont().Scaled(0.85f)));
     else
-        m_title_text->SetFont(m_title_text->GetFont().Bold());
+        m_title_text->SetFont(GdiCache::shared_font(m_title_text->GetFont().Bold()));
     // Set proper text color for dark/light mode
     // Don't use wxSystemSettings::GetColour because Windows Dark Mode API is always on
     bool is_dark = wxGetApp().dark_mode();
@@ -385,15 +387,12 @@ void CollapsibleSection::SetCompact(bool compact)
             font = font.Scaled(0.85f);
         else
             font.SetWeight(wxFONTWEIGHT_BOLD);
-        m_title_text->SetFont(font);
+        m_title_text->SetFont(GdiCache::shared_font(font));
     }
 
     // Update bullet font for compact mode
     if (m_bullet && m_compact)
-    {
-        wxFont bullet_font = m_bullet->GetFont().Scaled(0.85f);
-        m_bullet->SetFont(bullet_font);
-    }
+        m_bullet->SetFont(GdiCache::shared_font(m_bullet->GetFont().Scaled(0.85f)));
 
     // Regenerate chevron at new size
     UpdateChevron();
@@ -460,7 +459,11 @@ void CollapsibleSection::SetContentBackgroundColor(const wxColour &color)
 void CollapsibleSection::OnHeaderClick(wxMouseEvent &evt)
 {
     ToggleExpanded();
+#ifndef __WXOSX__
+    // On macOS a release skipped over a native child (the title, chevron or icon) is passed on to
+    // the header panel, which would toggle the section back
     evt.Skip();
+#endif
 }
 
 void CollapsibleSection::OnHeaderEnter(wxMouseEvent &evt)

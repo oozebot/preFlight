@@ -27,11 +27,7 @@
 #include "luminary/model/build_volume/BuildVolume.hpp"
 #include "luminary/model/beds/MultipleBeds.hpp"
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/log/trivial.hpp>
@@ -152,8 +148,6 @@ void Selection::add(unsigned int volume_idx, bool as_single_selection, bool chec
 
     if (!already_contained || needs_reset)
     {
-        m_event_poster->postEvent(CanvasEventType::TakeSnapshotSelection, _u8L("Selection-Add"));
-
         if (needs_reset)
             clear();
 
@@ -203,8 +197,6 @@ void Selection::remove(unsigned int volume_idx)
     if (!contains_volume(volume_idx))
         return;
 
-    m_event_poster->postEvent(CanvasEventType::TakeSnapshotSelection, _u8L("Selection-Remove"));
-
     GLVolume *volume = (*m_volumes)[volume_idx];
 
     switch (m_mode)
@@ -234,8 +226,6 @@ void Selection::add_object(unsigned int object_idx, bool as_single_selection)
     if ((!as_single_selection && contains_all_volumes(volume_idxs)) || (as_single_selection && matches(volume_idxs)))
         return;
 
-    m_event_poster->postEvent(CanvasEventType::TakeSnapshotSelection, _u8L("Selection-Add Object"));
-
     // resets the current list if needed
     if (as_single_selection)
         clear();
@@ -253,8 +243,6 @@ void Selection::remove_object(unsigned int object_idx)
     if (!m_valid)
         return;
 
-    m_event_poster->postEvent(CanvasEventType::TakeSnapshotSelection, _u8L("Selection-Remove Object"));
-
     do_remove_object(object_idx);
 
     update_type();
@@ -269,8 +257,6 @@ void Selection::add_instance(unsigned int object_idx, unsigned int instance_idx,
     const std::vector<unsigned int> volume_idxs = get_volume_idxs_from_instance(object_idx, instance_idx);
     if ((!as_single_selection && contains_all_volumes(volume_idxs)) || (as_single_selection && matches(volume_idxs)))
         return;
-
-    m_event_poster->postEvent(CanvasEventType::TakeSnapshotSelection, _u8L("Selection-Add Instance"));
 
     // resets the current list if needed
     if (as_single_selection)
@@ -288,8 +274,6 @@ void Selection::remove_instance(unsigned int object_idx, unsigned int instance_i
 {
     if (!m_valid)
         return;
-
-    m_event_poster->postEvent(CanvasEventType::TakeSnapshotSelection, _u8L("Selection-Remove Instance"));
 
     do_remove_instance(object_idx, instance_idx);
 
@@ -388,8 +372,6 @@ void Selection::add_all()
     if ((unsigned int) m_list.size() == count)
         return;
 
-    m_event_poster->postEvent(CanvasEventType::TakeSnapshotSelection, _u8L("Selection-Add All"));
-
     m_mode = Instance;
     clear();
 
@@ -410,11 +392,6 @@ void Selection::remove_all()
 
     if (is_empty())
         return;
-
-    // Not taking the snapshot with non-empty Redo stack will likely be more confusing than losing the Redo stack.
-    // Let's wait for user feedback.
-    //    if (!can_redo())
-    m_event_poster->postEvent(CanvasEventType::TakeSnapshotSelection, _u8L("Selection-Remove All"));
 
     m_mode = Instance;
     clear();
@@ -2508,15 +2485,11 @@ void Selection::render_bounding_box(const BoundingBoxf3 &box, const Transform3d 
 
     glsafe(::glEnable(GL_DEPTH_TEST));
 
-#if PREFLIGHT_OPENGL_ES
-    GLShaderProgram *shader = get_shader("dashed_lines");
-#else
     if (!OpenGLManager::get_gl_info().is_core_profile())
         glsafe(::glLineWidth(2.0f * m_scale_factor));
 
     GLShaderProgram *shader = OpenGLManager::get_gl_info().is_core_profile() ? get_shader("dashed_thick_lines")
                                                                              : get_shader("flat");
-#endif // PREFLIGHT_OPENGL_ES
     if (shader == nullptr)
         return;
 
@@ -2524,17 +2497,13 @@ void Selection::render_bounding_box(const BoundingBoxf3 &box, const Transform3d 
     const Camera &camera = get_camera();
     shader->set_uniform("view_model_matrix", camera.get_view_matrix() * trafo);
     shader->set_uniform("projection_matrix", camera.get_projection_matrix());
-#if !PREFLIGHT_OPENGL_ES
     if (OpenGLManager::get_gl_info().is_core_profile())
     {
-#endif // !PREFLIGHT_OPENGL_ES
         const std::array<int, 4> &viewport = camera.get_viewport();
         shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
         shader->set_uniform("width", 1.5f);
         shader->set_uniform("gap_size", 0.0f);
-#if !PREFLIGHT_OPENGL_ES
     }
-#endif // !PREFLIGHT_OPENGL_ES
     m_box.set_color(to_rgba(color));
     m_box.render();
     shader->stop_using();

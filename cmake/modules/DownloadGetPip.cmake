@@ -45,6 +45,13 @@ if (EXISTS "${_getpip}")
     endif ()
 endif ()
 
+# The pip launchers embed the absolute path of the python.exe that installed them, so they only
+# run in this build directory, and they are unsigned. The Python Console runs "python -m pip".
+file(GLOB _pip_launchers "${PYTHON_DIR}/Scripts/pip*.exe")
+if (_pip_launchers)
+    file(REMOVE ${_pip_launchers})
+endif ()
+
 # Precompile the loose runtime (Lib + site-packages incl. pip) to hash-pinned bytecode and forbid
 # runtime bytecode writes, so a direct python.exe invocation neither recompiles every run nor
 # pollutes the install dir. The stdlib ships read-only in pythonXX.zip and needs nothing. (Windows;

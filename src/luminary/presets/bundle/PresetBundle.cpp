@@ -1012,8 +1012,11 @@ DynamicPrintConfig PresetBundle::full_fff_config() const
 // In the future the configuration will likely be read from an AMF file as well.
 // If the file is loaded successfully, its print / filament / printer profiles will be activated.
 ConfigSubstitutions PresetBundle::load_config_file(const std::string &path,
-                                                   ForwardCompatibilitySubstitutionRule compatibility_rule)
+                                                   ForwardCompatibilitySubstitutionRule compatibility_rule,
+                                                   size_t *capped_extruders)
 {
+    if (capped_extruders != nullptr)
+        *capped_extruders = 0;
     if (is_gcode_file(path))
     {
         FILE *file = boost::nowide::fopen(path.c_str(), "rb");
@@ -1029,7 +1032,8 @@ ConfigSubstitutions PresetBundle::load_config_file(const std::string &path,
         ConfigSubstitutions config_substitutions = is_binary
                                                        ? config.load_from_binary_gcode_file(path, compatibility_rule)
                                                        : config.load_from_gcode_file(path, compatibility_rule);
-        Preset::normalize(config);
+        if (const size_t capped = Preset::normalize(config); capped_extruders != nullptr)
+            *capped_extruders = capped;
         load_config_file_config(path, true, std::move(config));
         return config_substitutions;
     }
@@ -1075,7 +1079,8 @@ ConfigSubstitutions PresetBundle::load_config_file(const std::string &path,
             DynamicPrintConfig config;
             config.apply(FullPrintConfig::defaults());
             config_substitutions = config.load(tree, compatibility_rule);
-            Preset::normalize(config);
+            if (const size_t capped = Preset::normalize(config); capped_extruders != nullptr)
+                *capped_extruders = capped;
             load_config_file_config(path, true, std::move(config));
             return config_substitutions;
         }
@@ -1297,6 +1302,8 @@ ConfigSubstitutions PresetBundle::load_config_file_config_bundle(const std::stri
     // will be loaded into the master PresetBundle and activated.
     auto [presets_substitutions, presets_imported] = tmp_bundle.load_configbundle(path, {}, compatibility_rule);
     UNUSED(presets_imported);
+    for (const std::string &name : tmp_bundle.printers.take_capped_on_load())
+        this->printers.note_capped_on_load(name);
 
     std::string bundle_name = std::string(" - ") + boost::filesystem::path(path).filename().string();
 
@@ -1769,7 +1776,8 @@ std::pair<PresetsConfigSubstitutions, size_t> PresetBundle::load_configbundle(
                 throw ConfigurationError(
                     format("Invalid configuration bundle \"%1%\", section [%2%]: ", path, section.first) + e.what());
             }
-            Preset::normalize(config);
+            if (Preset::normalize(config) > 0)
+                presets->note_capped_on_load(preset_name);
             // Report configuration fields, which are misplaced into a wrong group.
             std::string incorrect_keys = Preset::remove_invalid_keys(config, *default_config);
             if (!incorrect_keys.empty())

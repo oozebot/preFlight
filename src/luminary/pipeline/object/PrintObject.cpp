@@ -847,11 +847,13 @@ void PrintObject::warn_on_width_overrun(float width_mm, double nozzle_diameter, 
     dbg_log(DBG_PERIMETERS, print_z, "WIDTHWARN", "trip w=%.3f nozzle=%.3f pct=%d limit_pct=%d", double(width_mm),
             nozzle_diameter, int(std::lround(100. * double(width_mm) / nozzle_diameter)),
             int(std::lround(warn_max_pct)));
+    // The width carries three decimals, as the G-code WIDTH comment does: two cannot resolve the
+    // half percent that trips the whole-percent check on a small nozzle.
     this->active_step_add_warning(
         PrintStateBase::WarningLevel::NON_CRITICAL,
         Luminary::format(_u8L("An extrusion width of %1% mm (%2%%% of the nozzle diameter) exceeds the "
                               "width warning maximum of %3%%%, at z = %4% mm."),
-                         float_to_string_decimal_point(double(width_mm), 2),
+                         float_to_string_decimal_point(double(width_mm), 3),
                          int(std::lround(100. * double(width_mm) / nozzle_diameter)), int(std::lround(warn_max_pct)),
                          float_to_string_decimal_point(print_z, 2)));
 }
@@ -3825,6 +3827,9 @@ PrintObjectConfig PrintObject::object_config_from_model_object(const PrintObject
     {
         DynamicPrintConfig src_normalized(object.config.get());
         src_normalized.normalize_fdm();
+        // An object's assignment above the printer's count is "default": the print's value stays
+        if (src_normalized.erase_extruders_above(num_extruders) > 0)
+            DBG_COUNT_LOAD("EXTRUDER_ABOVE_COUNT_AS_DEFAULT");
         config.apply(src_normalized, true);
     }
     // Clamp invalid extruders to the default extruder (with index 1).
@@ -3838,12 +3843,16 @@ static constexpr const std::initializer_list<const std::string_view> keys_extrud
                                                                                     "solid_infill_extruder"sv,
                                                                                     "perimeter_extruder"sv};
 
-static void apply_to_print_region_config(PrintRegionConfig &out, const DynamicPrintConfig &in)
+// An extruder above the printer's count is "default" as 0 is, so the value comes from the level below
+// (a part's from its object's, an object's from the print's), as the GUI shows it
+static void apply_to_print_region_config(PrintRegionConfig &out, const DynamicPrintConfig &in, size_t num_extruders)
 {
     // 1) Copy the "extruder key to infill_extruder and perimeter_extruder.
     auto *opt_extruder = in.opt<ConfigOptionInt>(key_extruder);
     if (opt_extruder)
-        if (int extruder = opt_extruder->value; extruder != 0)
+        if (int extruder = opt_extruder->value; extruder > int(num_extruders))
+            DBG_COUNT_LOAD("EXTRUDER_ABOVE_COUNT_AS_DEFAULT");
+        else if (extruder != 0)
         {
             // Not a default extruder.
             out.infill_extruder.value = extruder;
@@ -3859,7 +3868,9 @@ static void apply_to_print_region_config(PrintRegionConfig &out, const DynamicPr
                 {
                     // Ignore "default" extruders.
                     int extruder = static_cast<const ConfigOptionInt *>(it->second.get())->value;
-                    if (extruder > 0)
+                    if (extruder > int(num_extruders))
+                        DBG_COUNT_LOAD("EXTRUDER_ABOVE_COUNT_AS_DEFAULT");
+                    else if (extruder > 0)
                         my_opt->setInt(extruder);
                 }
                 else
@@ -3876,7 +3887,7 @@ PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &defau
     {
         // default_or_parent_region_config contains the Print's PrintRegionConfig.
         // Override with ModelObject's PrintRegionConfig values.
-        apply_to_print_region_config(config, volume.get_object()->config.get());
+        apply_to_print_region_config(config, volume.get_object()->config.get(), num_extruders);
     }
     else
     {
@@ -3886,11 +3897,11 @@ PrintRegionConfig region_config_from_model_volume(const PrintRegionConfig &defau
     {
         // Not applicable to modifiers.
         assert(volume.is_model_part());
-        apply_to_print_region_config(config, *layer_range_config);
+        apply_to_print_region_config(config, *layer_range_config, num_extruders);
     }
-    apply_to_print_region_config(config, volume.config.get());
+    apply_to_print_region_config(config, volume.config.get(), num_extruders);
     if (!volume.material_id().empty())
-        apply_to_print_region_config(config, volume.material()->config.get());
+        apply_to_print_region_config(config, volume.material()->config.get(), num_extruders);
     // Clamp invalid extruders to the default extruder (with index 1).
     clamp_exturder_to_default(config.infill_extruder, num_extruders);
     clamp_exturder_to_default(config.perimeter_extruder, num_extruders);

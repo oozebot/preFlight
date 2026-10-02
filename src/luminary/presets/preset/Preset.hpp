@@ -7,8 +7,10 @@
 #pragma once
 
 #include <deque>
+#include <functional>
 #include <set>
 #include <unordered_map>
+#include <utility>
 
 #include <boost/filesystem/path.hpp>
 #include <boost/property_tree/ptree_fwd.hpp>
@@ -269,7 +271,14 @@ public:
     static void update_suffix_modified(const std::string &new_suffix_modified);
     static const std::string &suffix_modified();
     static std::string remove_suffix_modified(const std::string &name);
-    static void normalize(DynamicPrintConfig &config);
+    // Brings a loaded config to the current format and its per-extruder values to its extruder count,
+    // capped first (cap_extruders). Returns what cap_extruders returns.
+    static size_t normalize(DynamicPrintConfig &config);
+    // Keeps the first MAX_EXTRUDERS extruders of a config with more: its per-extruder and filament
+    // values, the per-preset cumulative vectors of a project, the purge volumes; an extruder
+    // assignment above the cap goes to default. Returns the original extruder count when it capped,
+    // else 0.
+    static size_t cap_extruders(DynamicPrintConfig &config);
     // Report configuration fields, which are misplaced into a wrong group, remove them from the config.
     static std::string remove_invalid_keys(DynamicPrintConfig &config, const DynamicPrintConfig &default_config);
 
@@ -703,9 +712,15 @@ public:
         return m_map_alias_to_profile_name;
     }
 
+    // The presets loaded with more than MAX_EXTRUDERS extruders (Preset::cap_extruders) since the last
+    // call, for the GUI to name them to the user
+    void note_capped_on_load(const std::string &name) { m_capped_on_load.push_back(name); }
+    std::vector<std::string> take_capped_on_load() { return std::exchange(m_capped_on_load, {}); }
+
 private:
     // Type of this PresetCollection: TYPE_PRINT, TYPE_FILAMENT or TYPE_PRINTER.
     Preset::Type m_type;
+    std::vector<std::string> m_capped_on_load;
     // List of presets, starting with the "- default -" preset.
     // Use deque to force the container to allocate an object per each entry,
     // so that the addresses of the presets don't change during resizing of the container.
@@ -799,6 +814,10 @@ public:
     // The address the Printer tab and the open-URL action use: the web interface address of a Klipper
     // printer when one is set, otherwise the print host.
     static std::string web_interface_host(const DynamicPrintConfig &config);
+    // The config a request to the host uses: a password kept in the system password store (the
+    // config says "stored") is filled in with the user saved beside it. `load` reads the store.
+    static DynamicPrintConfig with_stored_credentials(const DynamicPrintConfig &config,
+                                                      const std::function<bool(std::string &, std::string &)> &load);
 
     const std::set<std::string> &get_preset_names() const;
 

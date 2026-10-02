@@ -7,6 +7,7 @@ out vec4 out_color;
 
 void main()
 {
-    // rgb: eye-space normal; a: positive linear eye depth. Cleared to 0 = background.
-    out_color = vec4(normalize(eye_normal), -eye_position.z);
+    // rgb: eye-space normal mapped to [0, 1]; a: 1 = geometry, cleared to 0 = background.
+    // Eye positions are rebuilt from the depth attachment.
+    out_color = vec4(normalize(eye_normal) * 0.5 + 0.5, 1.0);
 }

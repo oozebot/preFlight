@@ -4,10 +4,12 @@
 ///|/
 #include "SpinInput.hpp"
 #include "Button.hpp"
+#include "GdiCache.hpp"
 
 #include "UIColors.hpp"
 
 #include "../GUI_App.hpp"
+#include "luminary/core/Raii.hpp"
 
 // Height padding scales with DPI (matches TextInput)
 static int GetScaledHeightPadding()
@@ -74,16 +76,7 @@ SpinInputBase::SpinInputBase()
     border_width = 1;
 }
 
-SpinInputBase::~SpinInputBase()
-{
-#ifdef _WIN32
-    if (m_hEditBgBrush != NULL)
-    {
-        DeleteObject(m_hEditBgBrush);
-        m_hEditBgBrush = NULL;
-    }
-#endif
-}
+SpinInputBase::~SpinInputBase() {}
 
 Button *SpinInputBase::create_button(ButtonId id)
 {
@@ -208,15 +201,6 @@ void SpinInputBase::SysColorsChanged()
     wxColour bg_normal = is_dark ? UIColors::InputBackgroundDark() : UIColors::InputBackgroundLight();
     wxColour fg_normal = is_dark ? UIColors::InputForegroundDark() : UIColors::InputForegroundLight();
 
-#ifdef _WIN32
-    // Invalidate the cached brush so it gets recreated with new color on next WM_CTLCOLOR
-    if (m_hEditBgBrush != NULL)
-    {
-        DeleteObject(m_hEditBgBrush);
-        m_hEditBgBrush = NULL;
-    }
-#endif
-
     // Set wxWindow background (needed for proper rendering)
     SetBackgroundColour(bg_normal);
     SetForegroundColour(fg_normal);
@@ -233,7 +217,24 @@ void SpinInputBase::SysColorsChanged()
     // Apply to internal text control using ThemedTextCtrl for reliable Windows color handling
     if (text_ctrl)
     {
-        text_ctrl->SetThemedColors(bg_normal, fg_normal);
+        wxColour text_bg = bg_normal, text_fg = fg_normal;
+#if defined(__APPLE__)
+        // A disabled field keeps the colours Enable(false) gave it: Windows picks them when it paints,
+        // here the text control shows the colours set last
+        if (!IsThisEnabled())
+        {
+            text_bg = is_dark ? UIColors::InputBackgroundDisabledDark() : UIColors::InputBackgroundDisabledLight();
+            text_fg = is_dark ? UIColors::InputForegroundDisabledDark() : UIColors::InputForegroundDisabledLight();
+        }
+#elif !defined(_WIN32)
+        // A disabled field keeps the colours Enable(false) gave it, as on macOS
+        if (!IsThisEnabled())
+        {
+            text_bg = background_color.colorForStates(state_handler.states());
+            text_fg = text_color.colorForStates(state_handler.states());
+        }
+#endif
+        text_ctrl->SetThemedColors(text_bg, text_fg);
 #ifdef _WIN32
         // DO NOT call SetDarkExplorerTheme on edit controls!
         // Edit controls have visual styles disabled at creation via SetWindowTheme(hwnd, L"", L"")
@@ -419,25 +420,10 @@ WXLRESULT SpinInputBase::MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lP
         ::SetTextColor(hdc, RGB(fgColor.Red(), fgColor.Green(), fgColor.Blue()));
         ::SetBkMode(hdc, OPAQUE);
 
-        // Create native GDI brush directly
-        if (m_hEditBgBrush != NULL)
-        {
-            LOGBRUSH lb;
-            if (GetObject(m_hEditBgBrush, sizeof(lb), &lb) > 0)
-            {
-                COLORREF newColor = RGB(bgColor.Red(), bgColor.Green(), bgColor.Blue());
-                if (lb.lbColor != newColor)
-                {
-                    DeleteObject(m_hEditBgBrush);
-                    m_hEditBgBrush = NULL;
-                }
-            }
-        }
-        if (m_hEditBgBrush == NULL)
-        {
-            m_hEditBgBrush = CreateSolidBrush(RGB(bgColor.Red(), bgColor.Green(), bgColor.Blue()));
-        }
-        return (WXLRESULT) m_hEditBgBrush;
+        // The process-wide brush of the current colour, so a theme or enable change needs no invalidation
+        HBRUSH brush = DSKY::GdiCache::shared_solid_brush(RGB(bgColor.Red(), bgColor.Green(), bgColor.Blue()));
+        if (brush != NULL)
+            return (WXLRESULT) brush;
     }
     return wxNavigationEnabled<StaticBox>::MSWWindowProc(nMsg, wParam, lParam);
 }
@@ -482,6 +468,14 @@ void SpinInputBase::render(wxDC &dc)
 
 void SpinInputBase::messureSize()
 {
+    // One layout pass: the SetSize() below calls Rescale(), which calls back here. Without the
+    // guard the height is recomputed from the text control on every re-entry, and a text control
+    // whose height follows the control's grows it without bound until the stack overflows.
+    if (m_measuring)
+        return;
+    m_measuring = true;
+    Luminary::ScopeGuard measuring_guard([this]() { m_measuring = false; });
+
     wxSize size = GetSize();
     wxSize textSize = text_ctrl->GetSize();
     // Height padding scales with DPI (matches TextInput)

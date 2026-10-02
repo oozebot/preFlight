@@ -64,6 +64,7 @@
 #include <wx/spinctrl.h>
 #include <wx/checkbox.h>
 #include "Widgets/ComboBox.hpp"
+#include "Widgets/SpinInput.hpp"
 #include <wx/settings.h>
 #include <wx/filedlg.h>
 
@@ -1225,6 +1226,21 @@ void Tab::sys_color_changed()
 Field *Tab::get_field(const t_config_option_key &opt_key, int opt_index /* = -1*/) const
 {
     return m_active_page ? m_active_page->get_field(opt_key, opt_index) : nullptr;
+}
+
+void Tab::update_extruder_role_ranges()
+{
+    // Only the active page has fields; another page builds with the count when it is shown
+    for (const std::string &key : print_config_def.extruder_assignment_keys())
+    {
+        const ConfigOptionDef *def = print_config_def.get(key);
+        Field *field = get_field(key);
+        if (def == nullptr || field == nullptr)
+            continue;
+        if (auto *spin = dynamic_cast<::SpinInput *>(field->getWindow()))
+            spin->SetRange(def->min == -FLT_MAX ? 0 : int(def->min),
+                           wxGetApp().extruder_role_max(key, def->max < FLT_MAX ? int(def->max) : INT_MAX));
+    }
 }
 
 Line *Tab::get_line(const t_config_option_key &opt_key)
@@ -3249,7 +3265,7 @@ void TabPrinter::build_fff()
 
     auto *nozzle_diameter = dynamic_cast<const ConfigOptionFloats *>(m_config->option("nozzle_diameter"));
     m_initial_extruders_count = m_extruders_count = nozzle_diameter->values.size();
-    wxGetApp().sidebar().update_objects_list_extruder_column(m_initial_extruders_count);
+    wxGetApp().sidebar().extruders_count_changed(m_initial_extruders_count);
 
     const Preset *parent_preset = m_presets->get_selected_preset_parent();
     m_sys_extruders_count =
@@ -3291,7 +3307,7 @@ void TabPrinter::extruders_count_changed(size_t extruders_count)
     if (is_count_changed)
     {
         on_value_change("extruders_count", extruders_count);
-        wxGetApp().sidebar().update_objects_list_extruder_column(extruders_count);
+        wxGetApp().sidebar().extruders_count_changed(extruders_count);
 
         // Sidebar will automatically update when extruder count changes
     }
@@ -3645,7 +3661,7 @@ void TabPrinter::on_spec_group_opened(ConfigOptionsGroupShp &optgroup, const Set
         def.label = L("Extruders");
         def.tooltip = L("Number of extruders of the printer.");
         def.min = 1;
-        def.max = 256;
+        def.max = int(MAX_EXTRUDERS);
         def.mode = comExpert;
         Option option(def, "extruders_count");
         optgroup->append_single_option_line(option);
@@ -4499,7 +4515,7 @@ void Tab::load_current_preset()
             static_cast<TabPrinter *>(this)->update_rrf_retrieve_btn_state();
         }
         else
-            wxGetApp().sidebar().update_objects_list_extruder_column(1);
+            wxGetApp().sidebar().extruders_count_changed(1);
         // Check and show "Physical printer" page if needed
         wxGetApp().show_printer_webview_tab();
     }
@@ -6822,14 +6838,6 @@ ConfigOptionsGroupShp Page::new_optgroup(const wxString &title, int noncommon_la
     m_optgroups.push_back(optgroup);
 
     return optgroup;
-}
-
-ConfigOptionsGroupShp Page::new_optgroup_for_sidebar(const wxString &title, int noncommon_label_width /*= -1*/)
-{
-    // Sidebar-visibility checkboxes were removed from the Settings tabs; visibility is now owned
-    // entirely by the sidebar's Edit Visibility mode. This behaves like new_optgroup; the wrapper is
-    // kept so the many call sites compile unchanged (collapsed into new_optgroup in a follow-up).
-    return new_optgroup(title, noncommon_label_width);
 }
 
 const ConfigOptionsGroupShp Page::get_optgroup(const wxString &title) const

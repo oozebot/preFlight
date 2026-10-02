@@ -19,5 +19,8 @@ namespace Luminary
 
 inline std::optional<std::size_t> thread_count;
 extern void enforce_thread_count(std::size_t count);
+// The parallelism a parallel loop gets: the arena's concurrency, bounded by the active cap or, before the first
+// slice enforces a configured cap, by that cap
+extern std::size_t tbb_parallelism();
 
 } // namespace Luminary

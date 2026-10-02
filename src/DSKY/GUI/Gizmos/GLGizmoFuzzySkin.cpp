@@ -15,11 +15,7 @@
 #include "DSKY/GUI/EventBridge.hpp"
 #include "DSKY/Utils/UndoRedo.hpp"
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 #include <algorithm>
 
 namespace DSKY

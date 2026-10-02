@@ -151,33 +151,10 @@ void AppConfig::set_defaults()
         if (get("notify_release").empty())
             set("notify_release", "all"); // or "none" or "release"
 
-        // "auto" detects GPU at startup: discrete -> "enhanced", integrated -> "basic".
-        // "full" (shadows + ambient occlusion + PBR) is a deliberate opt-in and is
-        // never chosen automatically.
-        if (get("canvas_lighting_quality").empty())
-            set("canvas_lighting_quality", "auto");
-
-        // MSAA sample count: "auto" tries highest available, "0" disables
-        if (get("canvas_msaa").empty())
-            set("canvas_msaa", "auto");
-
         // Which mouse buttons orbit/pan the 3D view: default, blender, fusion,
         // solidworks or tinkercad
         if (get("canvas_mouse_scheme").empty())
             set("canvas_mouse_scheme", "default");
-
-        // Supersampled scene rendering: "off", "1.5" or "2" (render scale)
-        if (get("canvas_ssaa_scale").empty())
-            set("canvas_ssaa_scale", "off");
-
-        if (get("preview_detail").empty())
-        {
-#if defined(__linux__) && defined(__aarch64__)
-            set("preview_detail", "1000000");
-#else
-            set("preview_detail", "10000000");
-#endif
-        }
 
         if (get("use_inches").empty())
             set("use_inches", "0");
@@ -228,6 +205,30 @@ void AppConfig::set_defaults()
     if (get("use_retina_opengl").empty())
         set("use_retina_opengl", "1");
 #endif // __APPLE__
+
+    // Render and Preview Detail preferences, which the editor and the G-code viewer both offer.
+    // Lighting "auto" drops to Basic only on a software renderer; "full" (shadows + ambient occlusion + PBR)
+    // is a deliberate opt-in and is never chosen automatically.
+    if (get("canvas_lighting_quality").empty())
+        set("canvas_lighting_quality", "auto");
+    // MSAA sample count: "auto" takes up to 8x, "0" disables
+    if (get("canvas_msaa").empty())
+        set("canvas_msaa", "auto");
+    // Supersampled scene rendering: "off", "1.5" or "2" (render scale)
+    if (get("canvas_ssaa_scale").empty())
+        set("canvas_ssaa_scale", "off");
+    // Toolpath layer-line prefilter: "1" on, "0" off. The canvas filters for any value but "0", so every other
+    // value reads as "1" and the Preferences checkbox shows what the canvas does.
+    if (get("toolpath_prefilter") != "0")
+        set("toolpath_prefilter", "1");
+    if (get("preview_detail").empty())
+    {
+#if defined(__linux__) && defined(__aarch64__)
+        set("preview_detail", "1000000");
+#else
+        set("preview_detail", "10000000");
+#endif
+    }
 
     // Preview legend toggle defaults (0 = hidden, 1 = visible)
     if (get("preview_travel").empty())

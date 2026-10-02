@@ -11,11 +11,7 @@
 #include <functional>
 #include <imgui/imgui.h>
 #include <wx/font.h>
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 #include <luminary/geometry/primitives/BoundingBox.hpp>
 #include <luminary/gizmo/emboss/Emboss.hpp>
 #include <luminary/model/schema/emboss/TextConfiguration.hpp>
@@ -330,4 +326,3 @@ private:
 };
 
 } // namespace DSKY::Emboss
-

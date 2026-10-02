@@ -35,11 +35,7 @@
 #include <boost/log/trivial.hpp>
 #include <boost/nowide/fstream.hpp>
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 #include <chrono>  // measure enumeration of fonts
 #include <sstream> // save for svg
 #include <array>

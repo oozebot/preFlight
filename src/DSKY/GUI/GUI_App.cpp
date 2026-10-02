@@ -9,6 +9,11 @@
 ///|/
 #include "Technologies.hpp"
 #include "GUI_App.hpp"
+#include "GuiBudget.hpp"
+#ifdef PREFLIGHT_TEST_HOOKS
+#include "GuiTestHooks.hpp"
+#endif
+#include "Widgets/GdiCache.hpp"
 #include "GUI_Init.hpp" // IWYU pragma: keep
 #include "Widgets/UIColors.hpp"
 #include "ThemePalette.hpp"
@@ -92,6 +97,9 @@
 #include "MainFrame.hpp"
 #include "Plater.hpp"
 #include "GLCanvas3D.hpp"
+#include "RenderDiagnostics.hpp"
+#include "RenderCrashGuard.hpp"
+#include "luminary/core/diagnostics/DebugCounters.hpp"
 
 #include "../Utils/PresetUpdater.hpp"
 #include "../Utils/PresetUpdaterWrapper.hpp"
@@ -101,6 +109,7 @@
 #include "../Utils/MacDarkMode.hpp"
 #include "../Utils/AppUpdater.hpp"
 #include "../Utils/WinRegistry.hpp"
+#include "../Utils/NvidiaProfile.hpp"
 #include "DSKY/Config/Snapshot.hpp"
 #include "ConfigSnapshotDialog.hpp"
 #include "DSKY/GUI/Preferences.hpp" // IWYU pragma: keep
@@ -970,6 +979,7 @@ void GUI_App::post_init()
     {
         if (!this->init_params->preset_substitutions.empty())
             show_substitutions_info(this->init_params->preset_substitutions);
+        plater()->notify_capped_printer_presets();
 
         if (!this->init_params->load_configs.empty())
             // Load the last config to give it a name at the UI. The name of the preset may be later
@@ -989,6 +999,9 @@ void GUI_App::post_init()
                 if (boost::algorithm::iends_with(filename, ".3mf"))
                     this->plater()->set_project_filename(from_u8(filename));
             }
+#ifdef PREFLIGHT_TEST_HOOKS
+            GuiTestHooks::on_loaded(*this);
+#endif
             if (this->init_params->delete_after_load)
             {
                 for (const std::string &p : this->init_params->input_files)
@@ -1028,6 +1041,18 @@ void GUI_App::post_init()
             }
         }
     }
+
+    // The render settings the startup rescue lowered, once the window is up, every line shown
+    if (const std::string notice = RenderCrashGuard::get().rescue_notice(); !notice.empty())
+        notification_manager()->push_notification(
+            NotificationType::CustomNotification, NotificationManager::NotificationLevel::WarningNotificationLevel,
+            notice, _u8L("Open Preferences."),
+            [](wxEvtHandler *)
+            {
+                wxGetApp().CallAfter([]() { wxGetApp().open_preferences("canvas_lighting_quality", "Performance"); });
+                return true;
+            },
+            std::string(), 0, true);
 
     // // show "Did you know" notification
     // if (app_config->get_bool("show_hints") && ! is_gcode_viewer())
@@ -1123,6 +1148,11 @@ GUI_App::GUI_App(EAppMode mode)
 
 GUI_App::~GUI_App()
 {
+    // The shared brushes and fonts outlive every widget that used them
+    GdiCache::release_all();
+    // The GUI budget trace's exit block, the counts after the windows and caches are gone
+    GuiBudget::finish();
+
     // Stop TD1S sensor monitor
     m_td1s_sensor.stop();
 
@@ -1147,19 +1177,17 @@ GUI_App::~GUI_App()
 // Otherwise HTML formatted for the system info dialog.
 std::string GUI_App::get_gl_info(bool for_github)
 {
-    return OpenGLManager::get_gl_info().to_string(for_github);
+    // The render state each canvas's last frame used follows the driver's capabilities
+    return OpenGLManager::get_gl_info().to_string(for_github) + (for_github ? "\n" : "<br>") +
+           RenderDiagnostics::to_string(for_github);
 }
 
 wxGLContext *GUI_App::init_glcontext(wxGLCanvas &canvas)
 {
-#if PREFLIGHT_OPENGL_ES
-    return m_opengl_mgr.init_glcontext(canvas);
-#else
     return m_opengl_mgr.init_glcontext(canvas,
                                        init_params != nullptr ? init_params->opengl_version : std::make_pair(0, 0),
                                        init_params != nullptr ? init_params->opengl_compatibility_profile : false,
                                        init_params != nullptr ? init_params->opengl_debug : false);
-#endif // PREFLIGHT_OPENGL_ES
 }
 
 bool GUI_App::init_opengl()
@@ -1527,6 +1555,8 @@ bool GUI_App::OnInit()
     }
     catch (const std::exception &)
     {
+        // A failed start is not a crash while drawing
+        RenderCrashGuard::get().end_session();
         generic_exception_handle();
         return false;
     }
@@ -1646,6 +1676,9 @@ static void flush_theme_load_error()
 
 bool GUI_App::on_init_inner()
 {
+    // The GUI budget trace's first line; under PREFLIGHT_GUI_BUDGET its peak sampler starts here
+    GuiBudget::snapshot("app.init");
+
     // wx assertions fire on paths the app does not control, so they are turned off.
     wxDisableAsserts();
 
@@ -1723,14 +1756,18 @@ bool GUI_App::on_init_inner()
     // Thread cap is cross-platform; P-core-only affinity is supported on Windows x86 and Linux x86 only;
     // apply_pcore_only_affinity() is a safe no-op on unsupported platforms (ARM, macOS).
     {
-        int max_threads = atoi(app_config->get("cpu_max_slicing_threads").c_str());
-        if (max_threads > 0)
-        {
-            Luminary::thread_count = static_cast<std::size_t>(max_threads);
-            Luminary::enforce_thread_count(static_cast<std::size_t>(max_threads));
-        }
-        if (app_config->get_bool("cpu_pcores_only"))
-            Luminary::apply_pcore_only_affinity();
+        const int max_threads = atoi(app_config->get("cpu_max_slicing_threads").c_str());
+        Luminary::apply_cpu_policy(max_threads > 0 ? std::size_t(max_threads) : 0,
+                                   app_config->get_bool("cpu_pcores_only"));
+#ifdef _WIN32
+        // The NVIDIA profile now lists every preFlight executable; users who enabled it earlier get the new
+        // entries once. A driver that cannot initialize is skipped quietly. The config checks come first so
+        // NVAPI is only loaded when a rewrite is due.
+        if (app_config->get_bool("cpu_nvidia_disable_threaded_opt") &&
+            app_config->get("cpu_nvidia_profile_revision") != Luminary::NVIDIA_PROFILE_REVISION &&
+            Luminary::nvidia_driver_available() && Luminary::set_nvidia_threaded_optimization(true))
+            app_config->set("cpu_nvidia_profile_revision", Luminary::NVIDIA_PROFILE_REVISION);
+#endif
     }
     // Cache layout preference (requires restart to change)
     m_legacy_prepare_layout = app_config->get_bool("legacy_prepare_layout");
@@ -2207,6 +2244,10 @@ bool GUI_App::on_init_inner()
     if (!delayed_error_load_presets.empty())
         show_error(nullptr, delayed_error_load_presets);
 
+    // Before the canvases (their MSAA probe) and the GL context (its shader compilation) exist: a session that ended
+    // while drawing with render settings it had not proven gets lighter ones, and this session is guarded the same way
+    RenderCrashGuard::get().start_session(*app_config, is_editor());
+
     mainframe = new MainFrame(get_app_font_pt_size(app_config));
     // hide settings tabs after first Layout
     if (is_editor())
@@ -2291,6 +2332,7 @@ bool GUI_App::on_init_inner()
 #endif
 
     mainframe->Show(true);
+    GuiBudget::snapshot("frame.shown");
 
     // The settings-spec assertion at start-up: the console's --check-settings-spec, plus the
     // agreement of overridable_at with the per-object taxonomy the object list uses today.
@@ -2316,45 +2358,6 @@ bool GUI_App::on_init_inner()
         assert(failures == 0);
     }
 
-    // PREFLIGHT_DUMP_SIDEBAR=<dir>: write the settings registry of every surface (the three
-    // sidebar panels in both layouts and both visibility modes, the three Settings pages) into
-    // dir, then exit. The files let two builds of the settings layout be compared.
-    if (const char *dump_dir = std::getenv("PREFLIGHT_DUMP_SIDEBAR"); dump_dir != nullptr && *dump_dir != '\0')
-    {
-        const std::string dir(dump_dir);
-        CallAfter(
-            [this, dir]()
-            {
-                boost::filesystem::create_directories(dir);
-                if (plater_ != nullptr && std::getenv("PREFLIGHT_DUMP_SIDEBAR_SKIP_SIDEBAR") == nullptr)
-                    plater_->sidebar().dump_settings_registry(dir);
-                if (std::getenv("PREFLIGHT_DUMP_SIDEBAR_SKIP_TABS") == nullptr)
-                    for (Tab *tab : tabs_list)
-                    {
-                        const char *name = tab->type() == Preset::TYPE_PRINT      ? "print"
-                                           : tab->type() == Preset::TYPE_FILAMENT ? "filament"
-                                           : tab->type() == Preset::TYPE_PRINTER  ? "printer"
-                                                                                  : nullptr;
-                        if (name != nullptr)
-                            tab->dump_registry(dir + "/tab_" + name + ".txt");
-                    }
-                // PREFLIGHT_DUMP_SIDEBAR_KEEP leaves the window open after the dump. Otherwise
-                // the frame closes from a one-shot timer, after the start-up's own deferred work
-                // (the splash timer among it) has run.
-                if (std::getenv("PREFLIGHT_DUMP_SIDEBAR_KEEP") == nullptr)
-                {
-                    auto *close_timer = new wxTimer();
-                    close_timer->Bind(wxEVT_TIMER,
-                                      [this, close_timer](wxTimerEvent &)
-                                      {
-                                          close_timer->Stop();
-                                          mainframe->Close(true);
-                                      });
-                    close_timer->StartOnce(2000);
-                }
-            });
-    }
-
     // The override panel builds its rows once, hidden, shortly after the window is up, so the
     // first click on an Overrides cell shows them instead of building them
     if (plater_ != nullptr)
@@ -2364,42 +2367,38 @@ bool GUI_App::on_init_inner()
                              [this, prebuild_timer](wxTimerEvent &)
                              {
                                  prebuild_timer->Stop();
+                                 CallAfter([prebuild_timer]() { delete prebuild_timer; });
                                  if (plater_ != nullptr)
                                      obj_settings()->prebuild();
                              });
         prebuild_timer->StartOnce(1500);
     }
 
-    // PREFLIGHT_OPEN_OVERRIDES=<open ms>[,<close ms>]: after the first delay, select the first
-    // object of the loaded project and open its override panel, so a screenshot of the panel
-    // can be taken without a click (the theme and layout checks); after the second delay, when
-    // given, the frame closes.
-    if (const char *spec = std::getenv("PREFLIGHT_OPEN_OVERRIDES"); spec != nullptr && *spec != '\0')
-    {
-        int open_ms = 0, close_ms = 0;
-        sscanf(spec, "%d,%d", &open_ms, &close_ms);
-        auto *open_timer = new wxTimer();
-        open_timer->Bind(wxEVT_TIMER,
-                         [this, open_timer](wxTimerEvent &)
-                         {
-                             open_timer->Stop();
-                             ObjectList *list = plater_ != nullptr ? obj_list() : nullptr;
-                             if (list != nullptr && !list->GetModel()->IsEmpty())
-                                 list->open_overrides(list->GetModel()->GetItemById(0));
-                         });
-        open_timer->StartOnce(std::max(100, open_ms));
-        if (close_ms > 0)
-        {
-            auto *close_timer = new wxTimer();
-            close_timer->Bind(wxEVT_TIMER,
-                              [this, close_timer](wxTimerEvent &)
-                              {
-                                  close_timer->Stop();
-                                  mainframe->Close(true);
-                              });
-            close_timer->StartOnce(close_ms);
-        }
-    }
+#ifdef _WIN32
+    // The session is ending (a logoff or shutdown) and wx deletes every top-level window before the
+    // process exits. A modal dialog still running is held on its caller's stack, which never unwinds
+    // now: it ends and leaves its parent and the top-level list, so it is not deleted with them.
+    Bind(wxEVT_END_SESSION,
+         [](wxCloseEvent &event)
+         {
+             std::vector<wxDialog *> running;
+             for (wxWindow *window : wxTopLevelWindows)
+                 if (auto *dialog = dynamic_cast<wxDialog *>(window); dialog != nullptr && dialog->IsModal())
+                     running.push_back(dialog);
+             for (wxDialog *dialog : running)
+             {
+                 dialog->EndModal(wxID_CANCEL);
+                 if (wxWindow *parent = dialog->GetParent())
+                     parent->RemoveChild(dialog);
+                 wxTopLevelWindows.DeleteObject(dialog);
+             }
+             event.Skip();
+         });
+#endif
+
+#ifdef PREFLIGHT_TEST_HOOKS
+    GuiTestHooks::on_window_up(*this);
+#endif
 
     if (scrn)
     {
@@ -3258,19 +3257,140 @@ void GUI_App::check_printer_presets()
     preset_bundle->physical_printers.load_printers_from_presets(preset_bundle->printers);
 }
 
+std::vector<std::string> GUI_App::restart_arguments() const
+{
+    std::vector<std::string> out;
+    // Options passed on as given; the G-code viewer mode is decided below
+    static const std::vector<std::string> flags = {"--sw-renderer", "--no-sw-renderer", "--opengl-compatibility",
+                                                   "--opengl-debug", "--opengl-aa"};
+    static const std::vector<std::string> valued = {"--datadir", "--loglevel", "--opengl-version"};
+    for (int i = 1; init_params != nullptr && i < init_params->argc; ++i)
+    {
+        const std::string arg = init_params->argv[i] != nullptr ? init_params->argv[i] : "";
+        if (std::find(flags.begin(), flags.end(), arg) != flags.end())
+        {
+            out.push_back(arg);
+            continue;
+        }
+        for (const std::string &option : valued)
+        {
+            if (arg == option && i + 1 < init_params->argc)
+            {
+                out.push_back(arg);
+                out.push_back(init_params->argv[++i]);
+                break;
+            }
+            if (boost::starts_with(arg, option + "="))
+            {
+                out.push_back(arg);
+                break;
+            }
+        }
+    }
+    // The viewer mode: on macOS and Linux the restart runs the resolved binary, not the gcodeviewer symlink that
+    // selected the mode; on Windows the viewer's own executable adds the option itself
+    const std::string exe_name = boost::dll::program_location().filename().string();
+    if (!is_editor() && !boost::icontains(exe_name, "gcodeviewer"))
+        out.push_back("--gcodeviewer");
+#ifdef _WIN32
+    // The new process starts while this one still holds the single-instance lock; it must not hand its command
+    // line to the process that is exiting
+    out.push_back("--no-single-instance");
+#endif
+    if (is_editor() && plater_ != nullptr)
+    {
+        const std::string project = into_u8(plater_->get_project_filename(".3mf"));
+        if (!project.empty() && boost::filesystem::exists(project))
+            out.push_back(project);
+    }
+    return out;
+}
+
+void GUI_App::restart_application()
+{
+#if defined(__APPLE__) || defined(__linux__)
+    recreate_GUI(_L("Restart application") + dots);
+#else
+    // The canvases' pixel format is fixed once a context exists, so a new MSAA count needs a new process
+    m_relaunch_arguments = restart_arguments();
+    m_relaunch_pending = true;
+    if (mainframe == nullptr || !mainframe->Close(false))
+        m_relaunch_pending = false;
+#endif
+}
+
+int GUI_App::OnExit()
+{
+    // A clean exit leaves no render crash marker; deleted before a relaunch starts, which would read it
+    RenderCrashGuard::get().end_session();
+#ifdef _WIN32
+    if (m_relaunch_pending)
+    {
+        m_relaunch_pending = false;
+        wchar_t exe[MAX_PATH + 1] = {0};
+        ::GetModuleFileNameW(nullptr, exe, MAX_PATH);
+        // CommandLineToArgvW quoting: a backslash run before a quote doubles, the quote itself is escaped
+        auto quote = [](const std::wstring &arg)
+        {
+            std::wstring out = L"\"";
+            size_t backslashes = 0;
+            for (wchar_t c : arg)
+            {
+                if (c == L'\\')
+                {
+                    ++backslashes;
+                    continue;
+                }
+                out.append(c == L'"' ? backslashes * 2 + 1 : backslashes, L'\\');
+                backslashes = 0;
+                out.push_back(c);
+            }
+            out.append(backslashes * 2, L'\\');
+            out.push_back(L'"');
+            return out;
+        };
+        std::wstring command_line = quote(exe);
+        for (const std::string &arg : m_relaunch_arguments)
+            command_line += L" " + quote(boost::nowide::widen(arg));
+        STARTUPINFOW startup{};
+        startup.cb = sizeof(startup);
+        PROCESS_INFORMATION process{};
+        if (::CreateProcessW(exe, command_line.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &startup,
+                             &process))
+        {
+            ::CloseHandle(process.hThread);
+            ::CloseHandle(process.hProcess);
+        }
+        else
+        {
+            DBG_COUNT_LOAD("APP_RELAUNCH_FAILED");
+            BOOST_LOG_TRIVIAL(error) << "Restart: CreateProcess failed, error " << ::GetLastError();
+        }
+    }
+#endif
+    return wxApp::OnExit();
+}
+
 void GUI_App::recreate_GUI(const wxString &msg_name)
 {
 #if defined(__APPLE__) || defined(__linux__)
     // In-process GUI recreation leaves stale toolkit state (Cocoa NSView teardown
     // crashes on macOS; GTK CSS theme caching keeps old colors on Linux). Restart
-    // the entire process for a guaranteed clean slate.
+    // the entire process for a guaranteed clean slate, with this session's options.
     app_config->save();
+    // The process image is replaced without an exit, so its render crash marker must not read as a crash
+    RenderCrashGuard::get().disarm();
     auto exe_path = boost::dll::program_location();
     BOOST_LOG_TRIVIAL(info) << "Restarting application: " << exe_path;
     const std::string exe = exe_path.string();
-    const char *argv[] = {exe.c_str(), nullptr};
-    execv(argv[0], const_cast<char *const *>(argv));
+    const std::vector<std::string> arguments = restart_arguments();
+    std::vector<const char *> argv{exe.c_str()};
+    for (const std::string &arg : arguments)
+        argv.push_back(arg.c_str());
+    argv.push_back(nullptr);
+    execv(argv[0], const_cast<char *const *>(argv.data()));
     // execv only returns on failure
+    DBG_COUNT_LOAD("APP_RELAUNCH_FAILED");
     BOOST_LOG_TRIVIAL(error) << "execv failed, falling through to in-process recreation";
 #endif
 
@@ -4022,6 +4142,7 @@ wxMenu *GUI_App::get_config_menu(MainFrame *main_frame)
 
                             // Load the currently selected preset into the GUI, update the preset selection box.
                             load_current_presets();
+                            plater()->notify_capped_printer_presets();
                         }
                         catch (std::exception &ex)
                         {
@@ -4080,8 +4201,15 @@ void GUI_App::open_preferences(const std::string &highlight_option /*= std::stri
 
     // Capture dialog state before recreate_GUI() potentially destroys it
     const bool should_recreate = mainframe->preferences_dialog->recreate_GUI();
+    const bool should_restart = mainframe->preferences_dialog->restart_required();
     const bool layout_changed = mainframe->preferences_dialog->settings_layout_changed();
 
+    if (should_restart)
+    {
+        // The main frame closes (or the process is replaced); nothing below may touch it
+        restart_application();
+        return;
+    }
     if (should_recreate)
         recreate_GUI(_L("Restart application") + dots);
     else if (is_editor())
@@ -4313,6 +4441,13 @@ bool GUI_App::can_load_project()
                                                 _L("Opening new project while some presets are unsaved."))))
         return false;
     return true;
+}
+
+void GUI_App::end_modal_dialogs()
+{
+    for (wxWindow *window : wxTopLevelWindows)
+        if (auto *dialog = dynamic_cast<wxDialog *>(window); dialog != nullptr && dialog->IsModal())
+            dialog->EndModal(wxID_CANCEL);
 }
 
 bool GUI_App::check_print_host_queue()
@@ -4576,6 +4711,17 @@ int GUI_App::extruders_edited_cnt() const
     return preset.config.option<ConfigOptionFloats>("nozzle_diameter")->values.size();
 }
 
+int GUI_App::extruder_role_max(const std::string &opt_key, int def_max) const
+{
+    // "extruder", an object's own, is a dropdown built from the count, not a spinner
+    if (opt_key == "extruder" || preset_bundle == nullptr)
+        return def_max;
+    const std::vector<std::string> &keys = print_config_def.extruder_assignment_keys();
+    if (std::find(keys.begin(), keys.end(), opt_key) == keys.end())
+        return def_max;
+    return std::max(1, extruders_edited_cnt());
+}
+
 wxString GUI_App::current_language_code_safe() const
 {
     // Translate the language code to a code for which translations are maintained.
@@ -4660,6 +4806,8 @@ bool GUI_App::run_wizard(ConfigWizard::RunReason reason, ConfigWizard::StartPage
     if (res)
     {
         load_current_presets();
+        if (plater() != nullptr)
+            plater()->notify_capped_printer_presets();
     }
     return res;
 }

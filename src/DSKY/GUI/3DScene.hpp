@@ -563,17 +563,10 @@ public:
 
     int load_object_volume(const ModelObject *model_object, int obj_idx, int volume_idx, int instance_idx);
 
-#if PREFLIGHT_OPENGL_ES
-    GLVolume *load_wipe_tower_preview(float pos_x, float pos_y, float width, float depth,
-                                      const std::vector<std::pair<float, float>> &z_and_depth_pairs, float height,
-                                      float cone_angle, float rotation_angle, bool size_unknown, float brim_width,
-                                      size_t idx, TriangleMesh *out_mesh = nullptr);
-#else
     GLVolume *load_wipe_tower_preview(float pos_x, float pos_y, float width, float depth,
                                       const std::vector<std::pair<float, float>> &z_and_depth_pairs, float height,
                                       float cone_angle, float rotation_angle, bool size_unknown, float brim_width,
                                       size_t idx);
-#endif // PREFLIGHT_OPENGL_ES
 
     GLVolume *new_toolpath_volume(const ColorRGBA &rgba);
     GLVolume *new_nontoolpath_volume(const ColorRGBA &rgba);

@@ -126,9 +126,19 @@ ModelWipeTower &Model::wipe_tower()
     return const_cast<ModelWipeTower &>(const_cast<const Model *>(this)->wipe_tower());
 }
 
+void Model::pin_to_active_bed()
+{
+    m_pinned_bed = s_multiple_beds.get_active_bed();
+}
+
+int Model::plate_data_bed() const
+{
+    return m_pinned_bed >= 0 ? m_pinned_bed : s_multiple_beds.get_active_bed();
+}
+
 const ModelWipeTower &Model::wipe_tower() const
 {
-    return wipe_tower_vector[s_multiple_beds.get_active_bed()];
+    return wipe_tower_vector[plate_data_bed()];
 }
 
 const ModelWipeTower &Model::wipe_tower(const int bed_index) const
@@ -148,7 +158,7 @@ CustomGCode::Info &Model::custom_gcode_per_print_z()
 
 const CustomGCode::Info &Model::custom_gcode_per_print_z() const
 {
-    return custom_gcode_per_print_z_vector[s_multiple_beds.get_active_bed()];
+    return custom_gcode_per_print_z_vector[plate_data_bed()];
 }
 ModelObject *Model::add_object()
 {
@@ -425,6 +435,36 @@ end:
 std::string Model::propose_export_file_name_and_path(const std::string &new_extension) const
 {
     return boost::filesystem::path(this->propose_export_file_name_and_path()).replace_extension(new_extension).string();
+}
+
+size_t Model::reset_extruders_above(size_t extruder_count)
+{
+    size_t reset = 0;
+    for (ModelObject *object : this->objects)
+    {
+        reset += object->config.reset_extruders_above(extruder_count);
+        for (ModelVolume *volume : object->volumes)
+            reset += volume->config.reset_extruders_above(extruder_count);
+        for (auto &[range, config] : object->layer_config_ranges)
+            reset += config.reset_extruders_above(extruder_count);
+    }
+    return reset;
+}
+
+bool Model::has_extruders_above(size_t extruder_count) const
+{
+    for (const ModelObject *object : this->objects)
+    {
+        if (object->config.has_extruders_above(extruder_count))
+            return true;
+        for (const ModelVolume *volume : object->volumes)
+            if (volume->config.has_extruders_above(extruder_count))
+                return true;
+        for (const auto &[range, config] : object->layer_config_ranges)
+            if (config.has_extruders_above(extruder_count))
+                return true;
+    }
+    return false;
 }
 
 bool Model::is_fdm_support_painted() const

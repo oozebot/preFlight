@@ -11,11 +11,7 @@
 #include "Plater.hpp"
 #include "Camera.hpp"
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 namespace DSKY
 {

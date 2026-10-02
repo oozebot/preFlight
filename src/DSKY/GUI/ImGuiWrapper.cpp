@@ -24,11 +24,7 @@
 #include <wx/clipbrd.h>
 #include <wx/debug.h>
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 #ifndef IMGUI_DEFINE_MATH_OPERATORS
 #define IMGUI_DEFINE_MATH_OPERATORS
@@ -1649,9 +1645,7 @@ void ImGuiWrapper::render_draw_data(ImDrawData *draw_data)
     GLuint last_array_buffer;
     glsafe(::glGetIntegerv(GL_ARRAY_BUFFER_BINDING, (GLint *) &last_array_buffer));
     GLuint last_vertex_array_object = 0;
-#if !PREFLIGHT_OPENGL_ES
     if (OpenGLManager::get_gl_info().is_core_profile())
-#endif // !PREFLIGHT_OPENGL_ES
         glsafe(::glGetIntegerv(GL_VERTEX_ARRAY_BINDING, (GLint *) &last_vertex_array_object));
     GLint last_viewport[4];
     glsafe(::glGetIntegerv(GL_VIEWPORT, last_viewport));
@@ -1714,15 +1708,11 @@ void ImGuiWrapper::render_draw_data(ImDrawData *draw_data)
         const GLsizeiptr idx_buffer_size = (GLsizeiptr) cmd_list->IdxBuffer.Size * (int) sizeof(ImDrawIdx);
 
         GLuint vao_id = 0;
-#if !PREFLIGHT_OPENGL_ES
         if (OpenGLManager::get_gl_info().is_core_profile())
         {
-#endif // !PREFLIGHT_OPENGL_ES
             glsafe(::glGenVertexArrays(1, &vao_id));
             glsafe(::glBindVertexArray(vao_id));
-#if !PREFLIGHT_OPENGL_ES
         }
-#endif // !PREFLIGHT_OPENGL_ES
 
         GLuint vbo_id;
         glsafe(::glGenBuffers(1, &vbo_id));
@@ -1797,23 +1787,17 @@ void ImGuiWrapper::render_draw_data(ImDrawData *draw_data)
 
         glsafe(::glDeleteBuffers(1, &ibo_id));
         glsafe(::glDeleteBuffers(1, &vbo_id));
-#if !PREFLIGHT_OPENGL_ES
         if (OpenGLManager::get_gl_info().is_core_profile())
         {
-#endif // !PREFLIGHT_OPENGL_ES
             if (vao_id > 0)
                 glsafe(::glDeleteVertexArrays(1, &vao_id));
-#if !PREFLIGHT_OPENGL_ES
         }
-#endif // !PREFLIGHT_OPENGL_ES
     }
 
     // Restore modified GL state
     glsafe(::glBindTexture(GL_TEXTURE_2D, last_texture));
     glsafe(::glActiveTexture(last_active_texture));
-#if !PREFLIGHT_OPENGL_ES
     if (OpenGLManager::get_gl_info().is_core_profile())
-#endif // !PREFLIGHT_OPENGL_ES
         glsafe(::glBindVertexArray(last_vertex_array_object));
     glsafe(::glBindBuffer(GL_ARRAY_BUFFER, last_array_buffer));
     glsafe(::glBlendEquationSeparate(last_blend_equation_rgb, last_blend_equation_alpha));

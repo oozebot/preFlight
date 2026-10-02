@@ -28,7 +28,11 @@ public:
     // Release gpu buffers.
     //
     void shutdown();
-    void render(size_t count);
+    //
+    // Draw count instances. Without caps only the body's triangles are drawn: the cap triangles fill the
+    // cross-section of a clipping plane and are degenerate while no plane can clip.
+    //
+    void render(size_t count, bool with_caps);
 
     //
     // Return the size of the data sent to gpu, in bytes.
@@ -41,6 +45,8 @@ private:
     //
     unsigned int m_vao_id{0};
     unsigned int m_vbo_id{0};
+    // Element buffer of the indexed draw, bound in the vertex array
+    unsigned int m_ibo_id{0};
     //
     // Size of the data sent to gpu, in bytes.
     //

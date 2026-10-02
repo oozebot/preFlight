@@ -136,8 +136,11 @@ public:
     // Instead of a config file, a G-code may be loaded containing the full set of parameters.
     // In the future the configuration will likely be read from an AMF file as well.
     // If the file is loaded successfully, its print / filament / printer profiles will be activated.
+    // capped_extruders receives the file's original extruder count when it had more than MAX_EXTRUDERS,
+    // else 0 (a config bundle's capped presets are noted in the printers collection instead).
     ConfigSubstitutions load_config_file(const std::string &path,
-                                         ForwardCompatibilitySubstitutionRule compatibility_rule);
+                                         ForwardCompatibilitySubstitutionRule compatibility_rule,
+                                         size_t *capped_extruders = nullptr);
 
     // Load a config bundle file, into presets and store the loaded presets into separate files
     // of the local configuration directory.

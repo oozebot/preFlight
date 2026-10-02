@@ -6,11 +6,7 @@
 #include "GLGizmoCut.hpp"
 #include "DSKY/GUI/GLCanvas3D.hpp"
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 #include <algorithm>
 #include <boost/nowide/convert.hpp>

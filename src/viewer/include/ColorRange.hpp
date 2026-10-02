@@ -140,8 +140,15 @@ private:
     // Use instead of finalize() when the value domain has known fixed ranges.
     //
     void finalize_fixed_bands(int num_bands, float min, float max);
+    //
+    // Split the collected [min, max] into num_bands contiguous bands of equal width, so a value's color depends on
+    // the value alone. A value on a shared edge belongs to the lower band. A span under one unit gets a single band.
+    //
+    void finalize_linear_bands(int num_bands);
 
     friend class ViewerImpl;
+    // Builds the ranges of a load, on the thread that prepares it or in the viewer
+    friend struct ColorRanges;
 };
 
 } // namespace libvgcode

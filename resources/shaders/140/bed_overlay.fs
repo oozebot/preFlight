@@ -11,6 +11,7 @@
 uniform sampler2DShadow shadow_tex;
 uniform sampler2D ao_tex;
 uniform vec2 viewport_size;
+uniform vec2 viewport_origin;  // window position of the AO target's origin
 
 in vec4 shadow_coord;
 
@@ -34,7 +35,7 @@ float shadow_factor()
 void main()
 {
     float shadow = shadow_factor();
-    float ao = texture(ao_tex, gl_FragCoord.xy / viewport_size).r;
+    float ao = texture(ao_tex, (gl_FragCoord.xy - viewport_origin) / viewport_size).r;
     float darkening = SHADOW_DARKENING * (1.0 - shadow) + AO_DARKENING * (1.0 - ao);
     out_color = vec4(0.0, 0.0, 0.0, clamp(darkening, 0.0, MAX_DARKENING));
 }

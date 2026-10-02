@@ -134,6 +134,14 @@ public:
     // to be called on drag and drop
     bool load_files(const wxArrayString &filenames, bool delete_after_load = false);
     void notify_about_installed_presets();
+    // Warns that a project, config or G-code file's printer had more than MAX_EXTRUDERS extruders
+    void notify_extruders_capped(const std::string &source, size_t original_count);
+    // Names the printer presets loaded with more than MAX_EXTRUDERS extruders since the last call
+    void notify_capped_printer_presets();
+    // Every assignment to an extruder above `count` goes to default, silently: the objects', parts'
+    // and layer ranges' (no undo snapshot; an undo or redo resets them again) and the print
+    // settings' role extruders
+    void reset_extruder_assignments_above(size_t count);
 
     bool preview_zip_archive(const boost::filesystem::path &input_file);
 
@@ -237,6 +245,9 @@ public:
     // Re-runs only the G-code export of the active bed to rebuild preview data that was freed after an
     // earlier GPU upload; the slicing steps stay cached.
     void regenerate_active_preview_data();
+    // The Preview Detail preference changed: the editor re-runs every bed's G-code export, now when the Preview
+    // is up, otherwise on the next Slice; the G-code viewer reloads its file.
+    void preview_detail_changed();
     void reslice_FFF_until_step(PrintObjectStep step, const ModelObject &object, bool postpone_error_messages = false);
 
     void clear_before_change_volume(ModelVolume &mv, const std::string &notification_msg);
@@ -517,4 +528,3 @@ public:
 };
 
 } // namespace DSKY
-

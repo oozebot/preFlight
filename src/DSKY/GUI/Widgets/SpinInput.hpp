@@ -25,9 +25,8 @@ protected:
     Button *button_inc{nullptr};
     Button *button_dec{nullptr};
     wxTimer timer;
-#ifdef _WIN32
-    HBRUSH m_hEditBgBrush = NULL; // Native GDI brush for WM_CTLCOLOREDIT response
-#endif
+    // Set while messureSize() runs; its SetSize() re-enters through Rescale()
+    bool m_measuring{false};
 
     static const int SpinInputWidth = 200;
     static const int SpinInputHeight = 50;
@@ -185,4 +184,3 @@ protected:
     void onTextLostFocus(wxEvent &event) override;
     void onTextEnter(wxCommandEvent &event) override;
 };
-

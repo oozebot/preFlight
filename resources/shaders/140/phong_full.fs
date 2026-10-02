@@ -54,6 +54,7 @@ uniform SlopeDetection slope;
 uniform sampler2DShadow shadow_tex;
 uniform sampler2D ao_tex;
 uniform vec2 viewport_size;
+uniform vec2 viewport_origin;  // window position of the AO target's origin
 uniform vec3 key_light_eye;  // world key light direction transformed to eye space
 uniform float pbr_roughness;
 uniform float pbr_metallic;
@@ -126,7 +127,7 @@ void main()
     vec3 view_dir = normalize(-eye_position);
 
     float shadow = shadow_factor();
-    float ao = texture(ao_tex, gl_FragCoord.xy / viewport_size).r;
+    float ao = texture(ao_tex, (gl_FragCoord.xy - viewport_origin) / viewport_size).r;
 
     // Cook-Torrance key light
     vec3 light_dir = normalize(key_light_eye);

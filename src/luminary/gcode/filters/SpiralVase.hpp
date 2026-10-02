@@ -35,22 +35,24 @@ public:
         m_max_xy_smoothing = float(2. * max_nozzle_diameter);
     };
 
-    void enable(bool enable)
-    {
-        m_transition_layer = enable && !m_enabled;
-        m_enabled = enable;
-    }
+    void enable(bool enable) { m_enabled = enable; }
 
     std::string process_layer(const std::string &gcode, bool last_layer);
 
 private:
+    // Feeds a layer the spiral does not transform to the reader and emits the pending ramp-down pass ahead of it.
+    std::string end_spiral(const std::string &gcode);
+
     const PrintConfig &m_config;
     GCodeReader m_reader;
     float m_max_xy_smoothing = 0.f;
 
     bool m_enabled = false;
-    // First spiral vase layer. Layer height has to be ramped up from zero to the target layer height.
-    bool m_transition_layer = false;
+    // The previous layer was a spiral layer that extruded. When it was not, the next spiral layer ramps
+    // its extrusion up from zero.
+    bool m_spiral_live = false;
+    // Ramp-down pass of the last spiral layer, emitted ahead of the next layer if the spiral stops there.
+    std::string m_pending_ramp;
     // Whether to interpolate XY coordinates with the previous layer. Results in no seam at layer changes
     bool m_smooth_spiral = true;
     std::vector<Vec2f> m_previous_layer;

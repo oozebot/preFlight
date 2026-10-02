@@ -33,6 +33,7 @@
 #include "DSKY/Utils/MacDarkMode.hpp"
 #endif
 #include "Tab.hpp"
+#include "Widgets/RedrawLock.hpp"
 #include "wxExtensions.hpp"
 #include "luminary/model/scene/Model.hpp"
 #include "GLCanvas3D.hpp"
@@ -3169,7 +3170,7 @@ void ObjectList::part_selection_changed()
     update_min_height();
 
     auto &panel = wxGetApp().sidebar();
-    panel.Freeze();
+    RedrawLock no_redraw(&panel);
 
     std::string opt_key;
     if (m_selected_object_id >= 0)
@@ -3187,7 +3188,6 @@ void ObjectList::part_selection_changed()
     wxGetApp().sidebar().set_object_settings_mode(update_and_show_settings);
 
     panel.Layout();
-    panel.Thaw();
 }
 
 // The override column reads the item's config when it draws; a change to that config redraws it
@@ -4317,11 +4317,7 @@ void ObjectList::update_selections_on_canvas()
         // remove
         volume_idxs = selection.get_missing_volume_idxs_from(volume_idxs);
         if (volume_idxs.size() > 0)
-        {
-            Plater::TakeSnapshot snapshot(wxGetApp().plater(), _(L("Selection-Remove from list")),
-                                          UndoRedo::SnapshotType::Selection);
             selection.remove_volumes(mode, volume_idxs);
-        }
     }
     else
     {
@@ -4331,8 +4327,6 @@ void ObjectList::update_selections_on_canvas()
         // OR there is no single selection
         if (selection.get_mode() == mode || !single_selection)
             volume_idxs = selection.get_unselected_volume_idxs_from(volume_idxs);
-        Plater::TakeSnapshot snapshot(wxGetApp().plater(), _(L("Selection-Add from list")),
-                                      UndoRedo::SnapshotType::Selection);
         selection.add_volumes(mode, volume_idxs, single_selection);
     }
 
@@ -4751,7 +4745,7 @@ void ObjectList::open_overrides(const wxDataViewItem &item)
         return;
 
     Sidebar &sidebar = wxGetApp().sidebar();
-    sidebar.Freeze();
+    RedrawLock no_redraw(&sidebar);
     const bool open = wxGetApp().obj_settings()->open_for(target);
     if (open)
     {
@@ -4761,19 +4755,17 @@ void ObjectList::open_overrides(const wxDataViewItem &item)
     }
     sidebar.set_object_settings_mode(open);
     sidebar.Layout();
-    sidebar.Thaw();
 }
 
 void ObjectList::close_overrides()
 {
     Sidebar &sidebar = wxGetApp().sidebar();
-    sidebar.Freeze();
+    RedrawLock no_redraw(&sidebar);
     wxGetApp().obj_settings()->close();
     sidebar.set_object_settings_mode(false);
     // The manipulation or layer panel of the selected item returns
     part_selection_changed();
     sidebar.Layout();
-    sidebar.Thaw();
 }
 
 void ObjectList::update_object_list_by_printer_technology()

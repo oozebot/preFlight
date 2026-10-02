@@ -28,6 +28,7 @@
 #include "Camera.hpp"
 #include "SceneRaycaster.hpp"
 #include "GUI_Utils.hpp"
+#include "RenderDiagnostics.hpp"
 
 #include <luminary/arrange/scene/ArrangeSettingsDb_AppCfg.hpp>
 #include "ArrangeSettingsDialogImgui.hpp"
@@ -574,9 +575,6 @@ private:
     float m_bed_selector_current_height = 0.f;
 
     GLVolumeCollection m_volumes;
-#if PREFLIGHT_OPENGL_ES
-    std::vector<TriangleMesh> m_wipe_tower_meshes;
-#endif // PREFLIGHT_OPENGL_ES
     std::array<std::optional<BoundingBoxf>, MAX_NUMBER_OF_BEDS> m_wipe_tower_bounding_boxes;
 
     GCodeViewer m_gcode_viewer;
@@ -712,6 +710,11 @@ private:
     std::unique_ptr<ScenePasses> m_scene_passes;
     // Supersampled scene rendering (SSAA).
     std::unique_ptr<SceneSupersampler> m_scene_supersampler;
+    // What the frame being rendered uses (MSAA, SSAA, lighting in effect and why)
+    RenderFrameInfo m_frame_info;
+#ifdef PREFLIGHT_TEST_HOOKS
+    std::function<void(const std::vector<uint8_t> &rgb, int width, int height)> m_test_scene_capture;
+#endif
     // Alt + middle click: pending request to center the view and orbit pivot on the
     // picked point; resolved during render() when the depth buffer holds the scene.
     std::optional<Vec2d> m_pivot_center_request;
@@ -743,6 +746,17 @@ public:
     void set_surface(IGLSurface *surface) { m_surface = surface; }
     IGLSurface *surface() { return m_surface; }
     void set_canvas_role(CanvasRole role) { m_canvas_role = role; }
+    // What the last frame rendered with, next to what the preferences ask for
+    const RenderFrameInfo &get_frame_info() const { return m_frame_info; }
+#ifdef PREFLIGHT_TEST_HOOKS
+    // Reads the next frame's resolved scene back (RGB, bottom row first), before the overlays draw
+    void test_capture_scene(std::function<void(const std::vector<uint8_t> &rgb, int width, int height)> fn)
+    {
+        m_test_scene_capture = std::move(fn);
+    }
+    // Waits for the GPU to finish this canvas's submitted frames, so a frame's timing includes its GPU work
+    void test_finish_gl();
+#endif
     CanvasRole canvas_role() const { return m_canvas_role; }
     void set_right_margin_fn(std::function<float()> fn) { m_right_margin_fn = std::move(fn); }
     void set_strip_width_fn(std::function<float()> fn) { m_strip_width_fn = std::move(fn); }
@@ -1118,7 +1132,16 @@ public:
     void release_gl_context();
     // Public wrapper that makes the GL context current. Needed by code
     // that runs GL operations outside the render cycle (e.g. gcode data loading).
-    bool ensure_gl_current() { return _set_current(); }
+    bool ensure_gl_current()
+    {
+#ifdef __APPLE__
+        // render() made the context current; making it current again sends setView and update to the
+        // NSOpenGLContext, which rebuilds its drawable mid-frame and crashes the frame's swap
+        if (m_in_render)
+            return true;
+#endif
+        return _set_current();
+    }
     void requires_check_outside_state() { m_requires_check_outside_state = true; }
 
     unsigned int get_volumes_count() const { return (unsigned int) m_volumes.volumes.size(); }
@@ -1287,8 +1310,11 @@ public:
     void reload_scene(bool refresh_immediately, bool force_full_scene_refresh = false);
 
     void load_gcode_shells();
+    // A preparation of the result made on the slicing thread is handed to the load, or why there is none
     void load_gcode_preview(const GCodeProcessorResult &gcode_result, const std::vector<std::string> &str_tool_colors,
-                            const std::vector<std::string> &str_color_print_colors);
+                            const std::vector<std::string> &str_color_print_colors,
+                            std::shared_ptr<PreparedPreview> prepared = nullptr,
+                            const std::string &unprepared_reason = std::string());
     void set_shell_progress_height(double height) { m_gcode_viewer.set_shell_progress_height(height); }
     void set_gcode_view_type(libvgcode::EViewType type) { return m_gcode_viewer.set_view_type(type); }
     libvgcode::EViewType get_gcode_view_type() const { return m_gcode_viewer.get_view_type(); }
@@ -1479,6 +1505,8 @@ private:
     void _picking_pass();
     void _rectangular_selection_picking_pass();
     void _render_background();
+    // Fills the frame info's lighting tier in effect, why it is lower than requested, and the offscreen bytes
+    void _update_frame_lighting_info(bool full_requested);
     void _render_bed(const Transform3d &view_matrix, const Transform3d &projection_matrix, bool bottom);
     void _render_bed_axes();
     void _render_objects(GLVolumeCollection::ERenderType type);

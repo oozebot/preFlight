@@ -10,6 +10,7 @@
 #include "luminary/walls/serpentine/Serpentine.hpp"
 #include "luminary/walls/precise/PreciseWalls.hpp"
 #include "luminary/walls/MinWallLength.hpp"
+#include "luminary/walls/perimeter/VaseWall.hpp"
 #include "luminary/walls/arachne/toolpaths/WallToolPaths.hpp"
 #include "luminary/walls/arachne/paths/ExtrusionLine.hpp"
 #include "luminary/walls/arachne/order/PerimeterOrder.hpp"
@@ -738,6 +739,64 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator::P
     return extrusion_coll;
 }
 
+// The pieces the overhang clip cut from one source line, put back in the order they have along it:
+// each piece is placed by where the midpoint of its first segment lies on the source, and reversed
+// when its first segment runs against the source there. The nearest-neighbour chain loses its way
+// where a vase fin's two passes run side by side a quarter width apart, and a loop chained out of
+// order prints with travels inside the spiral.
+static void order_paths_along_source(ExtrusionPaths &paths, const ClipperZUtils::ZPath &source)
+{
+    if (paths.size() < 2 || source.size() < 2)
+        return;
+    std::vector<double> cumulative(source.size(), 0.);
+    for (size_t i = 1; i < source.size(); ++i)
+        cumulative[i] = cumulative[i - 1] +
+                        std::hypot(double(source[i].x - source[i - 1].x), double(source[i].y - source[i - 1].y));
+    struct Placed
+    {
+        double at;
+        ExtrusionPath path;
+    };
+    std::vector<Placed> placed;
+    placed.reserve(paths.size());
+    for (ExtrusionPath &path : paths)
+    {
+        const Points &pts = path.polyline.points;
+        if (pts.size() < 2)
+        {
+            // A piece of one point has no segment to place or print.
+            DBG_COUNT("VASE_PIECE_DROPPED");
+            continue;
+        }
+        const Vec2d mid = (pts[0].cast<double>() + pts[1].cast<double>()) * 0.5;
+        const Vec2d dir = (pts[1] - pts[0]).cast<double>();
+        double best_d2 = std::numeric_limits<double>::max();
+        double at = 0.;
+        bool against = false;
+        for (size_t i = 1; i < source.size(); ++i)
+        {
+            const Vec2d a(double(source[i - 1].x), double(source[i - 1].y));
+            const Vec2d ab(double(source[i].x - source[i - 1].x), double(source[i].y - source[i - 1].y));
+            const double l2 = ab.squaredNorm();
+            const double t = l2 > 0. ? std::clamp((mid - a).dot(ab) / l2, 0., 1.) : 0.;
+            const double d2 = (mid - (a + ab * t)).squaredNorm();
+            if (d2 < best_d2)
+            {
+                best_d2 = d2;
+                at = cumulative[i - 1] + t * std::sqrt(l2);
+                against = dir.dot(ab) < 0.;
+            }
+        }
+        if (against)
+            path.reverse();
+        placed.push_back({at, std::move(path)});
+    }
+    std::stable_sort(placed.begin(), placed.end(), [](const Placed &l, const Placed &r) { return l.at < r.at; });
+    paths.clear();
+    for (Placed &p : placed)
+        paths.emplace_back(std::move(p.path));
+}
+
 static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator::Parameters &params,
                                                      const Polygons &lower_slices_polygons_cache,
                                                      const Polygons &lower_slices_raw,
@@ -835,7 +894,12 @@ static ExtrusionEntityCollection traverse_extrusions(const PerimeterGenerator::P
             // Reapply the nearest point search for starting point.
             // We allow polyline reversal because Clipper may have randomly reversed polylines during clipping.
             // Athena sometimes creates extrusion with zero-length (just two same endpoints);
-            if (!paths.empty())
+            if (!paths.empty() && params.spiral_vase && extrusion.is_closed)
+            {
+                // A vase loop must stay one continuous path: its pieces go back in source order.
+                order_paths_along_source(paths, extrusion_path);
+            }
+            else if (!paths.empty())
             {
                 Point start_point = paths.front().first_point();
                 if (!extrusion.is_closed)
@@ -3550,6 +3614,10 @@ void PerimeterGenerator::process_athena(
                                           max_perimeter_width);
     wall_tool_paths.set_debug_print_z((params.layer != nullptr) ? params.layer->print_z : 0.0);
     wall_tool_paths.set_min_wall_length(min_wall_length);
+    // A vase layer's core is hollow, so there is no solid infill to protect, and an extra wall
+    // would break the single loop the spiral needs.
+    if (params.spiral_vase)
+        wall_tool_paths.skip_thin_contour_regeneration();
     auto pg_t0 = std::chrono::steady_clock::now();
     Athena::Perimeters perimeters = wall_tool_paths.getToolPaths();
     g_pg_main_walls.add(pg_t0, std::chrono::steady_clock::now());
@@ -4245,6 +4313,65 @@ void PerimeterGenerator::process_athena(
             // island (no suppressed region): there il_suppressed_core / il_wall_footprint stay empty and the
             // walls stay at the reduced count, matching the fully-buried (roller) path.
             il_have_region = true;
+        }
+    }
+
+    // A vase layer's wall must be one closed loop for the spiral to continue: every open line is
+    // spliced into the loop as an out-and-back excursion, or dropped. A fin's nearer end may sit up to
+    // VaseWall::fin_attach_tolerance_widths external widths (1.5, safe range 1.0 to 2.0) off the loop.
+    // The passes stay at or above the thinnest bead thick_polyline_to_multi_path keeps (the flow
+    // formula's floor or a third of the nozzle), plus a micron against its float compare, so no
+    // segment of the loop is skipped.
+    if (params.spiral_vase)
+    {
+        const Flow &vase_flow = params.ext_perimeter_flow;
+        const coord_t min_pass_width = scaled<coord_t>(
+                                           std::max(vase_flow.height() * 0.2146f, vase_flow.nozzle_diameter() / 3.0f)) +
+                                       scaled<coord_t>(0.001);
+        const VaseWall::Report vase = VaseWall::make_single_loop(
+            perimeters, coord_t(VaseWall::fin_attach_tolerance_widths * double(ext_perimeter_width)), min_pass_width);
+        if (vase.degenerate_loop)
+        {
+            DBG_COUNT("VASE_LOOP_DEGENERATE");
+            dbg_log(Luminary::DBG_PERIMETERS, dbg_z, "PERIM", "VASE_LOOP_DEGENERATE layer=%d", params.layer_id);
+        }
+        if (vase.loops >= 2)
+        {
+            DBG_COUNT("VASE_LOOPS_UNTOUCHED");
+            dbg_log(Luminary::DBG_PERIMETERS, dbg_z, "PERIM", "VASE_LOOPS_UNTOUCHED layer=%d loops=%zu",
+                    params.layer_id, vase.loops);
+        }
+        for (const VaseWall::FinReport &fin : vase.fins)
+        {
+            const double len = unscaled<double>(fin.length);
+            const double w_min = unscaled<double>(fin.min_width);
+            const double w_max = unscaled<double>(fin.max_width);
+            const double gap = unscaled<double>(fin.gap);
+            switch (fin.outcome)
+            {
+            case VaseWall::FinReport::Outcome::Spliced:
+                DBG_COUNT("VASE_FIN_SPLICED");
+                dbg_log(Luminary::DBG_PERIMETERS, dbg_z, "PERIM",
+                        "VASE_FIN_SPLICED layer=%d len=%.3fmm w=%.3f-%.3fmm gap=%.3fmm odd=%d", params.layer_id, len,
+                        w_min, w_max, gap, int(fin.odd));
+                break;
+            case VaseWall::FinReport::Outcome::Slot:
+                DBG_COUNT("VASE_FIN_SLOT");
+                dbg_log(Luminary::DBG_PERIMETERS, dbg_z, "PERIM",
+                        "VASE_FIN_SLOT layer=%d len=%.3fmm w=%.3f-%.3fmm odd=%d", params.layer_id, len, w_min, w_max,
+                        int(fin.odd));
+                break;
+            case VaseWall::FinReport::Outcome::DroppedFar:
+            case VaseWall::FinReport::Outcome::DroppedCrossing:
+            {
+                DBG_COUNT("VASE_FIN_DROPPED");
+                const char *reason = fin.outcome == VaseWall::FinReport::Outcome::DroppedFar ? "far" : "crossing";
+                dbg_log(Luminary::DBG_PERIMETERS, dbg_z, "PERIM",
+                        "VASE_FIN_DROPPED layer=%d reason=%s dist=%.3fmm len=%.3fmm w=%.3f-%.3fmm odd=%d",
+                        params.layer_id, reason, gap, len, w_min, w_max, int(fin.odd));
+                break;
+            }
+            }
         }
     }
 

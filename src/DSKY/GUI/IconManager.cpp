@@ -15,11 +15,7 @@
 #include "luminary/core/Raii.hpp" // ScopeGuard
 
 #include "3DScene.hpp" // glsafe
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 #define STB_RECT_PACK_IMPLEMENTATION
 #include "imgui/imstb_rectpack.h" // distribute rectangles

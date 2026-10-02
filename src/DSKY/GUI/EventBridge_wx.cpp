@@ -9,6 +9,7 @@
 #include "GLToolbar.hpp"
 
 #include <wx/app.h>
+#include <wx/thread.h>
 
 namespace DSKY
 {
@@ -222,6 +223,13 @@ void CanvasEventPoster_wx::postEvent(CanvasEventType type, const std::string &da
 {
     Event<std::string> evt(canvas_event_to_wx(type), data);
     evt.SetEventObject(m_target);
+    // An undo snapshot records the model as it is when it is asked for, and the canvas asks before it
+    // changes the model (a move asks, then writes the new positions): taken now, not a queue turn later
+    if ((type == CanvasEventType::TakeSnapshot || type == CanvasEventType::TakeGizmoSnapshot) && wxThread::IsMain())
+    {
+        m_target->ProcessEvent(evt);
+        return;
+    }
     wxPostEvent(m_target, evt);
 }
 

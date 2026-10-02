@@ -19,8 +19,8 @@
 // line also bumps a named counter here, so the total of every counter is dumped
 // once per slice as a machine-readable block:
 //     [0.000][COUNTER] NAME=<total>
-// Per-fire lines keep the where/why payload; the block carries the totals the
-// harness compares. Counting costs one relaxed atomic add per fire and happens
+// Per-fire lines keep the where/why payload; the block carries the totals that
+// two runs are compared by. Counting costs one relaxed atomic add per fire and happens
 // whether or not --debug is active; the dump only prints when it is.
 namespace Luminary
 {
@@ -58,6 +58,18 @@ public:
         ++m_sites[i];
         m_sticky[i] = m_sticky[i] || sticky;
         return *it->second;
+    }
+
+    // Every registered counter and its value, in registration order (the GUI budget trace's exit
+    // block lists them all)
+    std::vector<std::pair<std::string, uint64_t>> values()
+    {
+        std::lock_guard<std::mutex> lk(m_mutex);
+        std::vector<std::pair<std::string, uint64_t>> out;
+        out.reserve(m_rows.size());
+        for (const Row &row : m_rows)
+            out.emplace_back(row.first, row.second->load(std::memory_order_relaxed));
+        return out;
     }
 
     // Called at the start of Print::process() so GUI re-slices produce clean per-print blocks.

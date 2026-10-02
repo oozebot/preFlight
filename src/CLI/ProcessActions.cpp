@@ -28,9 +28,7 @@
 #include "luminary/platform/paths/Paths.hpp"
 #include "luminary/platform/files/FileIO.hpp"
 #include "luminary/core/diagnostics/DebugOutput.hpp"
-#if !PREFLIGHT_OPENGL_ES
 #include <boost/algorithm/string/split.hpp>
-#endif // !PREFLIGHT_OPENGL_ES
 #include "luminary/config/model/Config.hpp"
 #include "luminary/layer/settings_spec/SettingsSpec.hpp"
 #include "luminary/geometry/transform/Geometry.hpp"
@@ -313,8 +311,8 @@ static void update_instances_outside_state(Model &model, const DynamicPrintConfi
     model.update_print_volume_state(build_volume);
 }
 
-// --dump-config-defs: every print option definition as one JSON object per key, so a harness
-// can generate value tables (toggle every key) without a hand-written list.
+// --dump-config-defs: every print option definition as one JSON object per key, so a script can
+// generate value tables (toggle every key) without a hand-written list.
 static void dump_config_defs()
 {
     const auto json_string = [](const std::string &s)
@@ -771,7 +769,7 @@ bool process_actions(Data &cli, const DynamicPrintConfig &print_config, std::vec
                 {
                     std::string outfile_final;
                     // --debug-geom: the sidecar sits next to the output path as given (before
-                    // placeholder expansion); its path is printed once so a harness can find it.
+                    // placeholder expansion); its path is printed once so a caller can find it.
                     if (Luminary::g_debug_geom)
                     {
                         const std::string sidecar = outfile + ".geom.wkt";

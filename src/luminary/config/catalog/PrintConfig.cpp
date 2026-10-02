@@ -1907,6 +1907,12 @@ void PrintConfigDef::init_fff_params()
     def->max = 10.;
     def->set_default_value(new ConfigOptionPercents{0});
 
+    // Legacy combined XY shrinkage key: its value is read into the X and Y keys, it is never stored or saved.
+    def = this->add("filament_shrinkage_compensation_xy", coPercents);
+    def->shortcut.push_back("filament_shrinkage_compensation_x");
+    def->shortcut.push_back("filament_shrinkage_compensation_y");
+    def->cli = ConfigOptionDef::nocli;
+
     def = this->add("filament_shrinkage_compensation_z", coPercents);
     def->label = L("Shrinkage compensation Z");
     def->tooltip = L("Enter your filament shrinkage percentages for the Z axis here to apply scaling of the object to "
@@ -5908,6 +5914,16 @@ void PrintConfigDef::init_extruder_option_keys()
                                "wipe_extend",
                                "wipe_length"};
     assert(std::is_sorted(m_extruder_retract_keys.begin(), m_extruder_retract_keys.end()));
+
+    m_extruder_assignment_keys = {"extruder",
+                                  "perimeter_extruder",
+                                  "infill_extruder",
+                                  "solid_infill_extruder",
+                                  "interlocking_perimeter_extruder",
+                                  "support_material_extruder",
+                                  "support_material_interface_extruder",
+                                  "wipe_tower_extruder",
+                                  "bed_temperature_extruder"};
 }
 
 // Ignore the following obsolete configuration keys:
@@ -5951,10 +5967,8 @@ static std::set<std::string> PrintConfigDef_ignore = {
     "wiping_volumes_extruders", // Removed in 2.7.3-alpha1.
     "wipe_tower_x",
     "wipe_tower_y",
-    "wipe_tower_rotation_angle",          // Removed in 2.9.0
-    "support_points_minimal_distance",    // End of the using in 2.9.1 (change algorithm for the support generator)
-    "filament_shrinkage_compensation_xy", // Replaced by separate _x and _y options
-    "min_wipe_length",                    // Replaced by wipe_length
+    "wipe_tower_rotation_angle",       // Removed in 2.9.0
+    "support_points_minimal_distance", // End of the using in 2.9.1 (change algorithm for the support generator)
     // Gap fill removed; the classic perimeter generator is gone and Athena/Arachne absorb thin features.
     "gap_fill_speed",
     "gap_fill_enabled",
@@ -6099,6 +6113,17 @@ void PrintConfigDef::handle_legacy(t_config_option_key &opt_key, std::string &va
     {
         opt_key = "preset_names";
     }
+    else if (opt_key == "min_wipe_length")
+    {
+        // Renamed; the per-extruder value carries over unchanged.
+        DBG_COUNT_LOAD("MIN_WIPE_LENGTH_RENAMED");
+        opt_key = "wipe_length";
+    }
+    else if (opt_key == "filament_shrinkage_compensation_xy")
+    {
+        // Key and value pass through: the definition is a shortcut that reads the value into the X and Y keys.
+        DBG_COUNT_LOAD("SHRINKAGE_XY_SPLIT");
+    }
     else if (opt_key == "ensure_vertical_shell_thickness")
     {
         if (value == "1")
@@ -6238,17 +6263,6 @@ void PrintConfigDef::handle_legacy_composite(DynamicPrintConfig &config)
         }
     }
 
-    if (config.has("filament_shrinkage_compensation_xy") && !config.has("filament_shrinkage_compensation_x"))
-    {
-        // Legacy config has combined XY value - copy it to both X and Y
-        auto *opt_xy = config.opt<ConfigOptionPercents>("filament_shrinkage_compensation_xy");
-        if (opt_xy)
-        {
-            config.set_key_value("filament_shrinkage_compensation_x", opt_xy->clone());
-            config.set_key_value("filament_shrinkage_compensation_y", opt_xy->clone());
-        }
-    }
-
     // Auto-correct Orca-format shrinkage values. Orca uses "shrinks to X%" (e.g. 99.67%),
     // preFlight uses "shrinks by X%" (e.g. 0.33%). Values above 10% are physically
     // unrealistic and almost certainly imported without conversion. Invert them.
@@ -6281,15 +6295,6 @@ void PrintConfigDef::handle_legacy_composite(DynamicPrintConfig &config)
         {
             // The custom field wasn't set - use a safe default gap
             config.set_key_value("support_material_contact_distance_custom", new ConfigOptionFloat(0.2));
-        }
-    }
-
-    if (config.has("min_wipe_length") && !config.has("wipe_length"))
-    {
-        auto *opt = config.opt<ConfigOptionFloats>("min_wipe_length");
-        if (opt)
-        {
-            config.set_key_value("wipe_length", opt->clone());
         }
     }
 
@@ -6448,6 +6453,64 @@ void DynamicPrintConfig::set_num_extruders(unsigned int num_extruders)
         if (opt != nullptr && opt->is_vector())
             static_cast<ConfigOptionVectorBase *>(opt)->resize(num_extruders, defaults.option(key));
     }
+}
+
+size_t DynamicPrintConfig::reset_extruders_above(size_t extruder_count)
+{
+    size_t reset = 0;
+    for (const std::string &key : print_config_def.extruder_assignment_keys())
+    {
+        auto *opt = this->option<ConfigOptionInt>(key);
+        if (opt == nullptr || opt->value <= int(extruder_count))
+            continue;
+        const ConfigOptionDef *def = print_config_def.get(key);
+        const auto *def_value = def != nullptr ? dynamic_cast<const ConfigOptionInt *>(def->default_value.get())
+                                               : nullptr;
+        opt->value = def_value != nullptr ? def_value->value : 0;
+        DBG_COUNT_LOAD("EXTRUDER_ASSIGNMENT_RESET");
+        ++reset;
+    }
+    return reset;
+}
+
+size_t DynamicPrintConfig::erase_extruders_above(size_t extruder_count)
+{
+    size_t erased = 0;
+    for (const std::string &key : print_config_def.extruder_assignment_keys())
+        if (const auto *opt = this->option<ConfigOptionInt>(key); opt != nullptr && opt->value > int(extruder_count))
+        {
+            this->erase(key);
+            ++erased;
+        }
+    return erased;
+}
+
+size_t ModelConfig::reset_extruders_above(size_t extruder_count)
+{
+    size_t reset = 0;
+    for (const std::string &key : print_config_def.extruder_assignment_keys())
+    {
+        const auto *opt = m_data.option<ConfigOptionInt>(key);
+        if (opt == nullptr || opt->value <= int(extruder_count))
+            continue;
+        if (key == "extruder")
+            m_data.set_key_value(key, new ConfigOptionInt(0));
+        else
+            m_data.erase(key);
+        DBG_COUNT_LOAD("EXTRUDER_ASSIGNMENT_RESET");
+        ++reset;
+    }
+    if (reset > 0)
+        this->touch();
+    return reset;
+}
+
+bool ModelConfig::has_extruders_above(size_t extruder_count) const
+{
+    for (const std::string &key : print_config_def.extruder_assignment_keys())
+        if (const auto *opt = m_data.option<ConfigOptionInt>(key); opt != nullptr && opt->value > int(extruder_count))
+            return true;
+    return false;
 }
 
 std::string DynamicPrintConfig::validate()
@@ -6815,7 +6878,7 @@ CLIActionsConfigDef::CLIActionsConfigDef()
     def = this->add("dump_config_defs", coBool);
     def->label = "Dump the print option definitions";
     def->tooltip = "Write every print option definition (type, default, enum values, limits, scope) as JSON to "
-                   "stdout, for generated harness tables.";
+                   "stdout, for tools that read the option catalog.";
     def->cli = "dump-config-defs";
     def->set_default_value(new ConfigOptionBool(false));
 
@@ -7008,7 +7071,6 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->cli = "opengl-aa";
     def->set_default_value(new ConfigOptionBool(false));
 
-#if !PREFLIGHT_OPENGL_ES
     def = this->add("opengl-version", coString);
     def->label = L("OpenGL version");
     def->tooltip = L("Select a specific version of OpenGL");
@@ -7026,7 +7088,6 @@ CLIMiscConfigDef::CLIMiscConfigDef()
     def->tooltip = L("Activate OpenGL debug output on graphic cards which support it (OpenGL 4.3 or higher)");
     def->cli = "opengl-debug";
     def->set_default_value(new ConfigOptionBool(false));
-#endif // !PREFLIGHT_OPENGL_ES
 
     def = this->add("single_instance", coBool);
     def->label = L("Single instance mode");

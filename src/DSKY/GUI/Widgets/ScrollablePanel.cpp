@@ -6,6 +6,8 @@
 #include "ScrollBar.hpp"
 #include "UIColors.hpp"
 #include "../GUI_App.hpp"
+#include "../GuiBudget.hpp"
+#include "luminary/core/diagnostics/DebugCounters.hpp"
 #include <wx/dcclient.h>
 #include <algorithm>
 
@@ -93,7 +95,40 @@ void ScrollablePanel::ScrollToChild(wxWindow *child)
     }
 }
 
+int ScrollablePanel::ContentWidthFor(int contentHeight) const
+{
+    const wxSize mySize = GetClientSize();
+    // A gap before the scrollbar for visual centering (~4px at 100%)
+    return contentHeight > mySize.y ? mySize.x - GetScaledScrollbarWidth() - GetScaledScrollAmount() / 10 : mySize.x;
+}
+
+// The layout below sends the content's children size events, and a child may ask for an update from
+// there (the About dialog's HTML measures its new height): a nested update would apply its state and
+// return to the outer one, which would then apply its older state. The request is noted instead and
+// the running update measures again, a few times at most.
 void ScrollablePanel::UpdateScrollbar()
+{
+    if (m_updating)
+    {
+        m_updateAgain = true;
+        return;
+    }
+    m_updating = true;
+    constexpr int MAX_PASSES = 3;
+    for (int pass = 0; pass < MAX_PASSES; ++pass)
+    {
+        m_updateAgain = false;
+        DoUpdateScrollbar();
+        if (!m_updateAgain)
+            break;
+    }
+    // Still asked for another after the last pass: the content's layout does not settle
+    if (m_updateAgain)
+        DBG_COUNT_LOAD("GUI_SCROLL_UPDATE_UNSETTLED");
+    m_updating = false;
+}
+
+void ScrollablePanel::DoUpdateScrollbar()
 {
     if (!m_content || !m_scrollbar)
         return;
@@ -102,9 +137,10 @@ void ScrollablePanel::UpdateScrollbar()
     if (mySize.x <= 0 || mySize.y <= 0)
         return; // Not laid out yet
 
-    // Layout content to get its natural size
-    m_content->Layout();
-    wxSize contentSize = m_content->GetBestSize();
+    // The content's natural size from its sizer, before any layout: a layout at the current width
+    // first would lay every row out twice whenever the scrollbar comes or goes, and the width with it
+    wxSizer *contentSizer = m_content->GetSizer();
+    wxSize contentSize = contentSizer != nullptr ? contentSizer->GetMinSize() : m_content->GetBestSize();
 
     // Determine if we need scrollbar
     bool needsScroll = contentSize.y > mySize.y;
@@ -112,14 +148,32 @@ void ScrollablePanel::UpdateScrollbar()
     // Calculate available width for content (with gap before scrollbar for visual centering)
     int scrollbarWidth = GetScaledScrollbarWidth();  // Match ScrollBar width
     int scrollbarGap = GetScaledScrollAmount() / 10; // Small gap between content and scrollbar (~4px at 100%)
-    int contentWidth = needsScroll ? (mySize.x - scrollbarWidth - scrollbarGap) : mySize.x;
+    int contentWidth = ContentWidthFor(contentSize.y);
 
     // Store content height
     m_contentHeight = contentSize.y;
 
-    // Size and position content panel
-    m_content->SetSize(contentWidth, std::max(m_contentHeight, mySize.y));
+    // Content past the window coordinate range is counted, and a tagged panel's height traced
+    if (m_contentHeight != m_reportedHeight)
+    {
+        m_reportedHeight = m_contentHeight;
+        DSKY::GuiBudget::content_height(m_budgetTag, m_contentHeight, m_contentOverflowing);
+    }
+
+    // Size and position content panel: a new size lays the content out through its size event, an
+    // unchanged one sends none, so the content is laid out here
+    const wxSize contentTarget(contentWidth, std::max(m_contentHeight, mySize.y));
+    const int oldWidth = m_content->GetSize().GetWidth();
+    if (m_content->GetSize() != contentTarget)
+        m_content->SetSize(contentTarget);
+    else
+        m_content->Layout();
     m_content->SetPosition(wxPoint(0, -m_scrollPosition));
+    // Content that narrows (the scrollbar came) uncovers a strip of this panel. A frozen content
+    // (a section toggling) does not invalidate what it uncovers, which would keep the old pixels
+    // there, so the strip is repainted here.
+    if (contentWidth < oldWidth)
+        RefreshRect(wxRect(contentWidth, 0, mySize.x - contentWidth, mySize.y));
 
     // Size and position scrollbar (offset by gap for visual centering)
     if (needsScroll)
@@ -197,6 +251,17 @@ void ScrollablePanel::OnMouseWheel(wxMouseEvent &event)
     {
         event.Skip();
         return;
+    }
+    if (m_wheelPassesAtEnds)
+    {
+        const int maxScroll = std::max(0, m_contentHeight - GetClientSize().y);
+        const bool up = event.GetWheelRotation() > 0;
+        if ((up && m_scrollPosition <= 0) || (!up && m_scrollPosition >= maxScroll))
+        {
+            m_sumWheelRotation = 0;
+            event.Skip();
+            return;
+        }
     }
 
     // Accumulate partial wheel rotations for XWayland compatibility (credit: topisani)

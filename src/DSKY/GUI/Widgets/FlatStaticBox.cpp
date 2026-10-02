@@ -9,6 +9,7 @@
 
 #ifdef _WIN32
 #include "../DarkMode.hpp"
+#include "GdiCache.hpp"
 #include <uxtheme.h>
 #pragma comment(lib, "uxtheme.lib")
 #elif defined(__WXGTK__)
@@ -422,119 +423,232 @@ void FlatStaticBox::OnPaintMac(wxPaintEvent &evt)
 #endif // __WXOSX__
 
 #ifdef _WIN32
+void FlatStaticBox::GetBordersForSizer(int *borderTop, int *borderOther) const
+{
+    const wxFont font = GetFont();
+    const wxString label = GetLabel();
+    const double scale = GetDPIScaleFactor();
+    if (m_borderTop < 0 || scale != m_borderScale || !(font == m_borderFont) || label != m_borderLabel)
+    {
+        wxStaticBox::GetBordersForSizer(&m_borderTop, &m_borderOther);
+        m_borderFont = font;
+        m_borderLabel = label;
+        m_borderScale = scale;
+    }
+    *borderTop = m_borderTop;
+    *borderOther = m_borderOther;
+}
+
+namespace
+{
+// The flat frame's geometry, from the control's font and label: the top line half a label height
+// down, the gap the label leaves in it, the width of the bands the native frame is erased from
+struct FrameMetrics
+{
+    bool has_label{false};
+    int text_width{0};
+    int top_line_y{0};
+    int label_start_x{0};
+    int label_end_x{0};
+    int erase_width{0};
+    int label_gap{0};
+    int border_width{0};
+};
+
+FrameMetrics frame_metrics(HWND hwnd, HDC hdc)
+{
+    wchar_t label[256] = {0};
+    ::GetWindowTextW(hwnd, label, 256);
+    HFONT font = (HFONT)::SendMessage(hwnd, WM_GETFONT, 0, 0);
+    if (!font)
+        font = (HFONT)::GetStockObject(DEFAULT_GUI_FONT);
+    HFONT old_font = (HFONT)::SelectObject(hdc, font);
+    SIZE text = {0, 0};
+    if (label[0] != 0)
+        ::GetTextExtentPoint32W(hdc, label, (int) wcslen(label), &text);
+    ::SelectObject(hdc, old_font);
+
+    FrameMetrics m;
+    m.has_label = label[0] != 0;
+    m.text_width = text.cx;
+    m.top_line_y = text.cy / 2;
+    m.label_start_x = GetScaledLabelStartPadding();
+    m.label_end_x = m.label_start_x + text.cx + GetScaledLabelEndPadding();
+    m.erase_width = GetScaledEraseWidth();
+    m.label_gap = GetScaledLabelGap();
+    m.border_width = GetScaledBorderWidth();
+    return m;
+}
+
+// Paints the bands the native frame is drawn in with `band` (the parent's colour), then the flat
+// border over them, gapped for the label
+void draw_flat_frame(HDC hdc, int width, int height, const FrameMetrics &m, HBRUSH band, HBRUSH border)
+{
+    RECT rc;
+
+    // The band extends erase_width above the top line too (not just the border width), so the
+    // native frame's corner pixels that sit slightly above the line don't leave a stray dot at the
+    // border tips.
+    rc = {0, m.top_line_y - m.erase_width, m.erase_width, height};
+    ::FillRect(hdc, &rc, band);
+    rc = {0, height - m.erase_width, width, height};
+    ::FillRect(hdc, &rc, band);
+    rc = {width - m.erase_width, m.top_line_y - m.erase_width, width, height};
+    ::FillRect(hdc, &rc, band);
+
+    if (m.has_label)
+    {
+        // Up to label_start_x (not label_start_x - label_gap), so the native frame's border segment
+        // that resumes inside the wider label gap is covered on the left too. The label glyphs (or
+        // the overlaid header panel) start at label_start_x, so nothing visible is erased. The border
+        // is redrawn afterward to label_start_x - label_gap.
+        rc = {0, m.top_line_y - m.erase_width, m.label_start_x, m.top_line_y + m.erase_width};
+        ::FillRect(hdc, &rc, band);
+        // From just past the label text (not label_end_x), so the native frame's border segment that
+        // resumes inside the wider label gap is covered too. The border is redrawn afterward from
+        // label_end_x + label_gap.
+        rc = {m.label_start_x + m.text_width + m.label_gap, m.top_line_y - m.erase_width, width,
+              m.top_line_y + m.erase_width};
+        ::FillRect(hdc, &rc, band);
+    }
+    else
+    {
+        rc = {0, m.top_line_y - m.erase_width, width, m.top_line_y + m.erase_width};
+        ::FillRect(hdc, &rc, band);
+    }
+
+    rc = {0, m.top_line_y, m.border_width, height};
+    ::FillRect(hdc, &rc, border);
+    rc = {0, height - m.border_width, width, height};
+    ::FillRect(hdc, &rc, border);
+    rc = {width - m.border_width, m.top_line_y, width, height};
+    ::FillRect(hdc, &rc, border);
+
+    if (m.has_label)
+    {
+        rc = {0, m.top_line_y, m.label_start_x - m.label_gap, m.top_line_y + m.border_width};
+        ::FillRect(hdc, &rc, border);
+        rc = {m.label_end_x + m.label_gap, m.top_line_y, width, m.top_line_y + m.border_width};
+        ::FillRect(hdc, &rc, border);
+    }
+    else
+    {
+        rc = {0, m.top_line_y, width, m.top_line_y + m.border_width};
+        ::FillRect(hdc, &rc, border);
+    }
+}
+
+COLORREF colorref(const wxColour &colour)
+{
+    return RGB(colour.Red(), colour.Green(), colour.Blue());
+}
+
+// Leaves out of the box's paint every window over it (its rows, and the title panel on its top
+// border): they paint themselves. A sibling inside the box loses WS_CLIPSIBLINGS (wx gives it to
+// buttons and choices), as wx's own box paint does: the box sits above its rows in the Z-order, so
+// with the style a row would clip the box's whole rectangle out of itself and paint nothing.
+void exclude_windows_over(HWND box, HDC hdc)
+{
+    RECT box_rect;
+    ::GetWindowRect(box, &box_rect);
+    auto exclude = [&](HWND window, bool sibling)
+    {
+        RECT rect, over;
+        if (window == box || !::IsWindowVisible(window) || !::GetWindowRect(window, &rect) ||
+            !::IntersectRect(&over, &rect, &box_rect))
+            return;
+        if (sibling)
+            if (const LONG_PTR style = ::GetWindowLongPtr(window, GWL_STYLE); style & WS_CLIPSIBLINGS)
+            {
+                ::SetWindowLongPtr(window, GWL_STYLE, style & ~LONG_PTR(WS_CLIPSIBLINGS));
+                ::SetWindowPos(window, nullptr, 0, 0, 0, 0,
+                               SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+            }
+        ::ExcludeClipRect(hdc, over.left - box_rect.left, over.top - box_rect.top, over.right - box_rect.left,
+                          over.bottom - box_rect.top);
+    };
+    for (HWND sibling = ::GetWindow(::GetParent(box), GW_CHILD); sibling != nullptr;
+         sibling = ::GetWindow(sibling, GW_HWNDNEXT))
+        exclude(sibling, true);
+    for (HWND child = ::GetWindow(box, GW_CHILD); child != nullptr; child = ::GetWindow(child, GW_HWNDNEXT))
+        exclude(child, false);
+}
+} // namespace
+
+// The colour behind the box: the parent's
+wxColour FlatStaticBox::BandColour() const
+{
+    wxWindow *parent = GetParent();
+    wxColour colour = parent ? parent->GetBackgroundColour() : GetBackgroundColour();
+    if (!colour.IsOk())
+        colour = wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE);
+    return colour;
+}
+
+// A box whose label is blank (the sidebar's and the override panel's groups, titled by an overlay
+// panel) is painted in one pass: its own colour wherever no window covers it, then the flat frame.
+// wx's paint would draw the whole box into a bitmap of its size, run the native frame and label into
+// it and walk every sibling window to clip them out, all under the frame drawn over it.
+bool FlatStaticBox::MSWPaintBlank()
+{
+    HWND hwnd = (HWND) GetHWND();
+    RECT window, client;
+    ::GetWindowRect(hwnd, &window);
+    ::GetClientRect(hwnd, &client);
+    // The frame is measured in window coordinates; a box with a non-client area keeps wx's paint
+    if (client.right != window.right - window.left || client.bottom != window.bottom - window.top)
+        return false;
+
+    PAINTSTRUCT ps;
+    HDC hdc = ::BeginPaint(hwnd, &ps);
+    if (hdc == nullptr)
+    {
+        ::ValidateRect(hwnd, nullptr);
+        return true;
+    }
+    exclude_windows_over(hwnd, hdc);
+    const FrameMetrics m = frame_metrics(hwnd, hdc);
+    // Shared brushes: a null one (Windows refused it, counted by the cache) skips its fill
+    if (HBRUSH own = GdiCache::shared_solid_brush(colorref(GetBackgroundColour())))
+        ::FillRect(hdc, &client, own);
+    HBRUSH band = GdiCache::shared_solid_brush(colorref(BandColour()));
+    HBRUSH border = GdiCache::shared_solid_brush(colorref(m_borderColor));
+    if (band != nullptr && border != nullptr)
+        draw_flat_frame(hdc, client.right, client.bottom, m, band, border);
+    ::EndPaint(hwnd, &ps);
+    return true;
+}
+
 WXLRESULT FlatStaticBox::MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam)
 {
+    const bool flat = nMsg == WM_PAINT && m_drawFlatBorder && m_borderColor.IsOk();
+    if (flat && GetLabel().Strip(wxString::both).empty() && MSWPaintBlank())
+        return 0;
+
     // Let Windows paint first (native frame: classic 3D in light mode, DarkMode_Explorer flat in dark mode)
     WXLRESULT result = wxStaticBox::MSWWindowProc(nMsg, wParam, lParam);
 
     // Paint the themed section_border over the native frame in BOTH modes, so groups match the
     // settings-tree frame (LabeledBorderPanel) instead of falling back to the native gray in dark mode.
-    if (nMsg == WM_PAINT && m_drawFlatBorder && m_borderColor.IsOk())
+    if (flat)
     {
         HWND hwnd = (HWND) GetHWND();
-        // A window DC is not clipped to siblings, and the sidebar places its overlay header panel
-        // (title, pin checkbox) as a sibling above this box on the top border. Excluding the
-        // siblings above keeps the border from painting across the header, so the header never
-        // needs a refresh after a box paint: refreshing it from the paint path re-invalidates the
-        // transparent box underneath and the two repaint each other without end.
+        // A window DC is not clipped to siblings, and a group's overlay header panel (title, pin
+        // checkbox) is a sibling above this box on the top border. Excluding the siblings above
+        // keeps the border from painting across the header, so the header never needs a refresh
+        // after a box paint: refreshing it from the paint path re-invalidates the transparent box
+        // underneath and the two repaint each other without end.
         HDC hdc = ::GetDCEx(hwnd, nullptr, DCX_WINDOW | DCX_CACHE | DCX_CLIPSIBLINGS);
         if (hdc == nullptr)
             return result;
 
-        // Get window dimensions
-        RECT windowRect;
-        ::GetWindowRect(hwnd, &windowRect);
-        int width = windowRect.right - windowRect.left;
-        int height = windowRect.bottom - windowRect.top;
-
-        // Get label text and calculate its extent
-        wchar_t labelText[256] = {0};
-        ::GetWindowTextW(hwnd, labelText, 256);
-
-        // Get the font used by the control
-        HFONT hFont = (HFONT)::SendMessage(hwnd, WM_GETFONT, 0, 0);
-        if (!hFont)
-            hFont = (HFONT)::GetStockObject(DEFAULT_GUI_FONT);
-        HFONT oldFont = (HFONT)::SelectObject(hdc, hFont);
-
-        SIZE textSize = {0, 0};
-        if (labelText[0] != 0)
-            ::GetTextExtentPoint32W(hdc, labelText, (int) wcslen(labelText), &textSize);
-
-        ::SelectObject(hdc, oldFont);
-
-        int topLineY = textSize.cy / 2;
-        int labelStartX = GetScaledLabelStartPadding();
-        int labelEndX = labelStartX + textSize.cx + GetScaledLabelEndPadding();
-        int eraseWidth = GetScaledEraseWidth();
-        int labelGap = GetScaledLabelGap();
-        int borderW = GetScaledBorderWidth();
-
-        // Get background color from the control's parent via wxWidgets
-        wxWindow *wxParent = GetParent();
-        wxColour wxBgColor = wxParent ? wxParent->GetBackgroundColour() : GetBackgroundColour();
-        if (!wxBgColor.IsOk())
-            wxBgColor = wxSystemSettings::GetColour(wxSYS_COLOUR_BTNFACE);
-        COLORREF bgColor = RGB(wxBgColor.Red(), wxBgColor.Green(), wxBgColor.Blue());
-
-        HBRUSH bgBrush = ::CreateSolidBrush(bgColor);
-        HBRUSH borderBrush = ::CreateSolidBrush(RGB(m_borderColor.Red(), m_borderColor.Green(), m_borderColor.Blue()));
-
-        RECT rc;
-
-        // Erase the native border by painting background color over it. The band extends
-        // eraseWidth above the top line too (not just borderW), so the native frame's corner
-        // pixels that sit slightly above the line don't leave a stray dot at the border tips.
-        rc = {0, topLineY - eraseWidth, eraseWidth, height};
-        ::FillRect(hdc, &rc, bgBrush);
-        rc = {0, height - eraseWidth, width, height};
-        ::FillRect(hdc, &rc, bgBrush);
-        rc = {width - eraseWidth, topLineY - eraseWidth, width, height};
-        ::FillRect(hdc, &rc, bgBrush);
-
-        if (labelText[0] != 0)
-        {
-            // Erase up to labelStartX (not labelStartX - labelGap), so the native frame's
-            // border segment that resumes inside our wider label gap is covered on the left too.
-            // The label glyphs (or the overlaid header panel) start at labelStartX, so nothing
-            // visible is erased. The themed border is redrawn afterward to labelStartX - labelGap.
-            rc = {0, topLineY - eraseWidth, labelStartX, topLineY + eraseWidth};
-            ::FillRect(hdc, &rc, bgBrush);
-            // Erase from just past the label text (not labelEndX), so the native frame's
-            // border segment that resumes inside our wider label gap is covered too. The
-            // themed border is redrawn afterward from labelEndX + labelGap.
-            rc = {labelStartX + textSize.cx + labelGap, topLineY - eraseWidth, width, topLineY + eraseWidth};
-            ::FillRect(hdc, &rc, bgBrush);
-        }
-        else
-        {
-            rc = {0, topLineY - eraseWidth, width, topLineY + eraseWidth};
-            ::FillRect(hdc, &rc, bgBrush);
-        }
-
-        // Draw flat border
-        rc = {0, topLineY, borderW, height};
-        ::FillRect(hdc, &rc, borderBrush);
-        rc = {0, height - borderW, width, height};
-        ::FillRect(hdc, &rc, borderBrush);
-        rc = {width - borderW, topLineY, width, height};
-        ::FillRect(hdc, &rc, borderBrush);
-
-        if (labelText[0] != 0)
-        {
-            rc = {0, topLineY, labelStartX - labelGap, topLineY + borderW};
-            ::FillRect(hdc, &rc, borderBrush);
-            rc = {labelEndX + labelGap, topLineY, width, topLineY + borderW};
-            ::FillRect(hdc, &rc, borderBrush);
-        }
-        else
-        {
-            rc = {0, topLineY, width, topLineY + borderW};
-            ::FillRect(hdc, &rc, borderBrush);
-        }
-
-        ::DeleteObject(bgBrush);
-        ::DeleteObject(borderBrush);
+        RECT window;
+        ::GetWindowRect(hwnd, &window);
+        const FrameMetrics m = frame_metrics(hwnd, hdc);
+        HBRUSH band = GdiCache::shared_solid_brush(colorref(BandColour()));
+        HBRUSH border = GdiCache::shared_solid_brush(colorref(m_borderColor));
+        if (band != nullptr && border != nullptr)
+            draw_flat_frame(hdc, window.right - window.left, window.bottom - window.top, m, band, border);
         ::ReleaseDC(hwnd, hdc);
     }
 

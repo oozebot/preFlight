@@ -973,7 +973,8 @@ std::string OrcaConfigImporter::save_preset(DynamicPrintConfig &config, const st
     }
 
     // Normalize and clean up invalid keys
-    Preset::normalize(config);
+    if (Preset::normalize(config) > 0)
+        collection->note_capped_on_load(profile_name);
 
     const DynamicPrintConfig *default_config = nullptr;
     if (preset_type == Preset::TYPE_PRINTER)

@@ -6,6 +6,9 @@
 #include "CLI.hpp"
 #include "luminary/core/diagnostics/DebugOutput.hpp"
 #include "luminary/core/Prelude.hpp"
+#include "luminary/platform/concurrency/CpuAffinity.hpp"
+#include "luminary/platform/concurrency/WorkerPolicy.hpp"
+#include "luminary/platform/process/Process.hpp"
 
 #include <cctype>
 #include <cstdio>
@@ -114,6 +117,11 @@ static bool apply_debug_flags(const Data &cli)
     // counters_end=1 announces that every [COUNTER] block ends with an _END row-count line.
     dbg_log(DBG_ALL, 0., "META", "schema=2 build=%s categories=%s counters_end=1", PREFLIGHT_VERSION,
             debug_category_list(mask).c_str());
+    // The slicing parallelism and the logical processors the process may use, so a run shows the CPU it had
+    dbg_log(DBG_ALL, 0., "META", "tbb_parallelism=%zu affinity_popcount=%zu", tbb_parallelism(),
+            process_affinity_popcount());
+    // The allocator the process runs on, so a run that fell back to the C runtime heap is visible
+    dbg_log(DBG_ALL, 0., "META", "allocator=%s", process_allocator().c_str());
     if (cli.misc_config.has("debug-z"))
         dbg_log(DBG_ALL, 0., "META", "z_window=%.3f-%.3f", g_debug_z_min, g_debug_z_max);
     return true;

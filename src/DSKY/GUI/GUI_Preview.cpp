@@ -50,41 +50,96 @@
 #include "BitmapComboBox.hpp"
 #endif
 
+#include <atomic>
+#include <chrono>
+#include <memory>
+#include <optional>
+#include <string>
+#include <thread>
+
+#ifdef _WIN32
+#include <malloc.h>
+#endif
+
+#include <boost/log/trivial.hpp>
+
+#include "luminary/core/diagnostics/DebugCounters.hpp"
+
 namespace DSKY
 {
 using namespace Luminary;
 
-// Parse canvas_msaa AppConfig value to an int for create_wxglcanvas.
-// Returns -1 for auto, 0 for off, or 2/4/8/16 for explicit sample counts.
+// The last release's times on its worker thread: freeing the moves and the line ends, and compacting the heap
+// (Windows only; 0 elsewhere). Written by that thread, read by the capture sidecars.
+static std::atomic<float> s_release_free_ms{0.0f};
+static std::atomic<float> s_release_heapmin_ms{0.0f};
+
+// Once the Preview holds a result, its moves and line ends are no longer needed (the G-code window keeps its own copy
+// of the line ends, and nothing reads the moves after the load's bed check). They are moved out here and freed on a
+// detached thread, with the heap compacted there after them, so the UI thread waits for neither; the result keeps
+// everything else, the G-code object the G-code window reads included, and its moves and line ends read empty as
+// after a release. The working set is not trimmed: blocks this large return their pages when freed, and a trim would
+// push out the pages of the Preview's own tables the UI thread touches next.
+static void release_preview_data_async(GCodeProcessorResult &result)
+{
+    std::vector<GCodeProcessorResult::MoveVertex> moves = std::move(result.moves);
+    std::vector<std::vector<size_t>> lines_ends = std::move(result.lines_ends);
+    result.moves.clear();
+    result.moves.shrink_to_fit();
+    result.lines_ends.clear();
+    result.lines_ends.shrink_to_fit();
+    try
+    {
+        std::thread(
+            [moves = std::move(moves), lines_ends = std::move(lines_ends)]() mutable
+            {
+                const auto free_start = std::chrono::steady_clock::now();
+                std::vector<GCodeProcessorResult::MoveVertex>().swap(moves);
+                std::vector<std::vector<size_t>>().swap(lines_ends);
+                const auto heapmin_start = std::chrono::steady_clock::now();
+#ifdef _WIN32
+                _heapmin();
+#endif
+                s_release_free_ms = std::chrono::duration<float, std::milli>(heapmin_start - free_start).count();
+                s_release_heapmin_ms =
+                    std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - heapmin_start).count();
+            })
+            .detach();
+    }
+    catch (const std::exception &e)
+    {
+        // No thread could start: the containers were freed on this thread as the thread's constructor unwound
+        DBG_COUNT_LOAD("RENDER_RELEASE_ON_UI_THREAD");
+        BOOST_LOG_TRIVIAL(warning) << "The Preview's release thread did not start, the moves were freed on the UI "
+                                      "thread: "
+                                   << e.what();
+    }
+}
+
+void Preview::last_release_times(float &free_ms, float &heapmin_ms)
+{
+    free_ms = s_release_free_ms;
+    heapmin_ms = s_release_heapmin_ms;
+}
+
+void Preview::get_color_strings(std::vector<std::string> &tool_colors, std::vector<std::string> &color_print_colors)
+{
+    tool_colors = wxGetApp().plater()->get_extruder_color_strings_from_plater_config(active_gcode_result());
+    const std::vector<CustomGCode::Item> &color_print_values =
+        wxGetApp().is_editor() ? wxGetApp().plater()->model().custom_gcode_per_print_z().gcodes
+                               : active_gcode_result()->custom_gcode_per_print_z;
+
+    // Color print: the filament colors, then the color changes.
+    color_print_colors = wxGetApp().plater()->get_color_strings_for_color_print(active_gcode_result());
+    if (!color_print_values.empty())
+        color_print_colors.push_back("#808080"); // gray color for pause print or custom G-code
+}
+
+// The MSAA request for create_wxglcanvas: -1 Auto, 0 off, or 2/4/8/16 samples
 static int get_msaa_sample_count()
 {
-    const AppConfig *config = wxGetApp().app_config;
-    if (!config)
-        return -1;
-    const std::string val = config->get("canvas_msaa");
-    if (val.empty() || val == "auto")
-    {
-#ifdef _WIN32
-        // Over RDP, auto-probing loops through 16x/8x/4x/2x, each creating a
-        // temporary WGL context that can saturate the GPU command queue. Use 2x
-        // directly so only a single probe occurs.
-        if (GetSystemMetrics(SM_REMOTESESSION))
-            return 2;
-#endif
-        return -1;
-    }
-    int n = std::atoi(val.c_str());
-    if (n == 2 || n == 4 || n == 8 || n == 16)
-    {
-#ifdef _WIN32
-        // High MSAA over RDP causes massive GPU load through the virtualization
-        // layer (16x = 16x fragment shader invocations per pixel), risking TDR.
-        if (GetSystemMetrics(SM_REMOTESESSION) && n > 4)
-            n = 4;
-#endif
-        return n;
-    }
-    return (n <= 0) ? 0 : -1;
+    const bool force_auto = wxGetApp().init_params != nullptr && wxGetApp().init_params->opengl_aa;
+    return OpenGLManager::resolve_msaa_request(wxGetApp().app_config, force_auto);
 }
 
 View3D::View3D(wxWindow *parent, Bed3D &bed, Model *model, DynamicPrintConfig *config,
@@ -244,6 +299,23 @@ void Preview::set_layers_slider_values_range(int bottom, int top)
     m_layers_slider->SetSelectionSpan(std::min(top, m_layers_slider->GetMaxPos()),
                                       std::max(bottom, m_layers_slider->GetMinPos()));
 }
+
+#ifdef PREFLIGHT_TEST_HOOKS
+void Preview::test_set_moves_slider_span(int lower_pos, int higher_pos)
+{
+    // The slider's span setter runs the thumb move callback, on_moves_slider_scroll_changed, as a drag does
+    if (m_moves_slider)
+        m_moves_slider->SetSelectionSpan(lower_pos, higher_pos);
+}
+
+void Preview::test_moves_slider_positions(int &lower_pos, int &higher_pos, int &min_pos, int &max_pos) const
+{
+    lower_pos = m_moves_slider ? m_moves_slider->GetLowerPos() : 0;
+    higher_pos = m_moves_slider ? m_moves_slider->GetHigherPos() : 0;
+    min_pos = m_moves_slider ? m_moves_slider->GetMinPos() : 0;
+    max_pos = m_moves_slider ? m_moves_slider->GetMaxPos() : 0;
+}
+#endif
 
 GCodeProcessorResult *Preview::active_gcode_result()
 {
@@ -1274,43 +1346,63 @@ void Preview::load_print_as_fff(bool keep_z_range)
     if (m_preview_gpu_loaded && !active_gcode_result()->gcode_object)
         m_preview_gpu_loaded = false;
     const bool gpu_holds_active = m_preview_gpu_loaded && m_preview_gpu_bed == active_bed;
-    const bool gcode_preview_data_valid = !active_gcode_result()->moves.empty() || gpu_holds_active;
+    // A slice in flight for this bed owns its result until it ends: its export writes the moves and its last step
+    // prepares the Preview from them. Meanwhile the Preview shows the pre-G-code view, and the slice's completion
+    // loads the result with that preparation.
+    const bool slice_owns_result = wxGetApp().is_editor() && m_process->in_flight() &&
+                                   m_process->get_gcode_result() == active_gcode_result();
+    const bool gcode_preview_data_valid = !slice_owns_result &&
+                                          (!active_gcode_result()->moves.empty() || gpu_holds_active);
     const bool is_pregcode_preview = !gcode_preview_data_valid && wxGetApp().is_editor();
 
     // This bed's moves were freed after an earlier upload and the GPU now holds another bed: the
     // G-code is still there, so re-run the export step to bring the preview data back.
-    if (!gcode_preview_data_valid && wxGetApp().is_editor() && active_gcode_result()->gcode_object)
+    if (!gcode_preview_data_valid && !slice_owns_result && wxGetApp().is_editor() &&
+        active_gcode_result()->gcode_object)
         wxGetApp().CallAfter([]() { wxGetApp().plater()->regenerate_active_preview_data(); });
 
-    const std::vector<std::string> tool_colors = wxGetApp().plater()->get_extruder_color_strings_from_plater_config(
-        active_gcode_result());
+    std::vector<std::string> tool_colors;
+    std::vector<std::string> color_print_colors;
+    get_color_strings(tool_colors, color_print_colors);
     const std::vector<CustomGCode::Item> &color_print_values =
         wxGetApp().is_editor() ? wxGetApp().plater()->model().custom_gcode_per_print_z().gcodes
                                : active_gcode_result()->custom_gcode_per_print_z;
 
-    // Color print: the filament colors, then the color changes.
-    std::vector<std::string> color_print_colors = wxGetApp().plater()->get_color_strings_for_color_print(
-        active_gcode_result());
-    if (!color_print_values.empty())
-        color_print_colors.push_back("#808080"); // gray color for pause print or custom G-code
-
     std::vector<double> zs;
+    // The Preview's work after a G-code load, timed from the load's return
+    std::optional<std::chrono::steady_clock::time_point> post_start;
 
     if (IsShown())
     {
         m_canvas->set_selected_extruder(0);
         if (gcode_preview_data_valid)
         {
+            // The slicing process's preparation of this result, or why there is none (the G-code viewer has no
+            // slicing thread)
+            std::string unprepared_reason = "G-code viewer";
+            std::shared_ptr<PreparedPreview> prepared;
+            if (wxGetApp().is_editor())
+                prepared = m_process->take_prepared_preview(unprepared_reason);
             // Load the real G-code preview.
-            m_canvas->load_gcode_preview(*active_gcode_result(), tool_colors, color_print_colors);
+            m_canvas->load_gcode_preview(*active_gcode_result(), tool_colors, color_print_colors, std::move(prepared),
+                                         unprepared_reason);
+            post_start = std::chrono::steady_clock::now();
             m_preview_gpu_bed = active_bed;
-            if (!m_preview_gpu_loaded)
+            if (!m_preview_gpu_loaded || m_preview_release_deferred)
             {
                 m_preview_gpu_loaded = true;
                 // With several beds every result must stay loadable for a bed switch, so the moves are
-                // kept; a single bed frees them, the GPU copy serves the preview.
-                if (s_multiple_beds.get_number_of_beds() <= 1)
-                    active_gcode_result()->release_preview_data();
+                // kept; a single bed frees them, the GPU copy serves the preview. A slice still in flight may be
+                // reading them in its Preview preparation: they are freed by the first load after it ends.
+                m_preview_release_deferred = m_process->in_flight();
+                if (s_multiple_beds.get_number_of_beds() <= 1 && !m_preview_release_deferred)
+                {
+                    const auto release_start = std::chrono::steady_clock::now();
+                    release_preview_data_async(*active_gcode_result());
+                    m_canvas->get_gcode_viewer().add_load_post_release_ms(
+                        std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - release_start)
+                            .count());
+                }
             }
             gcode_view_type = m_canvas->get_gcode_view_type();
             zs = m_canvas->get_gcode_layers_zs();
@@ -1358,6 +1450,10 @@ void Preview::load_print_as_fff(bool keep_z_range)
 
         // Don't trigger SP_COMPLETED here - this runs at start of reload_print (85%)
         // The actual completion happens in preFlight.GCodeViewer.cpp after rendering finishes (100%)
+
+        if (post_start)
+            m_canvas->get_gcode_viewer().finish_load_post(
+                std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - *post_start).count());
     }
 }
 

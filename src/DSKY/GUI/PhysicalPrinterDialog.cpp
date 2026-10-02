@@ -25,6 +25,7 @@
 #include <wx/clipbrd.h>
 
 #include "luminary/core/Prelude.hpp"
+#include "luminary/core/diagnostics/DebugCounters.hpp"
 #include "luminary/config/catalog/PrintConfig.hpp"
 #include "luminary/presets/bundle/PresetBundle.hpp"
 
@@ -217,7 +218,10 @@ bool save_secret(const std::string &id, const std::string &opt, const std::strin
     return false;
 #endif // wxUSE_SECRETSTORE
 }
-bool load_secret(const std::string &id, const std::string &opt, std::string &usr, std::string &psswd)
+} // namespace
+
+bool load_secret(const std::string &id, const std::string &opt, std::string &usr, std::string &psswd,
+                 bool report_errors)
 {
 #if wxUSE_SECRETSTORE
     wxSecretStore store = wxSecretStore::GetDefault();
@@ -227,7 +231,9 @@ bool load_secret(const std::string &id, const std::string &opt, std::string &usr
         std::string msg = DSKY::format("%1% (%2%).", _u8L("This system doesn't support storing passwords securely"),
                                        errmsg);
         BOOST_LOG_TRIVIAL(error) << msg;
-        show_error(nullptr, msg);
+        DBG_COUNT_LOAD("PRINTHOST_SECRET_LOAD_FAILED");
+        if (report_errors)
+            show_error(nullptr, msg);
         return false;
     }
     const wxString service = DSKY::format_wxstr(L"%1%/PhysicalPrinter/%2%/%3%", PREFLIGHT_APP_NAME, id, opt);
@@ -237,7 +243,9 @@ bool load_secret(const std::string &id, const std::string &opt, std::string &usr
     {
         std::string msg(_u8L("Failed to load credentials from the system password store."));
         BOOST_LOG_TRIVIAL(error) << msg;
-        show_error(nullptr, msg);
+        DBG_COUNT_LOAD("PRINTHOST_SECRET_LOAD_FAILED");
+        if (report_errors)
+            show_error(nullptr, msg);
         return false;
     }
     usr = into_u8(username);
@@ -245,10 +253,10 @@ bool load_secret(const std::string &id, const std::string &opt, std::string &usr
     return true;
 #else
     BOOST_LOG_TRIVIAL(error) << "wxUSE_SECRETSTORE not supported. Cannot load password from the system store.";
+    DBG_COUNT_LOAD("PRINTHOST_SECRET_LOAD_FAILED");
     return false;
 #endif // wxUSE_SECRETSTORE
 }
-} // namespace
 
 //------------------------------------------
 //          PhysicalPrinterDialog
@@ -301,25 +309,11 @@ PhysicalPrinterDialog::PhysicalPrinterDialog(wxWindow *parent, wxString printer_
         const std::set<std::string> &preset_names = printer->get_preset_names();
         for (const std::string &preset_name : preset_names)
             m_presets.emplace_back(new PresetForPrinter(this, preset_name));
-        // "stored" indicates data are stored secretly, load them from store.
-        if (m_printer.config.opt_string("printhost_password") == "stored" &&
-            m_printer.config.opt_string("printhost_password") == "stored")
-        {
-            std::string username;
-            std::string password;
-            if (load_secret(m_printer.name, "printhost_password", username, password))
-            {
-                if (!username.empty())
-                    m_printer.config.opt_string("printhost_user") = username;
-                if (!password.empty())
-                    m_printer.config.opt_string("printhost_password") = password;
-            }
-            else
-            {
-                m_printer.config.opt_string("printhost_user") = std::string();
-                m_printer.config.opt_string("printhost_password") = std::string();
-            }
-        }
+        // The dialog edits its own copy, so it shows the password the system store holds
+        const std::string printer_name = m_printer.name;
+        m_printer.config = PhysicalPrinter::with_stored_credentials(
+            m_printer.config, [&printer_name](std::string &user, std::string &password)
+            { return load_secret(printer_name, "printhost_password", user, password); });
     }
 
     if (m_presets.size() == 1)

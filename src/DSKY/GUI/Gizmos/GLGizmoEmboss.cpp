@@ -54,11 +54,7 @@
 #include <cereal/types/string.hpp>
 #include <cereal/archives/binary.hpp>
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 #include <chrono> // measure enumeration of fonts
 
 // uncomment for easier debug

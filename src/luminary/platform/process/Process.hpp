@@ -25,4 +25,8 @@ std::string header_gcodeviewer_generated();
 // getpid platform wrapper
 extern unsigned get_current_pid();
 
+// The process allocator as the Windows start-up shim reported it ("tbbmalloc" or a "crt:<reason>" token),
+// "crt:unreported" when no valid report exists, "system" on other platforms.
+std::string process_allocator();
+
 } // namespace Luminary

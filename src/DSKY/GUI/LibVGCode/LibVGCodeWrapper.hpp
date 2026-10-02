@@ -71,10 +71,12 @@ extern ETimeMode convert(const Luminary::PrintEstimatedStatistics::ETimeMode &mo
 // mapping from libvgcode::ETimeMode to Luminary::PrintEstimatedStatistics::ETimeMode
 extern Luminary::PrintEstimatedStatistics::ETimeMode convert(const ETimeMode &mode);
 
-// mapping from Luminary::GCodeProcessorResult to libvgcode::GCodeInputData
+// mapping from Luminary::GCodeProcessorResult to libvgcode::GCodeInputData. Reads only the result and the color
+// strings, so it may run on any thread that owns the result; progress_callback is called on the calling thread and
+// what it throws is passed on.
 extern GCodeInputData convert(const Luminary::GCodeProcessorResult &result,
                               const std::vector<std::string> &str_tool_colors,
-                              const std::vector<std::string> &str_color_print_colors, const Viewer &viewer,
+                              const std::vector<std::string> &str_color_print_colors,
                               std::function<void(float)> progress_callback = nullptr);
 
 // mapping from Luminary::Print to libvgcode::GCodeInputData
@@ -84,4 +86,3 @@ extern GCodeInputData convert(const Luminary::Print &print, const std::vector<st
                               size_t extruders_count);
 
 } // namespace libvgcode
-

@@ -9,15 +9,17 @@
 #include "Camera.hpp"
 #include "GLShader.hpp"
 #include "OpenGLManager.hpp"
+#include "RenderPassTimer.hpp"
+#include "luminary/core/diagnostics/DebugCounters.hpp"
 #include "luminary/presets/app_config/AppConfig.hpp"
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
+#include <algorithm>
 #include <array>
+#include <cmath>
+#include <cstdlib>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -35,12 +37,93 @@ static const Vec3d KEY_LIGHT_DIR_EYE = Vec3d(-0.4574957, 0.4574957, 0.7624929);
 static constexpr float AO_RADIUS = 14.0f;
 static constexpr float AO_BIAS = 0.8f;
 static constexpr float AO_INTENSITY = 1.0f;
-// 1 = full-resolution AO (sharper fine/inter-line occlusion), 2 = half resolution.
+// 1 = AO at the G-buffer resolution (sharper fine/inter-line occlusion), 2 = half resolution. The G-buffer is
+// at the output size, also under SSAA. At 1 the AO target and the G-buffer share a size, so the toolpath
+// normal's depth samples, a whole number of texels away, land on texel centres.
 static constexpr int AO_RESOLUTION_DIVISOR = 1;
+// Distance in output pixels (G-buffer texels) to each side at which the SSAO normal of toolpath pixels is rebuilt
+// from depth (safe 5 to 8, whole numbers): wide enough to span several layers, so the normal follows the wall, not
+// the bead ridges.
+static constexpr float AO_TOOLPATH_NORMAL_STEP_PX = 6.0f;
 
 // Material response of the Full tier composite.
 static constexpr float PBR_ROUGHNESS = 0.55f;
 static constexpr float PBR_METALLIC = 0.03f;
+
+// Target allocations read GL errors themselves: glsafe compiles out of release builds and, in debug
+// builds, would consume the error before the allocation could see it.
+
+// Clears errors left by earlier work, so the check after an allocation sees only its own.
+static void drain_gl_errors()
+{
+    for (int i = 0; i < 16 && ::glGetError() != GL_NO_ERROR; ++i)
+    {
+    }
+}
+
+// The first error raised since the last drain (GL_NO_ERROR when none), draining the rest.
+static GLenum take_gl_error()
+{
+    const GLenum error = ::glGetError();
+    if (error != GL_NO_ERROR)
+        drain_gl_errors();
+    return error;
+}
+
+static std::string size_text(int width, int height)
+{
+    return std::to_string(width) + "x" + std::to_string(height);
+}
+
+static std::string allocation_failure_reason(int width, int height, GLenum error, bool forced)
+{
+    std::string reason = "render target could not be created at " + size_text(width, height);
+    if (forced)
+        reason += " (forced by PREFLIGHT_RENDER_FAIL)";
+    else if (error == GL_OUT_OF_MEMORY)
+        reason += " (out of GPU memory)";
+    else if (error != GL_NO_ERROR)
+        reason += " (refused by the driver)";
+    else
+        reason += " (framebuffer incomplete)";
+    return reason;
+}
+
+// Largest render target per axis: the texture, renderbuffer and viewport limits together.
+static void query_target_limits(int &max_width, int &max_height)
+{
+    GLint max_texture = 0;
+    GLint max_renderbuffer = 0;
+    GLint max_viewport[2] = {0, 0};
+    glsafe(::glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_texture));
+    glsafe(::glGetIntegerv(GL_MAX_RENDERBUFFER_SIZE, &max_renderbuffer));
+    glsafe(::glGetIntegerv(GL_MAX_VIEWPORT_DIMS, max_viewport));
+    const int common = std::min(int(max_texture), int(max_renderbuffer));
+    max_width = std::min(common, int(max_viewport[0]));
+    max_height = std::min(common, int(max_viewport[1]));
+}
+
+#ifdef PREFLIGHT_TEST_HOOKS
+// PREFLIGHT_RENDER_FAIL=scene or gbuffer (comma separated for both) makes that target's allocation
+// fail, to exercise the failure path. Read once per session.
+static bool render_fail_forced(const std::string &target)
+{
+    static const std::string value = []()
+    {
+        const char *env = std::getenv("PREFLIGHT_RENDER_FAIL");
+        return env != nullptr ? std::string(env) : std::string();
+    }();
+    size_t start = 0;
+    while (start <= value.size())
+    {
+        const size_t end = std::min(value.find(',', start), value.size());
+        if (value.compare(start, end - start, target) == 0)
+            return true;
+        start = end + 1;
+    }
+    return false;
+}
+#endif // PREFLIGHT_TEST_HOOKS
 
 ScenePasses::~ScenePasses()
 {
@@ -52,28 +135,19 @@ bool ScenePasses::wants_full(const AppConfig *config)
     return config != nullptr && config->get("canvas_lighting_quality") == "full";
 }
 
-#if PREFLIGHT_OPENGL_ES
+void ScenePasses::release_targets()
+{
+    release();
+    m_alloc_failures = 0;
+    m_failed_width = m_failed_height = 0;
+    m_refused_width = m_refused_height = 0;
+    m_alloc_failure_reason.clear();
+}
 
-// The Full tier is desktop-GL only; ES builds keep the class inert.
-bool ScenePasses::capabilities_ok()
+void ScenePasses::set_ao_toolpath_normals(bool enabled)
 {
-    m_caps = ECaps::Unavailable;
-    return false;
+    m_ao_toolpath_normal_step = enabled ? AO_TOOLPATH_NORMAL_STEP_PX : 0.0f;
 }
-void ScenePasses::ensure_targets(int, int) {}
-void ScenePasses::release()
-{
-    m_active = false;
-}
-void ScenePasses::run(const GLVolumeCollection &, const Camera &, const Vec3d &, const std::function<void()> &, int,
-                      int, const ExtraCasters *)
-{
-    m_active = false;
-}
-void ScenePasses::bind_scene_uniforms(GLShaderProgram &) const {}
-void ScenePasses::render_bed_overlay(Bed3D &, const Camera &, const Vec3d &) {}
-
-#else
 
 bool ScenePasses::capabilities_ok()
 {
@@ -83,6 +157,7 @@ bool ScenePasses::capabilities_ok()
                   OpenGLManager::are_framebuffers_supported() && m_get_shader != nullptr;
         if (ok)
         {
+            query_target_limits(m_max_target_width, m_max_target_height);
             // A pass shader that failed to compile resolves to its fallback under a
             // different name; any such substitution disables the whole tier.
             for (const char *name :
@@ -92,6 +167,8 @@ bool ScenePasses::capabilities_ok()
                 if (shader == nullptr || shader->get_name() != name)
                 {
                     ok = false;
+                    m_missing_shader = name;
+                    DBG_COUNT_LOAD("RENDER_FULL_SHADER_FALLBACK");
                     break;
                 }
             }
@@ -101,84 +178,138 @@ bool ScenePasses::capabilities_ok()
     return m_caps == ECaps::Ok;
 }
 
-void ScenePasses::ensure_targets(int width, int height)
+size_t ScenePasses::bytes() const
 {
-    if (m_shadow_fbo == 0)
-    {
-        glsafe(::glGenTextures(1, &m_shadow_tex));
-        glsafe(::glBindTexture(GL_TEXTURE_2D, m_shadow_tex));
-        glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 0,
-                              GL_DEPTH_COMPONENT, GL_FLOAT, nullptr));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER));
-        const float border[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-        glsafe(::glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL));
+    size_t total = m_shadow_tex != 0 ? size_t(SHADOW_MAP_SIZE) * SHADOW_MAP_SIZE * 4 : 0;
+    // G-buffer normal (RGB10_A2) and 24-bit depth (stored as 4 bytes), and the two AO targets (R8)
+    if (m_gbuffer_fbo != 0)
+        total += size_t(m_width) * size_t(m_height) * (4 + 4) + size_t(m_ao_width) * size_t(m_ao_height) * 2;
+    return total;
+}
 
-        glsafe(::glGenFramebuffers(1, &m_shadow_fbo));
-        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_shadow_fbo));
-        glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_shadow_tex, 0));
-        glsafe(::glDrawBuffer(GL_NONE));
-        glsafe(::glReadBuffer(GL_NONE));
-        if (::glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+bool ScenePasses::ensure_targets(int width, int height)
+{
+    if (m_gbuffer_fbo != 0 && width == m_width && height == m_height)
+        return true;
+
+    // A size over the GPU's limits would give an incomplete framebuffer: refused before allocating
+    const bool shadow_fits = SHADOW_MAP_SIZE <= std::min(m_max_target_width, m_max_target_height);
+    if (!shadow_fits || width > m_max_target_width || height > m_max_target_height)
+    {
+        if (width != m_refused_width || height != m_refused_height)
         {
-            glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, 0));
-            release();
-            m_caps = ECaps::Unavailable;
-            return;
+            m_refused_width = width;
+            m_refused_height = height;
+            DBG_COUNT_LOAD("RENDER_FULL_TARGET_OVER_LIMIT");
         }
-        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, 0));
-        glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
+        m_inactive_reason = (shadow_fits ? "render target " + size_text(width, height)
+                                         : "shadow map " + size_text(SHADOW_MAP_SIZE, SHADOW_MAP_SIZE)) +
+                            " exceeds the GPU limit of " + size_text(m_max_target_width, m_max_target_height);
+        return false;
     }
 
-    if (width == m_width && height == m_height && m_gbuffer_fbo != 0)
-        return;
+    // A failed size is not retried; after MAX_ALLOC_FAILURES in a row new sizes are not either
+    if (m_alloc_failures >= MAX_ALLOC_FAILURES)
+    {
+        m_inactive_reason = m_alloc_failure_reason + ", stopped after " + std::to_string(MAX_ALLOC_FAILURES) +
+                            " failures";
+        return false;
+    }
+    if (m_alloc_failures > 0 && width == m_failed_width && height == m_failed_height)
+    {
+        m_inactive_reason = m_alloc_failure_reason;
+        return false;
+    }
+
+    bool forced = false;
+#ifdef PREFLIGHT_TEST_HOOKS
+    forced = render_fail_forced("gbuffer");
+#endif
+
+    const bool new_shadow = m_shadow_fbo == 0;
+    if (new_shadow)
+    {
+        glsafe(::glGenTextures(1, &m_shadow_tex));
+        glsafe(::glGenFramebuffers(1, &m_shadow_fbo));
+    }
+    if (m_gbuffer_fbo == 0)
+    {
+        glsafe(::glGenFramebuffers(1, &m_gbuffer_fbo));
+        glsafe(::glGenTextures(1, &m_gbuffer_tex));
+        glsafe(::glGenTextures(1, &m_gbuffer_depth_tex));
+        glsafe(::glGenFramebuffers(2, m_ao_fbo));
+        glsafe(::glGenTextures(2, m_ao_tex));
+    }
 
     m_width = width;
     m_height = height;
     m_ao_width = std::max(1, width / AO_RESOLUTION_DIVISOR);
     m_ao_height = std::max(1, height / AO_RESOLUTION_DIVISOR);
-    m_viewport_size = Vec2f(float(width), float(height));
 
-    if (m_gbuffer_fbo == 0)
+    drain_gl_errors();
+    GLenum error = GL_NO_ERROR;
+    bool complete = !forced;
+    if (complete && new_shadow)
     {
-        glsafe(::glGenFramebuffers(1, &m_gbuffer_fbo));
-        glsafe(::glGenTextures(1, &m_gbuffer_tex));
-        glsafe(::glGenRenderbuffers(1, &m_gbuffer_depth_rb));
-        glsafe(::glGenFramebuffers(2, m_ao_fbo));
-        glsafe(::glGenTextures(2, m_ao_tex));
+        ::glBindTexture(GL_TEXTURE_2D, m_shadow_tex);
+        ::glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, SHADOW_MAP_SIZE, SHADOW_MAP_SIZE, 0, GL_DEPTH_COMPONENT,
+                       GL_FLOAT, nullptr);
+        ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+        ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+        ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_BORDER);
+        ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_BORDER);
+        const float border[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        ::glTexParameterfv(GL_TEXTURE_2D, GL_TEXTURE_BORDER_COLOR, border);
+        ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_COMPARE_REF_TO_TEXTURE);
+        ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_FUNC, GL_LEQUAL);
+
+        ::glBindFramebuffer(GL_FRAMEBUFFER, m_shadow_fbo);
+        ::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_shadow_tex, 0);
+        ::glDrawBuffer(GL_NONE);
+        ::glReadBuffer(GL_NONE);
+        complete = ::glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+        error = take_gl_error();
+        complete = complete && error == GL_NO_ERROR;
     }
-
-    glsafe(::glBindTexture(GL_TEXTURE_2D, m_gbuffer_tex));
-    glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA32F, width, height, 0, GL_RGBA, GL_FLOAT, nullptr));
-    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
-    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
-    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
-    glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
-
-    glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, m_gbuffer_depth_rb));
-    glsafe(::glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height));
-    glsafe(::glBindRenderbuffer(GL_RENDERBUFFER, 0));
-
-    glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer_fbo));
-    glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_gbuffer_tex, 0));
-    glsafe(::glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_gbuffer_depth_rb));
-    bool complete = ::glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
-
-    for (int i = 0; i < 2 && complete; ++i)
+    if (complete)
     {
-        glsafe(::glBindTexture(GL_TEXTURE_2D, m_ao_tex[i]));
-        glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, m_ao_width, m_ao_height, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
-        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_ao_fbo[i]));
-        glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_ao_tex[i], 0));
-        complete &= ::glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+        // Eye-space normal mapped to [0, 1]; alpha marks geometry
+        ::glBindTexture(GL_TEXTURE_2D, m_gbuffer_tex);
+        ::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB10_A2, width, height, 0, GL_RGBA, GL_UNSIGNED_INT_2_10_10_10_REV,
+                       nullptr);
+        ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+        // The depth attachment, sampled by SSAO to rebuild eye-space positions
+        ::glBindTexture(GL_TEXTURE_2D, m_gbuffer_depth_tex);
+        ::glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0, GL_DEPTH_COMPONENT, GL_FLOAT, nullptr);
+        ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+        ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+        ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_COMPARE_MODE, GL_NONE);
+
+        ::glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer_fbo);
+        ::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_gbuffer_tex, 0);
+        ::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_gbuffer_depth_tex, 0);
+        complete = ::glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+
+        for (int i = 0; i < 2 && complete; ++i)
+        {
+            ::glBindTexture(GL_TEXTURE_2D, m_ao_tex[i]);
+            ::glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, m_ao_width, m_ao_height, 0, GL_RED, GL_UNSIGNED_BYTE, nullptr);
+            ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+            ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+            ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            ::glBindFramebuffer(GL_FRAMEBUFFER, m_ao_fbo[i]);
+            ::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_ao_tex[i], 0);
+            complete = ::glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+        }
+        error = take_gl_error();
+        complete = complete && error == GL_NO_ERROR;
     }
 
     glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, 0));
@@ -186,9 +317,18 @@ void ScenePasses::ensure_targets(int width, int height)
 
     if (!complete)
     {
+        // Allocation failure at this size: the tier stays available and retries at the next size
         release();
-        m_caps = ECaps::Unavailable;
+        ++m_alloc_failures;
+        m_failed_width = width;
+        m_failed_height = height;
+        m_alloc_failure_reason = allocation_failure_reason(width, height, error, forced);
+        m_inactive_reason = m_alloc_failure_reason;
+        DBG_COUNT_LOAD("RENDER_FULL_TARGET_FAILED");
+        return false;
     }
+    m_alloc_failures = 0;
+    return true;
 }
 
 void ScenePasses::release()
@@ -201,14 +341,14 @@ void ScenePasses::release()
         glsafe(::glDeleteFramebuffers(1, &m_gbuffer_fbo));
     if (m_gbuffer_tex != 0)
         glsafe(::glDeleteTextures(1, &m_gbuffer_tex));
-    if (m_gbuffer_depth_rb != 0)
-        glsafe(::glDeleteRenderbuffers(1, &m_gbuffer_depth_rb));
+    if (m_gbuffer_depth_tex != 0)
+        glsafe(::glDeleteTextures(1, &m_gbuffer_depth_tex));
     if (m_ao_fbo[0] != 0)
         glsafe(::glDeleteFramebuffers(2, m_ao_fbo));
     if (m_ao_tex[0] != 0)
         glsafe(::glDeleteTextures(2, m_ao_tex));
     m_shadow_fbo = m_shadow_tex = 0;
-    m_gbuffer_fbo = m_gbuffer_tex = m_gbuffer_depth_rb = 0;
+    m_gbuffer_fbo = m_gbuffer_tex = m_gbuffer_depth_tex = 0;
     m_ao_fbo[0] = m_ao_fbo[1] = 0;
     m_ao_tex[0] = m_ao_tex[1] = 0;
     m_width = m_height = 0;
@@ -225,19 +365,36 @@ static void render_volume_geometry(const GLVolume &volume)
 }
 
 void ScenePasses::run(const GLVolumeCollection &volumes, const Camera &camera, const Vec3d &active_bed_offset,
-                      const std::function<void()> &render_bed_geometry, int target_width, int target_height,
-                      const ExtraCasters *extra_casters)
+                      const std::function<void()> &render_bed_geometry, int target_x, int target_y, int target_width,
+                      int target_height, int pass_width, int pass_height, const ExtraCasters *extra_casters)
 {
     m_active = false;
+    m_inactive_reason.clear();
+    // The visible pass looks the AO up at (gl_FragCoord - origin) / size of the rect it draws into, so an inset
+    // viewport matches the origin-anchored AO target and a supersampled target reads the smaller AO texture.
+    m_viewport_origin = Vec2f(float(target_x), float(target_y));
+    m_viewport_size = Vec2f(float(target_width), float(target_height));
 
     const bool has_extra = extra_casters != nullptr && extra_casters->render != nullptr && extra_casters->bbox.defined;
-    if ((volumes.volumes.empty() && !has_extra) || !capabilities_ok())
+    if (volumes.volumes.empty() && !has_extra)
+    {
+        m_inactive_reason = "nothing to shade";
         return;
+    }
+    if (!capabilities_ok())
+    {
+        m_inactive_reason = m_missing_shader.empty() ? "not supported by this OpenGL driver"
+                                                     : "shader " + m_missing_shader + " failed to compile";
+        return;
+    }
 
-    const int width = target_width;
-    const int height = target_height;
-    if (width < 10 || height < 10)
+    const int width = pass_width;
+    const int height = pass_height;
+    if (width < 10 || height < 10 || target_width < 10 || target_height < 10)
+    {
+        m_inactive_reason = "viewport too small";
         return;
+    }
 
     // Shadow casters: active solids; modifiers stay out so they do not darken the
     // geometry they merely mark.
@@ -254,10 +411,12 @@ void ScenePasses::run(const GLVolumeCollection &volumes, const Camera &camera, c
     if (has_extra)
         casters_bb.merge(extra_casters->bbox);
     if ((casters.empty() && !has_extra) || !casters_bb.defined)
+    {
+        m_inactive_reason = "nothing to shade";
         return;
+    }
 
-    ensure_targets(width, height);
-    if (m_caps != ECaps::Ok)
+    if (!ensure_targets(width, height))
         return;
 
     // Key light matrices: orthographic frustum fit around the casters, from the
@@ -292,6 +451,8 @@ void ScenePasses::run(const GLVolumeCollection &volumes, const Camera &camera, c
     bias(0, 0) = bias(1, 1) = bias(2, 2) = 0.5;
     bias(0, 3) = bias(1, 3) = bias(2, 3) = 0.5;
     m_shadow_vp = bias * light_proj * light_view;
+    // The orthographic frustum spans 2 * radius over the map's texels
+    m_shadow_texel = float(2.0 * radius / double(SHADOW_MAP_SIZE));
 
     // Camera-anchored light: constant in eye space by construction.
     m_key_light_eye = KEY_LIGHT_DIR_EYE.normalized().cast<float>();
@@ -323,8 +484,10 @@ void ScenePasses::run(const GLVolumeCollection &volumes, const Camera &camera, c
     shadow_shader->stop_using();
     if (has_extra)
         extra_casters->render(light_view, light_proj, eye, false);
+    RENDER_PASS_MARK("full_shadow");
 
-    // Pass 2: eye-space normal and linear depth into the G-buffer, objects plus bed.
+    // Pass 2: eye-space normal into the G-buffer and depth into its sampled attachment, objects plus bed, at the
+    // pass size; the toolpath callback draws into this viewport too.
     const Transform3d &cam_view = camera.get_view_matrix();
     GLShaderProgram *gbuffer_shader = m_get_shader("gbuffer");
     glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_gbuffer_fbo));
@@ -356,8 +519,9 @@ void ScenePasses::run(const GLVolumeCollection &volumes, const Camera &camera, c
     if (render_bed_geometry)
         render_bed_geometry();
     gbuffer_bed_shader->stop_using();
+    RENDER_PASS_MARK("full_gbuffer");
 
-    // Pass 3: SSAO at half resolution, then a separable blur.
+    // Pass 3: SSAO at the AO target resolution, then a separable blur in the same viewport.
     if (!m_fs_quad.is_initialized())
     {
         GLModel::Geometry quad;
@@ -374,6 +538,9 @@ void ScenePasses::run(const GLVolumeCollection &volumes, const Camera &camera, c
     }
 
     glsafe(::glDisable(GL_DEPTH_TEST));
+    // Depth on unit 1 beside the normals on unit 0; unit 1 gets the shadow map back below
+    glsafe(::glActiveTexture(GL_TEXTURE1));
+    glsafe(::glBindTexture(GL_TEXTURE_2D, m_gbuffer_depth_tex));
     glsafe(::glActiveTexture(GL_TEXTURE0));
 
     GLShaderProgram *ssao_shader = m_get_shader("ssao");
@@ -382,13 +549,16 @@ void ScenePasses::run(const GLVolumeCollection &volumes, const Camera &camera, c
     glsafe(::glBindTexture(GL_TEXTURE_2D, m_gbuffer_tex));
     ssao_shader->start_using();
     ssao_shader->set_uniform("gbuffer_tex", 0);
+    ssao_shader->set_uniform("depth_tex", 1);
     ssao_shader->set_uniform("projection_matrix", camera.get_projection_matrix());
     ssao_shader->set_uniform("inv_projection_matrix", Matrix4d(camera.get_projection_matrix().matrix().inverse()));
     ssao_shader->set_uniform("ao_radius", AO_RADIUS);
     ssao_shader->set_uniform("ao_bias", AO_BIAS);
     ssao_shader->set_uniform("ao_intensity", AO_INTENSITY);
+    ssao_shader->set_uniform("ao_toolpath_normal_step", m_ao_toolpath_normal_step);
     m_fs_quad.render();
     ssao_shader->stop_using();
+    RENDER_PASS_MARK("full_ssao");
 
     GLShaderProgram *blur_shader = m_get_shader("ssao_blur");
     blur_shader->start_using();
@@ -404,6 +574,7 @@ void ScenePasses::run(const GLVolumeCollection &volumes, const Camera &camera, c
     blur_shader->set_uniform("blur_dir", Vec2f(0.0f, 1.0f / float(m_ao_height)));
     m_fs_quad.render();
     blur_shader->stop_using();
+    RENDER_PASS_MARK("full_blur");
 
     // Back to the default framebuffer; expose the results on fixed texture units.
     glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, 0));
@@ -430,6 +601,7 @@ void ScenePasses::bind_scene_uniforms(GLShaderProgram &shader) const
     shader.set_uniform("shadow_tex", 1);
     shader.set_uniform("ao_tex", 2);
     shader.set_uniform("viewport_size", m_viewport_size);
+    shader.set_uniform("viewport_origin", m_viewport_origin);
     shader.set_uniform("key_light_eye", m_key_light_eye);
     shader.set_uniform("pbr_roughness", PBR_ROUGHNESS);
     shader.set_uniform("pbr_metallic", PBR_METALLIC);
@@ -455,6 +627,7 @@ void ScenePasses::render_bed_overlay(Bed3D &bed, const Camera &camera, const Vec
     shader->set_uniform("shadow_tex", 1);
     shader->set_uniform("ao_tex", 2);
     shader->set_uniform("viewport_size", m_viewport_size);
+    shader->set_uniform("viewport_origin", m_viewport_origin);
 
     glsafe(::glEnable(GL_BLEND));
     glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
@@ -472,45 +645,32 @@ void ScenePasses::render_bed_overlay(Bed3D &bed, const Camera &camera, const Vec
     shader->stop_using();
 }
 
-#endif // PREFLIGHT_OPENGL_ES
-
 SceneSupersampler::~SceneSupersampler()
 {
     release();
 }
+
+#ifdef PREFLIGHT_TEST_HOOKS
+bool SceneSupersampler::s_test_force_offscreen = false;
+#endif
 
 double SceneSupersampler::requested_scale(const AppConfig *config)
 {
     if (config == nullptr)
         return 1.0;
     const std::string value = config->get("canvas_ssaa_scale");
-    if (value == "1.5")
-        return 1.5;
-    if (value == "2")
-        return 2.0;
-    return 1.0;
+    if (value.empty() || value == "off")
+        return 1.0;
+    // The dropdown writes 1.5 and 2; a larger value up to 4 renders the reference frames AA is measured against
+    char *end = nullptr;
+    const double scale = std::strtod(value.c_str(), &end);
+    if (end == value.c_str() || *end != '\0' || !(scale >= 1.0 && scale <= 4.0))
+    {
+        DBG_COUNT_LOAD("RENDER_SETTING_UNKNOWN_VALUE");
+        return 1.0;
+    }
+    return scale;
 }
-
-#if PREFLIGHT_OPENGL_ES
-
-bool SceneSupersampler::capabilities_ok()
-{
-    m_caps = ECaps::Unavailable;
-    return false;
-}
-void SceneSupersampler::release()
-{
-    m_active = false;
-}
-bool SceneSupersampler::begin(int, int, double, bool)
-{
-    m_active = false;
-    return false;
-}
-void SceneSupersampler::rebind() const {}
-void SceneSupersampler::end(int, int, int, int) {}
-
-#else
 
 bool SceneSupersampler::capabilities_ok()
 {
@@ -520,6 +680,7 @@ bool SceneSupersampler::capabilities_ok()
                   OpenGLManager::are_framebuffers_supported() && m_get_shader != nullptr;
         if (ok)
         {
+            query_target_limits(m_max_target_width, m_max_target_height);
             GLShaderProgram *shader = m_get_shader("ssaa_resolve");
             ok = shader != nullptr && shader->get_name() == "ssaa_resolve";
         }
@@ -534,72 +695,146 @@ void SceneSupersampler::release()
         glsafe(::glDeleteFramebuffers(1, &m_fbo));
     if (m_color_tex != 0)
         glsafe(::glDeleteTextures(1, &m_color_tex));
-    if (m_depth_tex != 0)
-        glsafe(::glDeleteTextures(1, &m_depth_tex));
-    m_fbo = m_color_tex = m_depth_tex = 0;
+    if (m_depth_rb != 0)
+        glsafe(::glDeleteRenderbuffers(1, &m_depth_rb));
+    m_fbo = m_color_tex = m_depth_rb = 0;
     m_width = m_height = 0;
     m_active = false;
 }
 
-bool SceneSupersampler::begin(int native_width, int native_height, double scale, bool force_offscreen)
+bool SceneSupersampler::begin(int native_width, int native_height, double scale)
 {
     m_active = false;
+    m_effective_scale = 1.0;
+    m_reason.clear();
 
-    if ((scale <= 1.0 && !force_offscreen) || native_width < 10 || native_height < 10 || !capabilities_ok())
+    bool force_offscreen = false;
+#ifdef PREFLIGHT_TEST_HOOKS
+    force_offscreen = s_test_force_offscreen;
+#endif
+    if (scale <= 1.0 && !force_offscreen)
+    {
+        // Supersampling is off: free the target, and let turning it on again retry failed allocations
+        release();
+        m_alloc_failures = 0;
+        m_capped_scale = 0.0;
         return false;
+    }
+    if (native_width < 10 || native_height < 10)
+        return false;
+    if (!capabilities_ok())
+    {
+        m_reason = "not supported by this OpenGL driver";
+        return false;
+    }
 
-    GLint max_tex_size = 0;
-    glsafe(::glGetIntegerv(GL_MAX_TEXTURE_SIZE, &max_tex_size));
-    const double max_scale = double(max_tex_size) / double(std::max(native_width, native_height));
+    // The largest scale the GPU's texture, renderbuffer and viewport limits allow on both axes
+    const double max_scale = std::min(double(m_max_target_width) / double(native_width),
+                                      double(m_max_target_height) / double(native_height));
     const double effective_scale = std::max(1.0, std::min(scale, max_scale));
+    if (effective_scale < scale)
+    {
+        m_reason = "limited by the GPU's maximum render target size of " +
+                   size_text(m_max_target_width, m_max_target_height);
+        if (effective_scale != m_capped_scale)
+        {
+            m_capped_scale = effective_scale;
+            DBG_COUNT_LOAD("RENDER_SSAA_SCALE_CAPPED");
+        }
+    }
+    else
+        m_capped_scale = 0.0;
     if (effective_scale < 1.05 && !force_offscreen)
         return false;
 
     const int width = int(std::lround(native_width * effective_scale));
     const int height = int(std::lround(native_height * effective_scale));
+    // Reached only by the forced offscreen path with a viewport already over the limits
+    if (width > m_max_target_width || height > m_max_target_height)
+    {
+        m_reason = "viewport " + size_text(native_width, native_height) + " exceeds the GPU limit of " +
+                   size_text(m_max_target_width, m_max_target_height);
+        return false;
+    }
+
+    // A new requested scale is a setting change: failed allocations are retried
+    if (m_alloc_failures > 0 && scale != m_failed_scale)
+        m_alloc_failures = 0;
 
     if (width != m_width || height != m_height || m_fbo == 0)
     {
+        // A failed size is not retried; after MAX_ALLOC_FAILURES in a row new sizes are not either
+        if (m_alloc_failures >= MAX_ALLOC_FAILURES)
+        {
+            m_reason = m_alloc_failure_reason + ", stopped after " + std::to_string(MAX_ALLOC_FAILURES) + " failures";
+            return false;
+        }
+        if (m_alloc_failures > 0 && width == m_failed_width && height == m_failed_height)
+        {
+            m_reason = m_alloc_failure_reason;
+            return false;
+        }
+
         if (m_fbo == 0)
         {
             glsafe(::glGenFramebuffers(1, &m_fbo));
             glsafe(::glGenTextures(1, &m_color_tex));
-            glsafe(::glGenTextures(1, &m_depth_tex));
+            glsafe(::glGenRenderbuffers(1, &m_depth_rb));
         }
         m_width = width;
         m_height = height;
 
-        glsafe(::glBindTexture(GL_TEXTURE_2D, m_color_tex));
-        glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
-
-        glsafe(::glBindTexture(GL_TEXTURE_2D, m_depth_tex));
-        glsafe(::glTexImage2D(GL_TEXTURE_2D, 0, GL_DEPTH_COMPONENT24, width, height, 0, GL_DEPTH_COMPONENT, GL_FLOAT,
-                              nullptr));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE));
-        glsafe(::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE));
-        glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
-
-        glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_fbo));
-        glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_color_tex, 0));
-        glsafe(::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_TEXTURE_2D, m_depth_tex, 0));
-        if (::glCheckFramebufferStatus(GL_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE)
+        bool forced = false;
+#ifdef PREFLIGHT_TEST_HOOKS
+        forced = render_fail_forced("scene");
+#endif
+        drain_gl_errors();
+        GLenum error = GL_NO_ERROR;
+        bool complete = !forced;
+        if (complete)
         {
+            ::glBindTexture(GL_TEXTURE_2D, m_color_tex);
+            ::glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+            // The resolve reads texels directly
+            ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+            ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+            ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+            ::glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+            ::glBindTexture(GL_TEXTURE_2D, 0);
+
+            // Depth serves the scene and the pivot read-back only, so it is never sampled
+            ::glBindRenderbuffer(GL_RENDERBUFFER, m_depth_rb);
+            ::glRenderbufferStorage(GL_RENDERBUFFER, GL_DEPTH_COMPONENT24, width, height);
+            ::glBindRenderbuffer(GL_RENDERBUFFER, 0);
+
+            ::glBindFramebuffer(GL_FRAMEBUFFER, m_fbo);
+            ::glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, m_color_tex, 0);
+            ::glFramebufferRenderbuffer(GL_FRAMEBUFFER, GL_DEPTH_ATTACHMENT, GL_RENDERBUFFER, m_depth_rb);
+            complete = ::glCheckFramebufferStatus(GL_FRAMEBUFFER) == GL_FRAMEBUFFER_COMPLETE;
+            error = take_gl_error();
+            complete = complete && error == GL_NO_ERROR;
+        }
+        if (!complete)
+        {
+            // Allocation failure at this size: supersampling stays available and retries at the next size
             glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, 0));
             release();
-            m_caps = ECaps::Unavailable;
+            ++m_alloc_failures;
+            m_failed_width = width;
+            m_failed_height = height;
+            m_failed_scale = scale;
+            m_alloc_failure_reason = allocation_failure_reason(width, height, error, forced);
+            m_reason = m_alloc_failure_reason;
+            DBG_COUNT_LOAD("RENDER_SSAA_TARGET_FAILED");
             return false;
         }
+        m_alloc_failures = 0;
     }
     else
         glsafe(::glBindFramebuffer(GL_FRAMEBUFFER, m_fbo));
 
     glsafe(::glViewport(0, 0, m_width, m_height));
+    m_effective_scale = effective_scale;
     m_active = true;
     return true;
 }
@@ -640,32 +875,30 @@ void SceneSupersampler::end(int native_x, int native_y, int native_width, int na
         m_fs_quad.init_from(std::move(quad));
     }
 
+    // Color only: nothing drawn after the resolve tests depth, so the quad neither tests nor writes it
     const bool blend_was_enabled = ::glIsEnabled(GL_BLEND) != GL_FALSE;
+    const bool depth_test_was_enabled = ::glIsEnabled(GL_DEPTH_TEST) != GL_FALSE;
+    GLboolean depth_mask_was = GL_TRUE;
+    glsafe(::glGetBooleanv(GL_DEPTH_WRITEMASK, &depth_mask_was));
     glsafe(::glDisable(GL_BLEND));
-    // Depth writes require an enabled depth test; ALWAYS makes the copy unconditional.
-    glsafe(::glEnable(GL_DEPTH_TEST));
-    glsafe(::glDepthFunc(GL_ALWAYS));
-    glsafe(::glDepthMask(GL_TRUE));
+    glsafe(::glDisable(GL_DEPTH_TEST));
+    glsafe(::glDepthMask(GL_FALSE));
 
     shader->start_using();
     shader->set_uniform("color_tex", 0);
-    shader->set_uniform("depth_tex", 1);
-    glsafe(::glActiveTexture(GL_TEXTURE1));
-    glsafe(::glBindTexture(GL_TEXTURE_2D, m_depth_tex));
+    shader->set_uniform("native_size", Vec2f(float(native_width), float(native_height)));
+    shader->set_uniform("native_origin", std::array<int, 2>{native_x, native_y});
     glsafe(::glActiveTexture(GL_TEXTURE0));
     glsafe(::glBindTexture(GL_TEXTURE_2D, m_color_tex));
     m_fs_quad.render();
     glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
-    glsafe(::glActiveTexture(GL_TEXTURE1));
-    glsafe(::glBindTexture(GL_TEXTURE_2D, 0));
-    glsafe(::glActiveTexture(GL_TEXTURE0));
     shader->stop_using();
 
-    glsafe(::glDepthFunc(GL_LESS));
+    glsafe(::glDepthMask(depth_mask_was));
+    if (depth_test_was_enabled)
+        glsafe(::glEnable(GL_DEPTH_TEST));
     if (blend_was_enabled)
         glsafe(::glEnable(GL_BLEND));
 }
-
-#endif // PREFLIGHT_OPENGL_ES
 
 } // namespace DSKY

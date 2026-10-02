@@ -19,6 +19,7 @@
 #include "luminary/gcode/writer/GCodeWriter.hpp"
 #include "PressureEqualizer.hpp"
 #include "luminary/core/Exception.hpp"
+#include "luminary/core/diagnostics/DebugCounters.hpp"
 
 namespace Luminary
 {
@@ -455,8 +456,10 @@ bool PressureEqualizer::process_line(const char *line, const char *line_end, GCo
                         diff[i] = new_pos[i] - m_current_pos[i];
                     // volumetric extrusion rate = A_filament * F_xyz * L_e / L_xyz [mm^3/min]
                     float len2 = diff[0] * diff[0] + diff[1] * diff[1] + diff[2] * diff[2];
-                    float rate = m_filament_crossections[m_current_extruder] * new_pos[4] *
-                                 sqrt((diff[3] * diff[3]) / len2);
+                    const float crossection =
+                        m_filament_crossections[m_current_extruder < m_filament_crossections.size() ? m_current_extruder
+                                                                                                    : 0];
+                    float rate = crossection * new_pos[4] * sqrt((diff[3] * diff[3]) / len2);
                     buf.volumetric_extrusion_rate = rate;
                     buf.volumetric_extrusion_rate_start = rate;
                     buf.volumetric_extrusion_rate_end = rate;
@@ -553,6 +556,10 @@ bool PressureEqualizer::process_line(const char *line, const char *line_end, GCo
             m_current_extruder = new_extruder;
             m_retracted = true;
             buf.type = GCODELINETYPE_TOOL_CHANGE;
+            // An extruder the config lists no filament diameter for takes the first one, as the rest of
+            // the G-code writer does (ConfigOptionVector::get_at)
+            if (m_current_extruder >= m_filament_crossections.size())
+                DBG_COUNT("PRESSURE_EQUALIZER_FILAMENT_DIAMETER_FALLBACK");
         }
         else
         {

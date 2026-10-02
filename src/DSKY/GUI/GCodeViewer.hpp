@@ -23,8 +23,11 @@
 
 #include <cstdint>
 #include <float.h>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <set>
+#include <string>
 #include <unordered_set>
 
 namespace Luminary
@@ -46,6 +49,37 @@ struct Camera;
 class GLCanvas3D;
 class ImGuiWrapper;
 class NotificationManager;
+
+// The CPU part of loading a G-code result into the Preview (GCodeViewer::prepare_preview()): the viewer's prepared
+// load, the centre of gravity sums and the path bounds, and the time of each part. It owns its data and holds nothing
+// of the result, so it outlives the result's moves. The slicing thread makes it as its run's last step and the
+// slicing process keeps it until the UI thread's load of that result takes it; one owner at a time.
+struct PreparedPreview
+{
+    // The G-code result and the bed it was prepared from; a load of another result or bed does not install it
+    unsigned int result_id{0};
+    int bed{-1};
+    libvgcode::PreparedLoad load;
+    // Mass times segment midpoint and mass, summed over the extrusions the centre of gravity weighs
+    Vec3d cog_position_sum{Vec3d::Zero()};
+    double cog_mass{0.0};
+    // The path bounds: every move in the G-code viewer, the extrusions of the printed roles in the editor
+    libvgcode::AABox bounding_box{};
+    float convert_ms{0.0f};
+    float cog_ms{0.0f};
+    float bounds_ms{0.0f};
+    // The wall time of the whole preparation
+    float prepare_ms{0.0f};
+};
+
+// The layer range calls since the last reset: their count, and in wall milliseconds the viewer's range call and the
+// host's moves slider update after it, without the viewer work that update starts (the viewer's own statistics hold it)
+struct LayersRangeTimes
+{
+    size_t calls{0};
+    double range_ms{0.0};
+    double moves_slider_ms{0.0};
+};
 
 class GCodeViewer
 {
@@ -94,6 +128,13 @@ class GCodeViewer
                 m_total_position += mass * 0.5 * (v1 + v2);
                 m_total_mass += mass;
             }
+        }
+
+        // The sums add_segment() builds, summed by a load's preparation
+        void set_totals(const Vec3d &total_position, double total_mass)
+        {
+            m_total_position = total_position;
+            m_total_mass = total_mass;
         }
 
         Vec3d cog() const { return (m_total_mass > 0.0) ? (Vec3d) (m_total_position / m_total_mass) : Vec3d::Zero(); }
@@ -285,6 +326,8 @@ std::function<int()> m_em_unit;
 std::function<GLShaderProgram *(const std::string &)> m_get_shader;
 std::function<GLShaderProgram *()> m_get_current_shader;
 bool m_gl_data_initialized{false};
+// The toolpath prefilter program's build failure has been counted and logged
+bool m_prefilter_failure_reported{false};
 unsigned int m_last_result_id{0};
 // bounding box of toolpaths
 BoundingBoxf3 m_paths_bounding_box;
@@ -376,6 +419,14 @@ GCodeProcessorResult::RoleMetrics m_overall_metrics{};
 
 libvgcode::Viewer m_viewer;
 bool m_loaded_as_preview{false};
+// The phases of the last G-code load; a call with an unchanged result leaves it as it was
+libvgcode::LoadPhaseStats m_load_stats;
+// A G-code load installed toolpaths: the Preview's work after it and its first frame drawing them are still to be
+// timed
+bool m_load_post_pending{false};
+bool m_first_frame_pending{false};
+// The layer range calls since the last reset_layers_range_times()
+LayersRangeTimes m_layers_range_times;
 
 public:
 GCodeViewer();
@@ -487,10 +538,40 @@ GLShaderProgram *get_current_shader() const
 
 void init();
 
-// extract rendering data from the given parameters
+// extract rendering data from the given parameters. A preparation of this result and the active bed made on the
+// slicing thread is installed; any other is discarded and the load prepares on the UI thread, recording why (the
+// reason given when there is none).
 void load_as_gcode(const GCodeProcessorResult &gcode_result, const Print &print,
                    const std::vector<std::string> &str_tool_colors,
-                   const std::vector<std::string> &str_color_print_colors);
+                   const std::vector<std::string> &str_color_print_colors,
+                   std::shared_ptr<PreparedPreview> prepared = nullptr,
+                   const std::string &unprepared_reason = std::string());
+// The CPU part of load_as_gcode() for the given result and bed, on any thread that owns the result: its conversion,
+// the viewer's preparation (with the settings get_prepare_settings() took on the UI thread), the centre of gravity
+// and the path bounds (every move when whole_bounding_box, as the G-code viewer frames them, else the printed
+// extrusions). Touches no GCodeViewer, GL or wx state. `progress` gets the fraction done in [0, 1] (1 at the end);
+// `canceled`, when set, is polled at every progress report and CanceledException thrown when it returns true.
+static PreparedPreview prepare_preview(const GCodeProcessorResult &gcode_result, int bed, bool whole_bounding_box,
+                                       const libvgcode::PrepareSettings &settings,
+                                       const std::function<void(float)> &progress,
+                                       const std::function<bool()> &canceled);
+// The viewer settings a preparation reads, on the UI thread
+libvgcode::PrepareSettings get_prepare_settings() const;
+// The view settings the next G-code load installs with, on the UI thread: the viewer's own with what load_as_gcode()
+// and GLCanvas3D::load_gcode_preview() set before the install (the top layer only range, the legend's option toggles
+// from the app config, the default extrusion role colors, no clipping plane, the cached view type) and the palettes of
+// the given color strings
+libvgcode::ViewSettings get_load_view_settings(const std::vector<std::string> &str_tool_colors,
+                                               const std::vector<std::string> &str_color_print_colors) const;
+// The Preview's work after a load that installed toolpaths (sliders, layer range), in ms; after a reload of an
+// unchanged result it does nothing
+void finish_load_post(float post_ms);
+// The UI thread's part of releasing the loaded result's moves, in ms, while the load's post work is timed
+void add_load_post_release_ms(float ms)
+{
+    if (m_load_post_pending)
+        m_load_stats.post_release_ms += ms;
+}
 void load_as_preview(libvgcode::GCodeInputData &&data);
 void update_shells_color_by_extruder(const DynamicPrintConfig *config);
 
@@ -499,10 +580,204 @@ void render();
 
 // Scene passes (Full lighting tier). Toolpath vertices are bed-local, so these
 // fold the active bed translation into the matrices they hand to the viewer.
-void set_scene_pass_params(bool enabled, const Matrix4d &shadow_vp_world, unsigned int shadow_tex_id,
-                           unsigned int ao_tex_id, const Vec2f &viewport_size);
+// shadow_texel is the world size (mm) of one shadow-map texel.
+void set_scene_pass_params(bool enabled, const Matrix4d &shadow_vp_world, float shadow_texel,
+                           unsigned int shadow_tex_id, unsigned int ao_tex_id, const Vec2f &viewport_size,
+                           const Vec2f &viewport_origin);
 void render_segments_for_pass(const Matrix4d &view_world, const Matrix4d &projection, const Vec3d &camera_pos_world,
                               bool gbuffer);
+// Per-sample shading of the toolpaths on multisampled targets
+bool get_sample_shading() const
+{
+    return m_viewer.get_sample_shading();
+}
+void set_sample_shading(bool enable)
+{
+    m_viewer.set_sample_shading(enable);
+}
+bool is_sample_shading_active() const
+{
+    return m_viewer.is_sample_shading_active();
+}
+bool is_sample_shading_gated() const
+{
+    return m_viewer.is_sample_shading_gated();
+}
+const std::string &get_sample_shading_reason() const
+{
+    return m_viewer.get_sample_shading_reason();
+}
+// Screen-space prefilter of the wall shading of perimeters seen near level, or from above up to steep views where
+// the load found the next layer, and the supersampling scale its output-pixel widths are converted with
+void set_toolpath_prefilter(bool enable)
+{
+    m_viewer.set_toolpath_prefilter(enable);
+}
+void set_output_pixel_scale(float scale)
+{
+    m_viewer.set_output_pixel_scale(scale);
+}
+// Whether the last toolpath draw used the prefilter, and why not when it did not
+bool is_toolpath_prefilter_active() const
+{
+    return m_viewer.is_toolpath_prefilter_active();
+}
+const std::string &get_toolpath_prefilter_reason() const
+{
+    return m_viewer.get_toolpath_prefilter_reason();
+}
+// The prefilter's load-time neighbour search of wall vertices: its counts and time, and the offset to the bead above
+// and the flags of each vertex (indexed like the vertices; empty before a load, and after one unless kept)
+const libvgcode::PrefilterNeighbourStats &get_prefilter_neighbour_stats() const
+{
+    return m_viewer.get_prefilter_neighbour_stats();
+}
+#ifdef PREFLIGHT_TEST_HOOKS
+// Every load keeps the prefilter's per-vertex neighbour data, which a render capture's pfdump reads
+static bool s_test_keep_prefilter_neighbours;
+#endif
+const std::vector<float> &get_prefilter_offsets_x() const
+{
+    return m_viewer.get_prefilter_offsets_x();
+}
+const std::vector<float> &get_prefilter_offsets_y() const
+{
+    return m_viewer.get_prefilter_offsets_y();
+}
+const std::vector<uint8_t> &get_prefilter_flags() const
+{
+    return m_viewer.get_prefilter_flags();
+}
+// Sealed bead culling of the beads that cannot be seen from outside the print, and the statistics of its load-time
+// pass and of the last enabled segment list
+void set_sealed_bead_culling(bool enable)
+{
+    m_viewer.set_sealed_bead_culling(enable);
+}
+bool get_sealed_bead_culling() const
+{
+    return m_viewer.get_sealed_bead_culling();
+}
+const libvgcode::SealedBeadStats &get_sealed_bead_stats() const
+{
+    return m_viewer.get_sealed_bead_stats();
+}
+// Per-frame chunk culling of the enabled segments (view frustum), and the statistics of its chunk set and last
+// selection
+void set_chunk_culling(bool enable)
+{
+    m_viewer.set_chunk_culling(enable);
+}
+bool get_chunk_culling() const
+{
+    return m_viewer.get_chunk_culling();
+}
+const libvgcode::ViewChunkStats &get_view_chunk_stats() const
+{
+    return m_viewer.get_view_chunk_stats();
+}
+// The chunk structure of the whole print, built at load and filtered by the view settings: its statistics
+const libvgcode::PrintChunkStats &get_print_chunk_stats() const
+{
+    return m_viewer.get_print_chunk_stats();
+}
+// Occlusion culling of the toolpaths against each view's own depth (off by default), and the statistics of its last
+// passes
+void set_occlusion_culling(bool enable)
+{
+    m_viewer.set_occlusion_culling(enable);
+}
+bool get_occlusion_culling() const
+{
+    return m_viewer.get_occlusion_culling();
+}
+// The most segments of the last draw set (nearest first) the occlusion step draws as its first occluders (0: all)
+void set_occlusion_occluder_cap(size_t segments)
+{
+    m_viewer.set_occlusion_occluder_cap(segments);
+}
+size_t get_occlusion_occluder_cap() const
+{
+    return m_viewer.get_occlusion_occluder_cap();
+}
+// The most enabled segments the shadow pass draws whole, with no occlusion step (0: never)
+void set_occlusion_shadow_all_max(size_t segments)
+{
+    m_viewer.set_occlusion_shadow_all_max(segments);
+}
+size_t get_occlusion_shadow_all_max() const
+{
+    return m_viewer.get_occlusion_shadow_all_max();
+}
+// Whether the shadow pass merges its occlusion step's depth into the map and draws only the residual (on by default)
+void set_occlusion_shadow_merge(bool merge)
+{
+    m_viewer.set_occlusion_shadow_merge(merge);
+}
+bool get_occlusion_shadow_merge() const
+{
+    return m_viewer.get_occlusion_shadow_merge();
+}
+const libvgcode::OcclusionStats &get_occlusion_stats() const
+{
+    return m_viewer.get_occlusion_stats();
+}
+// Starts the accumulation of the occlusion step's timings over again
+void reset_occlusion_bench()
+{
+    m_viewer.reset_occlusion_bench();
+}
+// The viewer's work for the view updates (layer and moves range, visible types) since the last reset, by part
+const libvgcode::ViewUpdateStats &get_view_update_stats() const
+{
+    return m_viewer.get_view_update_stats();
+}
+void reset_view_update_stats()
+{
+    m_viewer.reset_view_update_stats();
+}
+// The viewer's list uploads whose buffer did not take the data since the load, the rebuilds made for them and why
+const libvgcode::ListUploadStats &get_list_upload_stats() const
+{
+    return m_viewer.get_list_upload_stats();
+}
+// The layer range calls since the last reset, timed by part
+const LayersRangeTimes &get_layers_range_times() const
+{
+    return m_layers_range_times;
+}
+void reset_layers_range_times()
+{
+    m_layers_range_times = LayersRangeTimes();
+}
+#ifdef PREFLIGHT_TEST_HOOKS
+// A render capture's visibility probe: the next visible pass compared with what its camera sees, and that comparison
+// with its per-pixel classes
+void request_visibility_probe()
+{
+    m_viewer.request_visibility_probe();
+}
+const libvgcode::VisibilityProbeStats &get_visibility_probe_stats() const
+{
+    return m_viewer.get_visibility_probe_stats();
+}
+const std::vector<uint8_t> &get_visibility_probe_mask() const
+{
+    return m_viewer.get_visibility_probe_mask();
+}
+// A render capture's hidden feature types: the roles in `hidden` hidden and every other one shown, each role that
+// changes toggled as a click on its legend row toggles it (the next render rebuilds the enabled list)
+void test_set_hidden_extrusion_roles(const std::set<libvgcode::EGCodeExtrusionRole> &hidden);
+bool is_extrusion_role_visible(libvgcode::EGCodeExtrusionRole role) const
+{
+    return m_viewer.is_extrusion_role_visible(role);
+}
+#endif
+// The wall times of the last G-code load's phases, its vertices and the bytes it uploaded
+const libvgcode::LoadPhaseStats &get_load_phase_stats() const
+{
+    return m_load_stats;
+}
 #if VGCODE_ENABLE_COG_AND_TOOL_MARKERS
 void render_cog()
 {
@@ -747,6 +1022,9 @@ void set_cog_marker_scale_factor(float factor)
 #endif // VGCODE_ENABLE_COG_AND_TOOL_MARKERS
 
 private:
+// Makes the canvas's GL context current for the viewer calls that upload or free GPU data outside a frame: the
+// context is released when the window is deactivated and after a drag. False when it could not be made current.
+bool gl_current();
 void load_wipetower_shell(const Print &print);
 void render_toolpaths();
 void render_shells();

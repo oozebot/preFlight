@@ -46,6 +46,8 @@ set(LUMINARY_SOURCES
     core/text/Duration.cpp
     core/text/Encoding.hpp
     core/text/Encoding.cpp
+    core/text/Json.hpp
+    core/text/Json.cpp
     "${CMAKE_CURRENT_BINARY_DIR}/PreFlightVersion.h"
 
     # platform
@@ -379,13 +381,15 @@ set(LUMINARY_SOURCES
     walls/fuzzy_skin/NoiseGenerator.hpp
     walls/perimeter/PerimeterGenerator.hpp
     walls/perimeter/PerimeterGenerator.cpp
+    walls/perimeter/VaseWall.hpp
+    walls/perimeter/VaseWall.cpp
     walls/precise/PreciseWalls.hpp
     walls/precise/PreciseWalls.cpp
     walls/segmentation/LineSegmentation.hpp
     walls/segmentation/LineSegmentation.cpp
     walls/serpentine/Serpentine.hpp
     walls/serpentine/Serpentine.cpp
-    # The whole module, 89 files: both wall generators, the perimeter driver that chooses between
+    # The whole module, 91 files: both wall generators, the perimeter driver that chooses between
     # them, and the three features built on that driver. The two engines are laid out under
     # identical subdirectory names so they can be diffed directory by directory, each whole and with
     # its own types.
@@ -679,6 +683,7 @@ set(LUMINARY_SOURCES
     format/svg/SVG.cpp
     format/threemf/3mf.hpp
     format/threemf/3mf.cpp
+    format/threemf/ThreeMfAuxParts.hpp
     # The file readers and writers that fill the model and serialise it back. reader is the single
     # entry point every consumer calls to open a file; threemf is the project archive, read on open
     # and written on save; mesh holds the three geometry formats and the OBJ text parser; svg is the

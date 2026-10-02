@@ -190,12 +190,31 @@ void CustomMenuMouseFilter::Uninstall()
 
 int CustomMenuMouseFilter::FilterEvent(wxEvent &event)
 {
-    // Only handle left mouse button down events for menu interaction
     wxEventType type = event.GetEventType();
+    // A menu item acts on the release, as a native menu's does: the press only marks it, so the menu
+    // never closes while the button is still held over whatever lies under it (a held button there
+    // drags the 3D view's camera, and a release there clicks a sidebar section header)
+    if (type == wxEVT_LEFT_UP)
+    {
+        const bool pressed_in_menu = m_left_pressed_in_menu;
+        m_left_pressed_in_menu = false;
+        auto activeMenu = CustomMenu::s_activeContextMenu.lock();
+        const wxPoint screenPt = wxGetMousePosition();
+        if (activeMenu && activeMenu->IsShown() && CustomMenu::ActiveMenuContainsPoint(screenPt))
+        {
+            CustomMenu::HandleClickInMenuHierarchy(screenPt, true);
+            return Event_Processed;
+        }
+        // The release of a press the menu took belongs to the menu, wherever it lands
+        return pressed_in_menu ? Event_Processed : Event_Skip;
+    }
+    // Only handle left mouse button down events for menu interaction
     if (type != wxEVT_LEFT_DOWN && type != wxEVT_RIGHT_DOWN && type != wxEVT_MIDDLE_DOWN)
     {
         return Event_Skip; // Let other handlers process
     }
+    // A new press: a release that never came (let go outside the application) is not waited for
+    m_left_pressed_in_menu = false;
 
     // Check if there's an active context menu
     auto activeMenu = CustomMenu::s_activeContextMenu.lock();
@@ -231,8 +250,10 @@ int CustomMenuMouseFilter::FilterEvent(wxEvent &event)
     // Click is inside menu hierarchy - handle it directly since popup doesn't receive mouse events
     if (type == wxEVT_LEFT_DOWN)
     {
-        // Find which menu in the hierarchy contains this point and handle the click
-        CustomMenu::HandleClickInMenuHierarchy(screenPt);
+        // The press marks the item under it (a submenu item opens its submenu at once); the release
+        // acts on it
+        CustomMenu::HandleClickInMenuHierarchy(screenPt, false);
+        m_left_pressed_in_menu = true;
         // Return Event_Processed to prevent wxPopupTransientWindow from dismissing submenus
         return Event_Processed;
     }
@@ -356,7 +377,7 @@ bool CustomMenu::ActiveMenuContainsPoint(const wxPoint &screenPt)
     return false;
 }
 
-void CustomMenu::HandleClickInMenuHierarchy(const wxPoint &screenPt)
+void CustomMenu::HandleClickInMenuHierarchy(const wxPoint &screenPt, bool release)
 {
     auto activeMenu = s_activeContextMenu.lock();
     if (!activeMenu)
@@ -400,15 +421,17 @@ void CustomMenu::HandleClickInMenuHierarchy(const wxPoint &screenPt)
     // Handle the click
     if (targetMenu->m_items[index].submenu && targetMenu->m_items[index].enabled)
     {
-        // Submenu item - open it immediately
+        // Submenu item - open it on the press; the release leaves it open
+        if (release)
+            return;
         targetMenu->StopSubmenuTimer();
         targetMenu->m_pendingSubmenuIndex = -1;
         targetMenu->m_submenuClickLock = true; // Prevent close timer after click
         targetMenu->OpenSubmenu(index);
     }
-    else if (targetMenu->m_items[index].enabled && !targetMenu->m_items[index].isSeparator)
+    else if (release && targetMenu->m_items[index].enabled && !targetMenu->m_items[index].isSeparator)
     {
-        // Regular item - activate it
+        // Regular item - activate it on the release
         targetMenu->ActivateItem(index);
     }
 }
@@ -532,6 +555,26 @@ void CustomMenu::SetCallback(int id, std::function<void()> callback)
     if (auto *item = FindItemById(id))
     {
         item->callback = std::move(callback);
+    }
+}
+
+void CustomMenu::RefreshFromSource()
+{
+    if (m_sourceMenu == nullptr)
+        return;
+    // The items' conditions are the wxEVT_UPDATE_UI handlers bound where the items were appended;
+    // UpdateUI asks them and stores the answers on the wxMenu's items
+    m_sourceMenu->UpdateUI(m_updateHandler);
+    for (CustomMenuItem &item : m_items)
+    {
+        if (item.isSeparator)
+            continue;
+        if (const wxMenuItem *source = m_sourceMenu->FindItem(item.id))
+        {
+            item.enabled = source->IsEnabled();
+            if (item.checkable)
+                item.checked = source->IsChecked();
+        }
     }
 }
 
@@ -762,6 +805,7 @@ void CustomMenu::ShowAt(const wxPoint &pos, wxWindow *parent)
     // in measurements based on the wrong DPI.
     SetPosition(pos);
 
+    RefreshFromSource();
     CalculateSize();
 
     // Adjust position to stay on screen
@@ -884,6 +928,8 @@ std::shared_ptr<CustomMenu> CustomMenu::FromWxMenu(wxMenu *menu, wxWindow *event
     // make_shared embeds object in control block, but wxWidgets calls delete directly
     // on child windows, which corrupts heap when used with make_shared allocation
     auto customMenu = std::shared_ptr<CustomMenu>(new CustomMenu());
+    customMenu->m_sourceMenu = menu;
+    customMenu->m_updateHandler = eventHandler;
 
     size_t count = menu->GetMenuItemCount();
     for (size_t i = 0; i < count; ++i)
@@ -1667,6 +1713,7 @@ void CustomMenu::OpenSubmenu(int itemIndex)
         item.submenu->Create(this);
 
     // Calculate size after window is created
+    item.submenu->RefreshFromSource();
     item.submenu->CalculateSize();
 
     // Position submenu to the right of this item with a small gap (scaled)

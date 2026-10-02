@@ -28,9 +28,15 @@ endif()
 
 project(preFlight)
 
+# The deps prefix can hold both Debug and Release variants of a package. Without a mapping CMake
+# resolves a RelWithDebInfo or MinSizeRel link to whichever variant the package config lists
+# first, which can be a debug-CRT library inside a release-CRT process. The trailing empty entry
+# keeps packages that ship a single variant resolvable.
+set(CMAKE_MAP_IMPORTED_CONFIG_RELWITHDEBINFO "RelWithDebInfo;Release;")
+set(CMAKE_MAP_IMPORTED_CONFIG_MINSIZEREL "MinSizeRel;Release;")
+
 include("version.inc")
 include(GNUInstallDirs)
-include(CMakeDependentOption)
 
 set(PREFLIGHT_RESOURCES_DIR "${CMAKE_CURRENT_SOURCE_DIR}/resources")
 file(TO_NATIVE_PATH "${PREFLIGHT_RESOURCES_DIR}" PREFLIGHT_RESOURCES_DIR_WIN)
@@ -60,19 +66,18 @@ option(PREFLIGHT_UBSAN             "Enable UBSan on Clang and GCC" 0)
 option(PREFLIGHT_ENABLE_FORMAT_STEP "Enable compilation of STEP file support" ON)
 option(PREFLIGHT_LOG_TO_FILE       "Enable logging into file")
 option(PREFLIGHT_BUILD_TESTS       "Build the in-process unit test suite (tests/unit, Catch2)" OFF)
+option(PREFLIGHT_TEST_HOOKS        "Compile the environment-driven test hooks (build.sh -debug)" OFF)
 option(PREFLIGHT_REPO_URL          "Preset repo URL")
 # Legacy Clipper 6.4.2 support has been removed
-
-# PREFLIGHT_OPENGL_ES can be enabled only if PREFLIGHT_GUI is enabled.
-CMAKE_DEPENDENT_OPTION(PREFLIGHT_OPENGL_ES "Compile preFlight targeting OpenGL ES" OFF "PREFLIGHT_GUI" OFF)
 
 # Desktop integration: when ON, the app can prompt the user to create .desktop files and icons at runtime.
 # The upstream logic forced this OFF for FHS builds, but preFlight needs it ON for Flatpak.
 option(PREFLIGHT_DESKTOP_INTEGRATION "Allow performing desktop integration during runtime" ON)
 option(PREFLIGHT_PYTHON_PREPROCESSOR "Enable Python pre-processor scripting via embedded interpreter" ON)
-# Replaces the process-wide malloc/free with TBB's scalable allocator at load time.
-# Requires the deps-built shared tbbmalloc.dll + tbbmalloc_proxy.dll (deps/+TBBMallocProxy),
-# deployed next to the executables. Windows-only; measured 10-17% faster slicing.
+# Replaces the process-wide malloc/free with TBB's scalable allocator at start-up.
+# Uses the deps-built shared tbbmalloc.dll + tbbmalloc_proxy.dll (deps/+TBBMallocProxy),
+# deployed next to the executables; a process that cannot load them keeps the C runtime
+# allocator. Windows-only; measured 10-17% faster slicing.
 # oneTBB does not build tbbmalloc_proxy for Windows ARM64, so that target keeps the CRT allocator.
 if (WIN32 AND NOT CMAKE_CXX_COMPILER_ARCHITECTURE_ID MATCHES "ARM64")
     set(_tbbmalloc_proxy_default ON)
@@ -132,12 +137,14 @@ if (PREFLIGHT_GUI)
     add_definitions(-DPREFLIGHT_GUI)
 endif ()
 
-if (PREFLIGHT_OPENGL_ES)
-    add_definitions(-DPREFLIGHT_OPENGL_ES)
-endif()
-
 if(PREFLIGHT_DESKTOP_INTEGRATION)
     add_definitions(-DPREFLIGHT_DESKTOP_INTEGRATION)
+endif ()
+
+# The test hooks (GUI automation, the dialog auto-answer, setting overrides from the environment) are
+# compiled into debug builds only; a release build carries none of them
+if (PREFLIGHT_TEST_HOOKS)
+    add_definitions(-DPREFLIGHT_TEST_HOOKS)
 endif ()
 
 if (MSVC AND CMAKE_CXX_COMPILER_ID STREQUAL Clang)

@@ -12,11 +12,7 @@
 #include "DSKY/GUI/EventTypes.hpp"
 #include "luminary/core/text/Encoding.hpp"
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 #include "DSKY/GUI/EventBridge.hpp"
 

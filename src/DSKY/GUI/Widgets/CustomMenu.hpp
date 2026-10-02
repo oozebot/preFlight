@@ -36,6 +36,8 @@ private:
     CustomMenuMouseFilter() = default;
     static CustomMenuMouseFilter *s_instance;
     static int s_refCount;
+    // The last left press was inside a menu and consumed there: its release is the menu's too
+    bool m_left_pressed_in_menu{false};
 };
 
 // ============================================================================
@@ -148,8 +150,10 @@ public:
     // Check if the active context menu (or its submenus) contains the point
     static bool ActiveMenuContainsPoint(const wxPoint &screenPt);
 
-    // Handle a click inside the menu hierarchy (called from mouse filter since popup doesn't receive clicks)
-    static void HandleClickInMenuHierarchy(const wxPoint &screenPt);
+    // Handle a press or release inside the menu hierarchy (called from mouse filter since popup doesn't
+    // receive clicks): a press marks the item and opens a submenu item's submenu, a release activates a
+    // regular item
+    static void HandleClickInMenuHierarchy(const wxPoint &screenPt, bool release);
 
 protected:
     void OnDismiss() override;
@@ -208,6 +212,12 @@ private:
     int m_hoverIndex{-1};
     int m_selectedId{-1};
     wxWindow *m_eventHandler{nullptr};
+
+    // The wxMenu a FromWxMenu menu was built from and the window its items' update handlers are
+    // bound on: every show asks them again what is enabled and checked, as a native menu does
+    wxMenu *m_sourceMenu{nullptr};
+    wxWindow *m_updateHandler{nullptr};
+    void RefreshFromSource();
 
     // Layout metrics (base values at 100% DPI)
     int m_itemHeight{0};

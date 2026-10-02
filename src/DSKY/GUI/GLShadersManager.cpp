@@ -8,9 +8,8 @@
 #include "GLShadersManager.hpp"
 #include "3DScene.hpp"
 #include "GUI_App.hpp"
-#if !PREFLIGHT_OPENGL_ES
+#include "RenderDiagnostics.hpp"
 #include "OpenGLManager.hpp"
-#endif // !PREFLIGHT_OPENGL_ES
 
 #include <cassert>
 #include <algorithm>
@@ -19,11 +18,7 @@
 #include <boost/log/trivial.hpp>
 using namespace std::literals;
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 namespace Luminary
 {
@@ -50,13 +45,7 @@ std::pair<bool, std::string> GLShadersManager::init(bool compile_phong_shaders, 
 
     bool valid = true;
 
-#if PREFLIGHT_OPENGL_ES
-    const std::string prefix = "ES/";
-    // used to render wireframed triangles
-    valid &= append_shader("wireframe", {prefix + "wireframe.vs", prefix + "wireframe.fs"});
-#else
     const std::string prefix = DSKY::wxGetApp().is_gl_version_greater_or_equal_to(3, 1) ? "140/" : "110/";
-#endif // PREFLIGHT_OPENGL_ES
     // imgui shader
     valid &= append_shader("imgui", {prefix + "imgui.vs", prefix + "imgui.fs"});
     // basic shader, used to render all what was previously rendered using the immediate mode
@@ -67,16 +56,11 @@ std::pair<bool, std::string> GLShadersManager::init(bool compile_phong_shaders, 
     valid &= append_shader("flat_texture", {prefix + "flat_texture.vs", prefix + "flat_texture.fs"});
     // used to render 3D scene background
     valid &= append_shader("background", {prefix + "background.vs", prefix + "background.fs"});
-#if PREFLIGHT_OPENGL_ES
-    // used to render dashed lines
-    valid &= append_shader("dashed_lines", {prefix + "dashed_lines.vs", prefix + "dashed_lines.fs"});
-#else
     if (DSKY::OpenGLManager::get_gl_info().is_core_profile())
         // used to render thick and/or dashed lines
         valid &= append_shader("dashed_thick_lines",
                                {prefix + "dashed_thick_lines.vs", prefix + "dashed_thick_lines.fs",
                                 prefix + "dashed_thick_lines.gs"});
-#endif // PREFLIGHT_OPENGL_ES
     // used to render toolpaths center of gravity
     valid &= append_shader("toolpaths_cog", {prefix + "toolpaths_cog.vs", prefix + "toolpaths_cog.fs"});
     // used to render tool marker
@@ -124,21 +108,13 @@ std::pair<bool, std::string> GLShadersManager::init(bool compile_phong_shaders, 
     // deferred policy as phong: compiled at startup only when already selected,
     // otherwise registered as fallbacks and compiled on demand.
     register_full_tier_fallbacks();
-#if !PREFLIGHT_OPENGL_ES
     // Supersampled-scene resolve (SSAA), tiny and tier-independent: always compiled.
     if (prefix == "140/")
         try_compile_with_fallback("ssaa_resolve", {prefix + "fullscreen.vs", prefix + "ssaa_resolve.fs"}, "flat");
     else
         m_fallback_map["ssaa_resolve"] = "flat";
-#else
-    m_fallback_map["ssaa_resolve"] = "flat";
-#endif // !PREFLIGHT_OPENGL_ES
-#if !PREFLIGHT_OPENGL_ES
     if (compile_full_shaders && prefix == "140/")
         compile_full_tier_shaders(prefix);
-#else
-    (void) compile_full_shaders;
-#endif // !PREFLIGHT_OPENGL_ES
     // used to render variable layers heights in 3d editor
     valid &= append_shader("variable_layer_height",
                            {prefix + "variable_layer_height.vs", prefix + "variable_layer_height.fs"});
@@ -190,11 +166,7 @@ GLShaderProgram *GLShadersManager::get_shader(const std::string &shader_name)
 
 bool GLShadersManager::ensure_phong_shaders()
 {
-#if PREFLIGHT_OPENGL_ES
-    const std::string prefix = "ES/";
-#else
     const std::string prefix = DSKY::wxGetApp().is_gl_version_greater_or_equal_to(3, 1) ? "140/" : "110/";
-#endif
 
     if (m_fallback_map.find("phong") != m_fallback_map.end())
     {
@@ -212,11 +184,9 @@ bool GLShadersManager::ensure_phong_shaders()
                                   "gouraud_light");
     }
 
-#if !PREFLIGHT_OPENGL_ES
     // The Full tier compiles on demand as well (Preferences change to "full").
     if (prefix == "140/" && m_fallback_map.find("phong_full") != m_fallback_map.end())
         compile_full_tier_shaders(prefix);
-#endif // !PREFLIGHT_OPENGL_ES
 
     // Return true if phong is now a real shader, not a fallback
     return m_fallback_map.find("phong") == m_fallback_map.end() && get_shader("phong") != nullptr;
@@ -245,12 +215,25 @@ bool GLShadersManager::compile_full_tier_shaders(const std::string &prefix)
     m_fallback_map.erase("bed_overlay");
 
     bool ok = true;
-    ok &= try_compile_with_fallback("phong_full", {prefix + "phong_full.vs", prefix + "phong_full.fs"}, "phong"
-#if ENABLE_ENVIRONMENT_MAP
-                                    ,
-                                    {"ENABLE_ENVIRONMENT_MAP"sv}
+    bool forced_failure = false;
+#ifdef PREFLIGHT_TEST_HOOKS
+    // PREFLIGHT_RENDER_FAIL=shader: phong_full takes the failed-compile path, so the Full tier's fallback runs
+    forced_failure = DSKY::RenderDiagnostics::render_fail_forced("shader");
 #endif
-    );
+    if (forced_failure)
+    {
+        m_fallback_map["phong_full"] = "phong";
+        BOOST_LOG_TRIVIAL(warning)
+            << "Shader 'phong_full' failed to compile (forced by PREFLIGHT_RENDER_FAIL), falling back to 'phong'";
+        ok = false;
+    }
+    else
+        ok &= try_compile_with_fallback("phong_full", {prefix + "phong_full.vs", prefix + "phong_full.fs"}, "phong"
+#if ENABLE_ENVIRONMENT_MAP
+                                        ,
+                                        {"ENABLE_ENVIRONMENT_MAP"sv}
+#endif
+        );
     ok &= try_compile_with_fallback("shadowmap", {prefix + "shadowmap.vs", prefix + "shadowmap.fs"}, "flat");
     ok &= try_compile_with_fallback("gbuffer", {prefix + "gbuffer.vs", prefix + "gbuffer.fs"}, "flat");
     ok &= try_compile_with_fallback("gbuffer_bed", {prefix + "gbuffer_bed.vs", prefix + "gbuffer_bed.fs"}, "flat");
@@ -265,6 +248,10 @@ bool GLShadersManager::try_compile_with_fallback(const std::string &name,
                                                  const std::string &fallback_name,
                                                  const std::initializer_list<std::string_view> &defines)
 {
+    // A tier compiled again after one of its shaders failed keeps the programs that compiled
+    if (std::any_of(m_shaders.begin(), m_shaders.end(),
+                    [&name](const std::unique_ptr<GLShaderProgram> &p) { return p->get_name() == name; }))
+        return true;
     m_shaders.push_back(std::make_unique<GLShaderProgram>());
     if (m_shaders.back()->init_from_files(name, filenames, defines))
         return true;

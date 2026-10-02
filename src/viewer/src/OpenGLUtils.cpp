@@ -10,7 +10,6 @@
 #include <assert.h>
 #include <cctype>
 #include <stdio.h>
-#include <cstring>
 
 namespace libvgcode
 {
@@ -50,7 +49,6 @@ void glAssertRecentCallImpl(const char *file_name, unsigned int line, const char
         sErr = "Invalid framebuffer operation";
         break;
     }
-#if !defined(ENABLE_OPENGL_ES)
     case GL_STACK_OVERFLOW:
     {
         sErr = "Stack Overflow";
@@ -61,7 +59,6 @@ void glAssertRecentCallImpl(const char *file_name, unsigned int line, const char
         sErr = "Stack Underflow";
         break;
     }
-#endif // ENABLE_OPENGL_ES
     default:
     {
         sErr = "Unknown";
@@ -74,27 +71,13 @@ void glAssertRecentCallImpl(const char *file_name, unsigned int line, const char
 }
 #endif // HAS_GLSAFE
 
-static const char *OPENGL_ES_PREFIXES[] = {"OpenGL ES-CM ", "OpenGL ES-CL ", "OpenGL ES ", nullptr};
-
 bool OpenGLWrapper::s_valid_context = false;
-#ifdef ENABLE_OPENGL_ES
-int OpenGLWrapper::s_max_texture_size = 0;
-#endif // ENABLE_OPENGL_ES
 
 bool OpenGLWrapper::load_opengl(const std::string &context_version)
 {
     s_valid_context = false;
 
     const char *version = context_version.c_str();
-    for (int i = 0; OPENGL_ES_PREFIXES[i] != nullptr; ++i)
-    {
-        const size_t length = strlen(OPENGL_ES_PREFIXES[i]);
-        if (strncmp(version, OPENGL_ES_PREFIXES[i], length) == 0)
-        {
-            version += length;
-            break;
-        }
-    }
 
     GLint major = 0;
     GLint minor = 0;
@@ -106,10 +89,6 @@ bool OpenGLWrapper::load_opengl(const std::string &context_version)
     if (res != 2)
         return false;
 
-#ifdef ENABLE_OPENGL_ES
-    s_valid_context = major > 3 || (major == 3 && minor >= 0);
-    const int glad_res = gladLoaderLoadGLES2();
-#else
 #if defined(__linux__) && defined(__aarch64__)
     // RPi 5 V3D GPU reports OpenGL 3.1 but supports the 3.2 extensions preFlight uses
     s_valid_context = major > 3 || (major == 3 && minor >= 1);
@@ -117,25 +96,16 @@ bool OpenGLWrapper::load_opengl(const std::string &context_version)
     s_valid_context = major > 3 || (major == 3 && minor >= 2);
 #endif
     const int glad_res = gladLoaderLoadGL();
-#endif // ENABLE_OPENGL_ES
 
     if (glad_res == 0)
         return false;
-
-#ifdef ENABLE_OPENGL_ES
-    glsafe(glGetIntegerv(GL_MAX_TEXTURE_SIZE, &s_max_texture_size));
-#endif // ENABLE_OPENGL_ES
 
     return s_valid_context;
 }
 
 void OpenGLWrapper::unload_opengl()
 {
-#ifdef ENABLE_OPENGL_ES
-    gladLoaderUnloadGLES2();
-#else
     gladLoaderUnloadGL();
-#endif // ENABLE_OPENGL_ES
 }
 
 } // namespace libvgcode

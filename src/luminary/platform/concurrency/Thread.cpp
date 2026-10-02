@@ -285,6 +285,19 @@ void enforce_thread_count(const std::size_t count)
 #endif // TBB_HAS_GLOBAL_CONTROL
 }
 
+std::size_t tbb_parallelism()
+{
+    const std::size_t arena = std::size_t(tbb::this_task_arena::max_concurrency());
+#ifdef TBB_HAS_GLOBAL_CONTROL
+    // A cap above the arena's concurrency grants no more threads than the arena has
+    if (g_tbb_thread_cap != nullptr)
+        return std::min(arena, tbb::global_control::active_value(tbb::global_control::max_allowed_parallelism));
+#endif // TBB_HAS_GLOBAL_CONTROL
+    if (thread_count && *thread_count > 0)
+        return std::min(arena, *thread_count);
+    return arena;
+}
+
 // Spawn (n - 1) worker threads on Intel TBB thread pool and name them by an index and a system thread ID.
 // Also it sets locale of the worker threads to "C" for the G-code generator to produce "." as a decimal separator.
 void name_tbb_thread_pool_threads_set_locale()

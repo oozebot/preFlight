@@ -15,6 +15,7 @@
 #include "luminary/model/scene/Model.hpp"
 #include "luminary/mesh/slicer/TriangleMeshSlicer.hpp"
 #include "luminary/core/Raii.hpp"
+#include "luminary/core/diagnostics/DebugCounters.hpp"
 #include "luminary/core/text/Duration.hpp"
 #include "luminary/platform/process/Memory.hpp"
 #include <LocalesUtils.hpp>
@@ -41,17 +42,18 @@
 #include "MsgDialog.hpp"
 
 #include "luminary/model/beds/MultipleBeds.hpp"
+#ifdef PREFLIGHT_TEST_HOOKS
+#include "GuiBudget.hpp"
+#include <cstdlib>
+#include <cstring>
+#endif
 
 #if ENABLE_ACTUAL_SPEED_DEBUG
 #define IMGUI_DEFINE_MATH_OPERATORS
 #endif // ENABLE_ACTUAL_SPEED_DEBUG
 #include <imgui/imgui_internal.h>
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 #include <boost/log/trivial.hpp>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/algorithm/string/split.hpp>
@@ -1478,9 +1480,56 @@ void GCodeViewer::SequentialView::render(float legend_height, const libvgcode::V
     }
 }
 
+#ifdef PREFLIGHT_TEST_HOOKS
+bool GCodeViewer::s_test_keep_prefilter_neighbours = false;
+
+void GCodeViewer::test_set_hidden_extrusion_roles(const std::set<libvgcode::EGCodeExtrusionRole> &hidden)
+{
+    gl_current();
+    for (size_t i = 0; i < libvgcode::GCODE_EXTRUSION_ROLES_COUNT; ++i)
+    {
+        const libvgcode::EGCodeExtrusionRole role = static_cast<libvgcode::EGCodeExtrusionRole>(i);
+        const bool visible = hidden.count(role) == 0;
+        if (role == libvgcode::EGCodeExtrusionRole::None || m_viewer.is_extrusion_role_visible(role) == visible)
+            continue;
+        // The legend's toggle: the moves slider keeps a visible range that differs from the enabled one
+        const libvgcode::Interval view_visible_range = m_viewer.get_view_visible_range();
+        const libvgcode::Interval view_enabled_range = m_viewer.get_view_enabled_range();
+        m_viewer.toggle_extrusion_role_visibility(role);
+        std::optional<int> view_visible_range_min;
+        std::optional<int> view_visible_range_max;
+        if (view_visible_range != view_enabled_range)
+        {
+            view_visible_range_min = static_cast<int>(view_visible_range[0]);
+            view_visible_range_max = static_cast<int>(view_visible_range[1]);
+        }
+        if (m_update_preview_moves_slider_range)
+            m_update_preview_moves_slider_range(view_visible_range_min, view_visible_range_max);
+        if (m_canvas != nullptr)
+            m_canvas->set_as_dirty();
+    }
+}
+#endif
+
 GCodeViewer::GCodeViewer()
 {
     m_shells.volumes.set_use_raycasters(false);
+}
+
+bool GCodeViewer::gl_current()
+{
+    if (m_canvas != nullptr && m_canvas->ensure_gl_current())
+        return true;
+    // The viewer calls still run for their CPU state. Their enabled list uploads check themselves and are rebuilt by
+    // the next frame; their color writes do not, so the next frame writes the colors whole.
+    if (m_viewer.get_vertices_count() > 0)
+    {
+        DBG_COUNT_LOAD("RENDER_GL_NOT_CURRENT");
+        BOOST_LOG_TRIVIAL(warning) << "Preview GL context not current for a viewer update: "
+                                   << (m_canvas == nullptr ? "no canvas" : "make current failed");
+        m_viewer.set_view_type(m_viewer.get_view_type());
+    }
+    return false;
 }
 
 void GCodeViewer::init()
@@ -1490,10 +1539,23 @@ void GCodeViewer::init()
 
     m_gl_data_initialized = true;
 
+#ifdef PREFLIGHT_TEST_HOOKS
+    // Test hooks: PREFLIGHT_OCCLUSION=0 turns occlusion culling off and PREFLIGHT_OCCLUSION_CAP=<segments> sets its
+    // occluder cap for the session; a render capture's lines set both again
+    const char *occlusion = std::getenv("PREFLIGHT_OCCLUSION");
+    if (occlusion != nullptr && std::strcmp(occlusion, "0") == 0)
+        m_viewer.set_occlusion_culling(false);
+    const char *occlusion_cap = std::getenv("PREFLIGHT_OCCLUSION_CAP");
+    if (occlusion_cap != nullptr)
+        m_viewer.set_occlusion_occluder_cap(size_t(std::strtoull(occlusion_cap, nullptr, 10)));
+#endif
+
     try
     {
         m_viewer.init(reinterpret_cast<const char *>(glGetString(GL_VERSION)));
         glcheck();
+        // The prefilter program is built on its first use; render_toolpaths reports a failure
+        m_prefilter_failure_reported = false;
     }
     catch (const std::exception &e)
     {
@@ -1502,10 +1564,246 @@ void GCodeViewer::init()
     }
 }
 
+// The prefilter's load-time neighbour search: wall vertices, how many found the bead above, the wall segments it left
+// out, and its time, or why it failed. A failed search leaves every bead of the load unfiltered and Full's toolpath
+// shadow lookup on the bead surface; left-out segments are malformed G-code moves.
+static void log_prefilter_neighbours(const libvgcode::Viewer &viewer)
+{
+    const libvgcode::PrefilterNeighbourStats &stats = viewer.get_prefilter_neighbour_stats();
+    if (!stats.error.empty())
+    {
+        DBG_COUNT_LOAD("RENDER_PF_SEARCH_FAILED");
+        BOOST_LOG_TRIVIAL(error) << "Toolpath prefilter neighbour search failed: " << stats.error;
+        return;
+    }
+    if (viewer.get_vertices_count() == 0)
+        return;
+    if (stats.excluded_segments > 0)
+    {
+        DBG_COUNT_LOAD("RENDER_PF_SEGMENTS_EXCLUDED");
+        BOOST_LOG_TRIVIAL(warning) << "Toolpath prefilter neighbour search left out " << stats.excluded_segments
+                                   << " wall segments with a non-finite attribute or an end beyond 1e6 mm";
+    }
+    BOOST_LOG_TRIVIAL(info) << "Toolpath prefilter neighbours: " << stats.found_vertices << " of "
+                            << stats.wall_vertices << " wall vertices found the bead above, search " << stats.search_ms
+                            << " ms on " << stats.search_threads << " threads";
+}
+
+// The sealed bead pass: the extrusion segments it classified, those hidden in the full view, and its time, or why it
+// failed. A failed pass leaves culling off for the load: every bead in range is drawn.
+static void log_sealed_beads(const libvgcode::Viewer &viewer)
+{
+    const libvgcode::SealedBeadStats &stats = viewer.get_sealed_bead_stats();
+    if (!stats.error.empty())
+    {
+        DBG_COUNT_LOAD("RENDER_CULL_FAILED");
+        BOOST_LOG_TRIVIAL(error) << "Sealed bead pass failed: " << stats.error;
+        return;
+    }
+    if (viewer.get_vertices_count() == 0)
+        return;
+    BOOST_LOG_TRIVIAL(info) << "Sealed beads: " << stats.sealed_full_view << " of " << stats.segments
+                            << " extrusion segments hidden in the full view, " << stats.ms << " ms on " << stats.threads
+                            << " threads at " << stats.resolution_mm << " mm";
+}
+
+// Wall time since the given instant, in milliseconds, for the load's phase times
+static float ms_since(std::chrono::steady_clock::time_point start)
+{
+    return std::chrono::duration<float, std::milli>(std::chrono::steady_clock::now() - start).count();
+}
+
+// The share of a preparation's progress each part ends at, from the phase times measured on large prints: the
+// conversion, the viewer's preparation; the centre of gravity and the bounds take the rest
+static constexpr float PREPARE_CONVERT_END = 0.12f;
+static constexpr float PREPARE_VIEWER_END = 0.92f;
+// The centre of gravity and bounds loops poll the cancel test every 262144 vertices
+static constexpr size_t PREPARE_POLL_MASK = 0x3FFFF;
+
+// The extrusion roles whose paths bound the editor's toolpaths (and the bed check)
+static const std::vector<libvgcode::EGCodeExtrusionRole> &printed_extrusion_roles()
+{
+    static const std::vector<libvgcode::EGCodeExtrusionRole> roles = {
+        libvgcode::EGCodeExtrusionRole::Perimeter,
+        libvgcode::EGCodeExtrusionRole::ExternalPerimeter,
+        libvgcode::EGCodeExtrusionRole::OverhangPerimeter,
+        libvgcode::EGCodeExtrusionRole::InterlockingPerimeter,
+        libvgcode::EGCodeExtrusionRole::InternalInfill,
+        libvgcode::EGCodeExtrusionRole::SolidInfill,
+        libvgcode::EGCodeExtrusionRole::TopSolidInfill,
+        libvgcode::EGCodeExtrusionRole::Ironing,
+        libvgcode::EGCodeExtrusionRole::BridgeInfill,
+        libvgcode::EGCodeExtrusionRole::GapFill,
+        libvgcode::EGCodeExtrusionRole::Skirt,
+        libvgcode::EGCodeExtrusionRole::SupportMaterial,
+        libvgcode::EGCodeExtrusionRole::SupportMaterialInterface,
+        libvgcode::EGCodeExtrusionRole::WipeTower,
+        libvgcode::EGCodeExtrusionRole::Serpentine,
+        libvgcode::EGCodeExtrusionRole::SerpentineOverhang};
+    return roles;
+}
+
+// The tool palette of a load, and its color print palette (the filament colors, then the color changes), as the
+// conversion builds them
+static libvgcode::Palette tool_palette(const std::vector<std::string> &str_tool_colors)
+{
+    libvgcode::Palette palette;
+    palette.reserve(str_tool_colors.size());
+    for (const std::string &color : str_tool_colors)
+        palette.emplace_back(libvgcode::convert(color));
+    return palette;
+}
+
+static libvgcode::Palette color_print_palette(const std::vector<std::string> &str_tool_colors,
+                                              const std::vector<std::string> &str_color_print_colors)
+{
+    const std::vector<std::string> &str_colors = str_color_print_colors.empty() ? str_tool_colors
+                                                                                : str_color_print_colors;
+    libvgcode::Palette palette;
+    palette.reserve(str_colors.size());
+    for (const std::string &color : str_colors)
+        palette.emplace_back(libvgcode::convert(color));
+    return palette;
+}
+
+PreparedPreview GCodeViewer::prepare_preview(const GCodeProcessorResult &gcode_result, int bed, bool whole_bounding_box,
+                                             const libvgcode::PrepareSettings &settings,
+                                             const std::function<void(float)> &progress,
+                                             const std::function<bool()> &canceled)
+{
+    const auto prepare_start = std::chrono::steady_clock::now();
+    PreparedPreview prepared;
+    prepared.result_id = gcode_result.id;
+    prepared.bed = bed;
+
+    // Polls the cancel test, which ends the preparation, then reports the fraction done
+    const auto report = [&progress, &canceled](float fraction)
+    {
+        if (canceled && canceled())
+            throw CanceledException();
+        if (progress)
+            progress(fraction);
+    };
+
+    // Convert data from preFlight format to libvgcode format; the palettes are the install's
+    const auto convert_start = std::chrono::steady_clock::now();
+    libvgcode::GCodeInputData data = libvgcode::convert(gcode_result, std::vector<std::string>(),
+                                                        std::vector<std::string>(), [&report](float fraction)
+                                                        { report(PREPARE_CONVERT_END * std::min(fraction, 1.0f)); });
+    prepared.convert_ms = ms_since(convert_start);
+
+    // The viewer's preparation polls the cancel test itself: its passes stop their threads before it throws
+    try
+    {
+        prepared.load = libvgcode::Viewer::prepare(
+            std::move(data), settings,
+            [&progress](float fraction)
+            {
+                if (progress)
+                    progress(PREPARE_CONVERT_END + (PREPARE_VIEWER_END - PREPARE_CONVERT_END) * fraction);
+            },
+            canceled);
+    }
+    catch (const libvgcode::PrepareCanceled &)
+    {
+        throw CanceledException();
+    }
+
+    const std::vector<libvgcode::PathVertex> &vertices = prepared.load.get_vertices();
+#if !VGCODE_ENABLE_COG_AND_TOOL_MARKERS
+    // The centre of gravity: the extrusions the print weighs, skirt, support, wipe tower and custom G-code left out
+    const auto cog_start = std::chrono::steady_clock::now();
+    for (size_t i = 1; i < vertices.size(); ++i)
+    {
+        if ((i & PREPARE_POLL_MASK) == PREPARE_POLL_MASK)
+            report(PREPARE_VIEWER_END);
+        const libvgcode::PathVertex &curr = vertices[i];
+        if (curr.type == libvgcode::EMoveType::Extrude && curr.role != libvgcode::EGCodeExtrusionRole::Skirt &&
+            curr.role != libvgcode::EGCodeExtrusionRole::SupportMaterial &&
+            curr.role != libvgcode::EGCodeExtrusionRole::SupportMaterialInterface &&
+            curr.role != libvgcode::EGCodeExtrusionRole::WipeTower &&
+            curr.role != libvgcode::EGCodeExtrusionRole::Custom)
+        {
+            const Vec3d curr_pos = libvgcode::convert(curr.position).cast<double>();
+            const Vec3d prev_pos = libvgcode::convert(vertices[i - 1].position).cast<double>();
+            const double filament_density = gcode_result.filament_densities.empty()
+                                                ? 1.25
+                                                : ((static_cast<size_t>(curr.extruder_id) <
+                                                    gcode_result.filament_densities.size())
+                                                       ? gcode_result.filament_densities[curr.extruder_id]
+                                                       : gcode_result.filament_densities.back());
+            // The sums COG::add_segment() builds
+            const double mass = filament_density * curr.mm3_per_mm * (curr_pos - prev_pos).norm();
+            if (mass > 0.0)
+            {
+                prepared.cog_position_sum += mass * 0.5 * (curr_pos + prev_pos);
+                prepared.cog_mass += mass;
+            }
+        }
+    }
+    prepared.cog_ms = ms_since(cog_start);
+#endif // !VGCODE_ENABLE_COG_AND_TOOL_MARKERS
+
+    // The path bounds
+    report(PREPARE_VIEWER_END);
+    const auto bounds_start = std::chrono::steady_clock::now();
+    prepared.bounding_box = whole_bounding_box
+                                ? libvgcode::get_vertices_bounding_box(vertices)
+                                : libvgcode::get_vertices_extrusion_bounding_box(vertices, printed_extrusion_roles());
+    prepared.bounds_ms = ms_since(bounds_start);
+
+    report(1.0f);
+    prepared.prepare_ms = ms_since(prepare_start);
+    return prepared;
+}
+
+libvgcode::PrepareSettings GCodeViewer::get_prepare_settings() const
+{
+    libvgcode::PrepareSettings settings = m_viewer.get_prepare_settings();
+#ifdef PREFLIGHT_TEST_HOOKS
+    // Every load sets the viewer's keep flag from the test hook before it installs
+    settings.keep_prefilter_neighbours = s_test_keep_prefilter_neighbours;
+#endif
+    return settings;
+}
+
+// The legend's option toggles load_as_gcode() restores from the app config
+static constexpr std::array<Preview::OptionType, 9> RESTORED_VIEWER_OPTIONS = {
+    Preview::OptionType::Travel,        Preview::OptionType::Wipe,        Preview::OptionType::Retractions,
+    Preview::OptionType::Unretractions, Preview::OptionType::Seams,       Preview::OptionType::ToolChanges,
+    Preview::OptionType::ColorChanges,  Preview::OptionType::PausePrints, Preview::OptionType::CustomGCodes};
+
+libvgcode::ViewSettings GCodeViewer::get_load_view_settings(
+    const std::vector<std::string> &str_tool_colors, const std::vector<std::string> &str_color_print_colors) const
+{
+    libvgcode::ViewSettings view = m_viewer.get_view_settings();
+    view.top_layer_only_view_range = true;
+    for (const Preview::OptionType type : RESTORED_VIEWER_OPTIONS)
+        if (const char *key = preview_option_config_key(type); key != nullptr)
+            view.options_visibility[size_t(libvgcode::convert(type))] = get_app_config()->get_bool(key);
+    view.extrusion_roles_colors = libvgcode::Viewer::get_default_extrusion_roles_colors();
+    view.clipping_plane = false;
+    // GLCanvas3D::load_gcode_preview() sets the view type with the cache's load on: the cached type
+    view.view_type = m_view_type_cache.value;
+    view.tool_colors = tool_palette(str_tool_colors);
+    view.color_print_colors = color_print_palette(str_tool_colors, str_color_print_colors);
+    return view;
+}
+
+void GCodeViewer::finish_load_post(float post_ms)
+{
+    if (!m_load_post_pending)
+        return;
+    m_load_post_pending = false;
+    m_load_stats.post_ms = post_ms;
+}
+
 void GCodeViewer::load_as_gcode(const GCodeProcessorResult &gcode_result, const Print &print,
                                 const std::vector<std::string> &str_tool_colors,
-                                const std::vector<std::string> &str_color_print_colors)
+                                const std::vector<std::string> &str_color_print_colors,
+                                std::shared_ptr<PreparedPreview> prepared, const std::string &unprepared_reason)
 {
+    gl_current();
     m_loaded_as_preview = false;
 
     // The sequential preview slider always restricts to the top layer
@@ -1580,8 +1878,17 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult &gcode_result, const 
             color_print_colors.emplace_back(libvgcode::convert(color));
         }
         m_viewer.set_color_print_colors(color_print_colors);
+        // The result is loaded already, by an earlier load that prepared it on the UI thread
+        if (prepared != nullptr)
+        {
+            DBG_COUNT_LOAD("RENDER_PREPARE_DISCARDED");
+            BOOST_LOG_TRIVIAL(warning) << "Preview preparation discarded: the result is loaded already";
+        }
         return;
     }
+
+    // The phases of this load are timed from here to each return below
+    const auto load_start = std::chrono::steady_clock::now();
 
     m_last_result_id = gcode_result.id;
     s_beds_switched_since_last_gcode_load = false;
@@ -1589,34 +1896,61 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult &gcode_result, const 
     // release gpu memory, if used
     reset();
 
-    // Define progress callback that updates main progress bar only (no separate rendering notification)
-    auto progress_callback = [&print](float progress)
+    // A preparation made on the slicing thread is installed when it belongs to this result and the active bed and the
+    // result still holds its moves (it was not reset since); otherwise the load prepares here, on the UI thread, and
+    // records why
+    std::string fallback_reason = unprepared_reason;
+    if (prepared != nullptr)
     {
-        // Update main progress bar: map data conversion 0-100% to main progress 85-100%
-        if (progress >= 0.0f && progress < 1.0f)
+        if (prepared->result_id != gcode_result.id)
+            fallback_reason = "prepared for another result";
+        else if (prepared->bed != s_multiple_beds.get_active_bed())
+            fallback_reason = "prepared for another bed";
+        else if (gcode_result.moves.empty())
+            fallback_reason = "the result was reset after its preparation";
+        else
+            fallback_reason.clear();
+        if (!fallback_reason.empty())
         {
-            int main_progress = 85 + static_cast<int>(progress * 15.0f);
-            const_cast<Print &>(print).set_status(main_progress, "Preparing preview data");
+            DBG_COUNT_LOAD("RENDER_PREPARE_DISCARDED");
+            BOOST_LOG_TRIVIAL(warning) << "Preview preparation discarded: " << fallback_reason;
+            prepared.reset();
         }
-        else if (progress >= 1.0f)
+    }
+    const bool prepared_off_ui = prepared != nullptr;
+    if (!prepared_off_ui)
+    {
+        if (fallback_reason.empty())
+            fallback_reason = "not prepared";
+        DBG_COUNT_LOAD("RENDER_PREPARE_ON_UI_THREAD");
+        BOOST_LOG_TRIVIAL(info) << "Preview prepared on the UI thread: " << fallback_reason;
+
+        // Define progress callback that updates main progress bar only (no separate rendering notification)
+        auto progress_callback = [&print](float progress)
         {
-            // At 100%, switch to "Rendering" message and stay at 100%
-            const_cast<Print &>(print).set_status(100, "Rendering");
-        }
-    };
+            // Update main progress bar: map the preparation's 0-100% to main progress 85-100%
+            if (progress >= 0.0f && progress < 1.0f)
+            {
+                int main_progress = 85 + static_cast<int>(progress * 15.0f);
+                const_cast<Print &>(print).set_status(main_progress, "Preparing preview data");
+            }
+            else if (progress >= 1.0f)
+            {
+                // At 100%, switch to "Rendering" message and stay at 100%
+                const_cast<Print &>(print).set_status(100, "Rendering");
+            }
+        };
 
-    // Convert data from preFlight format to libvgcode format (with progress reporting)
-    libvgcode::GCodeInputData data = libvgcode::convert(gcode_result, str_tool_colors, str_color_print_colors, m_viewer,
-                                                        progress_callback);
-
-    // Do NOT attach a wxYield callback for the GPU upload phase. The upload
-    // calls glGenBuffers/glBufferData which require a valid GL context. wxYield()
-    // processes pending events, and if a focus-loss event fires during yield,
-    // on_activate(false) releases the GL context via wglMakeCurrent(NULL, NULL),
-    // causing all subsequent GL calls in load() to silently fail. This leaves
-    // the viewer with invalid buffer IDs (0) and an empty preview despite the
-    // legend showing correctly (legend uses CPU-side data only).
-    data.progress_callback = nullptr;
+        // Convert data from preFlight format to libvgcode format and prepare the viewer's load (with progress
+        // reporting). Nothing here yields: a wxYield would let a focus loss release the GL context
+        // (on_activate(false)) before the uploads below, which then fail silently.
+        libvgcode::PrepareSettings settings = get_prepare_settings();
+        settings.view = get_load_view_settings(str_tool_colors, str_color_print_colors);
+        prepared = std::make_shared<PreparedPreview>(prepare_preview(gcode_result, s_multiple_beds.get_active_bed(),
+                                                                     is_gcode_viewer(), settings, progress_callback,
+                                                                     std::function<bool()>()));
+    }
+    PreparedPreview &preview = *prepared;
 
     //#define ENABLE_DATA_EXPORT 1
     //#if ENABLE_DATA_EXPORT
@@ -1710,55 +2044,50 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult &gcode_result, const 
     //    }
     //#endif // ENABLE_DATA_EXPORT
 
-    // Re-acquire the GL context before GPU upload. The wxYield() calls during the
-    // data conversion phase above can process focus-loss events that release the GL
-    // context via wglMakeCurrent(NULL, NULL). ViewerImpl::load() creates GPU buffers
-    // that require a valid context.
+    // Re-acquire the GL context before GPU upload: the ViewerImpl install creates GPU buffers that require a valid
+    // context, which a focus loss releases (wglMakeCurrent(NULL, NULL))
     if (m_canvas)
         m_canvas->ensure_gl_current();
 
-    // send data to the viewer
+    // send data to the viewer, with this load's palettes
     m_viewer.reset_default_extrusion_roles_colors();
-    m_viewer.load(std::move(data));
+#ifdef PREFLIGHT_TEST_HOOKS
+    m_viewer.set_keep_prefilter_neighbours(s_test_keep_prefilter_neighbours);
+#endif
+    preview.load.set_palettes(tool_palette(str_tool_colors),
+                              color_print_palette(str_tool_colors, str_color_print_colors));
+    m_viewer.load(std::move(preview.load));
+    // The viewer's own phases, then the preparation's; the phases below are timed here
+    m_load_stats = m_viewer.get_load_phase_stats();
+    m_load_stats.convert_ms = preview.convert_ms;
+    m_load_stats.prepared_off_ui = prepared_off_ui;
+    // The install rebuilt what reads a view setting that changed since the preparation (or all of it, when the
+    // preparation's view stage failed)
+    if (!m_load_stats.view_settings_changed.empty())
+    {
+        DBG_COUNT_LOAD("RENDER_PREPARE_SETTINGS_CHANGED");
+        BOOST_LOG_TRIVIAL(info) << "Preview view tables rebuilt at the install: " << m_load_stats.view_settings_changed;
+        fallback_reason += (fallback_reason.empty() ? "" : "; ") + std::string("view tables rebuilt: ") +
+                           m_load_stats.view_settings_changed;
+    }
+    m_load_stats.prepare_fallback = fallback_reason;
+    log_prefilter_neighbours(m_viewer);
+    log_sealed_beads(m_viewer);
+
+    // The viewer holds the prepared vertices unless it refused them (its GL was never initialized); then the load has
+    // no centre of gravity and no path bounds, as the viewer holds no toolpaths
+    const bool installed = m_viewer.get_vertices_count() > 0;
 
 #if !VGCODE_ENABLE_COG_AND_TOOL_MARKERS
-    const size_t vertices_count = m_viewer.get_vertices_count();
     m_cog.reset();
-    for (size_t i = 1; i < vertices_count; ++i)
-    {
-        const libvgcode::PathVertex &curr = m_viewer.get_vertex_at(i);
-        if (curr.type == libvgcode::EMoveType::Extrude && curr.role != libvgcode::EGCodeExtrusionRole::Skirt &&
-            curr.role != libvgcode::EGCodeExtrusionRole::SupportMaterial &&
-            curr.role != libvgcode::EGCodeExtrusionRole::SupportMaterialInterface &&
-            curr.role != libvgcode::EGCodeExtrusionRole::WipeTower &&
-            curr.role != libvgcode::EGCodeExtrusionRole::Custom)
-        {
-            const Vec3d curr_pos = libvgcode::convert(curr.position).cast<double>();
-            const Vec3d prev_pos = libvgcode::convert(m_viewer.get_vertex_at(i - 1).position).cast<double>();
-            const double filament_density = gcode_result.filament_densities.empty()
-                                                ? 1.25
-                                                : ((static_cast<size_t>(curr.extruder_id) <
-                                                    gcode_result.filament_densities.size())
-                                                       ? gcode_result.filament_densities[curr.extruder_id]
-                                                       : gcode_result.filament_densities.back());
-            m_cog.add_segment(curr_pos, prev_pos, filament_density * curr.mm3_per_mm * (curr_pos - prev_pos).norm());
-        }
-    }
+    if (installed)
+        m_cog.set_totals(preview.cog_position_sum, preview.cog_mass);
+    m_load_stats.cog_ms = preview.cog_ms;
 #endif // !VGCODE_ENABLE_COG_AND_TOOL_MARKERS
 
-    const libvgcode::AABox bbox =
-        is_gcode_viewer()
-            ? m_viewer.get_bounding_box()
-            : m_viewer.get_extrusion_bounding_box(
-                  {libvgcode::EGCodeExtrusionRole::Perimeter, libvgcode::EGCodeExtrusionRole::ExternalPerimeter,
-                   libvgcode::EGCodeExtrusionRole::OverhangPerimeter,
-                   libvgcode::EGCodeExtrusionRole::InterlockingPerimeter,
-                   libvgcode::EGCodeExtrusionRole::InternalInfill, libvgcode::EGCodeExtrusionRole::SolidInfill,
-                   libvgcode::EGCodeExtrusionRole::TopSolidInfill, libvgcode::EGCodeExtrusionRole::Ironing,
-                   libvgcode::EGCodeExtrusionRole::BridgeInfill, libvgcode::EGCodeExtrusionRole::GapFill,
-                   libvgcode::EGCodeExtrusionRole::Skirt, libvgcode::EGCodeExtrusionRole::SupportMaterial,
-                   libvgcode::EGCodeExtrusionRole::SupportMaterialInterface, libvgcode::EGCodeExtrusionRole::WipeTower,
-                   libvgcode::EGCodeExtrusionRole::Serpentine, libvgcode::EGCodeExtrusionRole::SerpentineOverhang});
+    // The path bounds and the bed check
+    const auto bounds_start = std::chrono::steady_clock::now();
+    const libvgcode::AABox bbox = installed ? preview.bounding_box : m_viewer.get_bounding_box();
     m_paths_bounding_box = BoundingBoxf3(libvgcode::convert(bbox[0]).cast<double>(),
                                          libvgcode::convert(bbox[1]).cast<double>());
 
@@ -1773,9 +2102,12 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult &gcode_result, const 
             s_print_statuses[s_multiple_beds.get_active_bed()] = PrintStatus::toolpath_outside;
         }
     }
+    m_load_stats.bounds_ms = preview.bounds_ms + ms_since(bounds_start);
 
     m_extruders_count = gcode_result.extruders_count;
+    const auto gcode_window_start = std::chrono::steady_clock::now();
     m_sequential_view.gcode_window.load_gcode(gcode_result);
+    m_load_stats.gcode_window_ms = ms_since(gcode_window_start);
 
     m_custom_gcode_per_print_z = gcode_result.custom_gcode_per_print_z;
 
@@ -1784,8 +2116,21 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult &gcode_result, const 
 
     load_wipetower_shell(print);
 
+    // At each return below: the load's part on the UI thread, and its whole, which a preparation made on the slicing
+    // thread adds to; the Preview's work after the return and the first frame drawing the toolpaths are timed next
+    const auto finish_timing = [this, load_start, prepared_off_ui, &preview]()
+    {
+        m_load_stats.install_ms = ms_since(load_start);
+        m_load_stats.total_ms = m_load_stats.install_ms + (prepared_off_ui ? preview.prepare_ms : 0.0f);
+        m_load_post_pending = true;
+        m_first_frame_pending = true;
+    };
+
     if (m_viewer.get_layers_count() == 0)
+    {
+        finish_timing();
         return;
+    }
 
     m_settings_ids = gcode_result.settings_ids;
     m_filament_diameters = gcode_result.filament_diameters;
@@ -1892,10 +2237,13 @@ void GCodeViewer::load_as_gcode(const GCodeProcessorResult &gcode_result, const 
     {
         m_notification_manager->set_slicing_complete_print_time("", true);
     }
+
+    finish_timing();
 }
 
 void GCodeViewer::load_as_preview(libvgcode::GCodeInputData &&data)
 {
+    gl_current();
     m_loaded_as_preview = true;
 
     m_viewer.set_extrusion_role_color(libvgcode::EGCodeExtrusionRole::Skirt, {127, 255, 127});
@@ -1905,7 +2253,12 @@ void GCodeViewer::load_as_preview(libvgcode::GCodeInputData &&data)
     m_viewer.set_extrusion_role_color(libvgcode::EGCodeExtrusionRole::InternalInfill, {255, 127, 127});
     m_viewer.set_extrusion_role_color(libvgcode::EGCodeExtrusionRole::SolidInfill, {255, 127, 127});
     m_viewer.set_extrusion_role_color(libvgcode::EGCodeExtrusionRole::WipeTower, {127, 255, 127});
+#ifdef PREFLIGHT_TEST_HOOKS
+    m_viewer.set_keep_prefilter_neighbours(s_test_keep_prefilter_neighbours);
+#endif
     m_viewer.load(std::move(data));
+    log_prefilter_neighbours(m_viewer);
+    log_sealed_beads(m_viewer);
 
     const libvgcode::AABox bbox = m_viewer.get_extrusion_bounding_box();
     const BoundingBoxf3 paths_bounding_box(libvgcode::convert(bbox[0]).cast<double>(),
@@ -1927,6 +2280,7 @@ void GCodeViewer::update_shells_color_by_extruder(const DynamicPrintConfig *conf
 
 void GCodeViewer::reset()
 {
+    gl_current();
     // Deactivate clip controller and reset clipping plane before resetting
     if (m_preview_clip_controller.is_active())
         m_preview_clip_controller.deactivate();
@@ -1950,6 +2304,9 @@ void GCodeViewer::reset()
     m_sequential_view.gcode_window.reset();
     m_contained_in_bed = true;
     m_legend_resizer.reset();
+    // The toolpaths a load installed are gone: no frame after this is that load's first
+    m_load_post_pending = false;
+    m_first_frame_pending = false;
 }
 
 void GCodeViewer::render()
@@ -1965,6 +2322,10 @@ void GCodeViewer::render()
         render_legend_pending();
         return;
     }
+
+    // The first frame drawing a load's toolpaths rebuilds what the load's settings changes left to it; timed
+    const bool first_frame = m_first_frame_pending;
+    const auto first_frame_start = std::chrono::steady_clock::now();
 
     render_toolpaths();
 
@@ -2065,6 +2426,16 @@ void GCodeViewer::render()
         ImGuiPureWrap::end();
     }
 #endif // VGCODE_ENABLE_COG_AND_TOOL_MARKERS
+
+    if (first_frame)
+    {
+        m_first_frame_pending = false;
+        m_load_stats.first_frame_ms = ms_since(first_frame_start);
+#ifdef PREFLIGHT_TEST_HOOKS
+        // The slice's responsiveness window closes with the first frame that shows its toolpaths
+        m_load_stats.ui_max_stall_ms = GuiBudget::stall_window_end();
+#endif
+    }
 }
 
 bool GCodeViewer::can_export_toolpaths() const
@@ -2080,7 +2451,12 @@ bool GCodeViewer::can_export_toolpaths() const
 
 void GCodeViewer::update_sequential_view_current(unsigned int first, unsigned int last)
 {
+    gl_current();
+    const auto visible_range_start = std::chrono::steady_clock::now();
     m_viewer.set_view_visible_range(static_cast<uint32_t>(first), static_cast<uint32_t>(last));
+    // Timed while a load's post work is
+    if (m_load_post_pending)
+        m_load_stats.post_visible_range_ms += ms_since(visible_range_start);
     const libvgcode::Interval &enabled_range = m_viewer.get_view_enabled_range();
     if (m_enable_preview_moves_slider)
         m_enable_preview_moves_slider(enabled_range[1] > enabled_range[0]);
@@ -2149,9 +2525,27 @@ void GCodeViewer::update_sequential_view_current(unsigned int first, unsigned in
 
 void GCodeViewer::set_layers_z_range(const std::array<unsigned int, 2> &layers_z_range)
 {
+    gl_current();
+    // Timed by part while a load's post work is (the moves slider's time holds the visible range it sets)
+    const bool timed = m_load_post_pending;
+    const auto range_start = std::chrono::steady_clock::now();
     m_viewer.set_layers_view_range(static_cast<uint32_t>(layers_z_range[0]), static_cast<uint32_t>(layers_z_range[1]));
+    const auto slider_start = std::chrono::steady_clock::now();
+    // The viewer work the moves slider update starts (its visible range call) is timed by the viewer
+    const double viewer_ms = m_viewer.get_view_update_stats().total_ms();
     if (m_update_preview_moves_slider)
         m_update_preview_moves_slider();
+    const float moves_slider_ms = ms_since(slider_start);
+    const double started_ms = m_viewer.get_view_update_stats().total_ms() - viewer_ms;
+    ++m_layers_range_times.calls;
+    m_layers_range_times.range_ms += std::chrono::duration<double, std::milli>(slider_start - range_start).count();
+    m_layers_range_times.moves_slider_ms += std::max(0.0, double(moves_slider_ms) - started_ms);
+    if (timed && m_load_post_pending)
+    {
+        m_load_stats.post_layers_range_ms +=
+            std::chrono::duration<float, std::milli>(slider_start - range_start).count();
+        m_load_stats.post_moves_slider_ms += moves_slider_ms;
+    }
 }
 
 class ToolpathsObjExporter
@@ -2693,8 +3087,9 @@ void GCodeViewer::load_wipetower_shell(const Print &print)
     }
 }
 
-void GCodeViewer::set_scene_pass_params(bool enabled, const Matrix4d &shadow_vp_world, unsigned int shadow_tex_id,
-                                        unsigned int ao_tex_id, const Vec2f &viewport_size)
+void GCodeViewer::set_scene_pass_params(bool enabled, const Matrix4d &shadow_vp_world, float shadow_texel,
+                                        unsigned int shadow_tex_id, unsigned int ao_tex_id, const Vec2f &viewport_size,
+                                        const Vec2f &viewport_origin)
 {
     libvgcode::ScenePassParams params;
     params.enabled = enabled;
@@ -2703,9 +3098,12 @@ void GCodeViewer::set_scene_pass_params(bool enabled, const Matrix4d &shadow_vp_
         const Vec3d bed_offset = s_multiple_beds.get_bed_translation(s_multiple_beds.get_active_bed());
         const Matrix4d shadow_vp_local = shadow_vp_world * Transform3d(Eigen::Translation3d(bed_offset)).matrix();
         params.shadow_vp = libvgcode::convert(static_cast<Matrix4f>(shadow_vp_local.cast<float>()));
+        // A translation, so the texel size is the same in bed-local coordinates
+        params.shadow_texel = shadow_texel;
         params.shadow_tex_id = shadow_tex_id;
         params.ao_tex_id = ao_tex_id;
         params.viewport_size = {viewport_size.x(), viewport_size.y()};
+        params.viewport_origin = {viewport_origin.x(), viewport_origin.y()};
     }
     m_viewer.set_scene_pass_params(params);
 }
@@ -2740,6 +3138,16 @@ void GCodeViewer::render_toolpaths()
         m_tool_marker_fixed_screen_size ? 10.0f * m_tool_marker_size * camera.get_inv_zoom() : m_tool_marker_size);
 #endif // VGCODE_ENABLE_COG_AND_TOOL_MARKERS
     m_viewer.render(converted_view_matrix, converted_projetion_matrix);
+
+    // The prefilter program is built on the first frame that draws with it. A failure is counted and its compiler
+    // output logged once per viewer initialization; the toolpaths then draw with the plain program.
+    if (!m_prefilter_failure_reported && !m_viewer.get_toolpath_prefilter_shader_log().empty())
+    {
+        m_prefilter_failure_reported = true;
+        DBG_COUNT_LOAD("RENDER_PF_SHADER_FAILED");
+        BOOST_LOG_TRIVIAL(error) << "Toolpath prefilter program failed to build; toolpaths draw without it: "
+                                 << m_viewer.get_toolpath_prefilter_shader_log();
+    }
 
 #if ENABLE_NEW_GCODE_VIEWER_DEBUG
     if (is_legend_shown())

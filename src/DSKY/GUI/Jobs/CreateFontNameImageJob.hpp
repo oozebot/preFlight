@@ -7,11 +7,7 @@
 
 #include <vector>
 #include <string>
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 #include <wx/string.h>
 #include <wx/fontenc.h>
 #include "Job.hpp"
@@ -88,4 +84,3 @@ public:
 };
 
 } // namespace DSKY
-

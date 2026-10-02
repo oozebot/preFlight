@@ -13,11 +13,7 @@
 #include "Plater.hpp"
 #endif // ENABLE_CAMERA_STATISTICS
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 namespace DSKY
 {

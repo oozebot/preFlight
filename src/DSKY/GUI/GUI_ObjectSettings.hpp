@@ -6,19 +6,22 @@
 ///|/
 #pragma once
 
+#include <chrono>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include <wx/dataview.h>
 #include <wx/panel.h>
+#include <wx/timer.h>
 #include "wxExtensions.hpp"
 #include "luminary/layer/settings_spec/SettingsSpec.hpp"
 
 class wxBoxSizer;
 class wxButton;
-class wxStaticBitmap;
 class wxStaticBoxSizer;
 class wxStaticText;
 class CheckBox;
@@ -36,7 +39,8 @@ namespace DSKY
 using namespace Luminary;
 
 class ConfigOptionsGroup;
-class OverrideCategoryBar;
+class CategoryBar;
+class RowIcons;
 
 class OG_Settings
 {
@@ -82,8 +86,14 @@ public:
     // Reloads every row from the current configs: after a preset switch, an undo or a redo.
     void refresh();
     // Builds the rows while the panel is hidden, so the first open shows them instead of
-    // building them; run once after start-up.
+    // building them; run once after start-up (a theme or scale change rebuilds them the same way).
     void prebuild();
+    // The rows exist, so an open builds nothing
+    bool is_prebuilt() const;
+    // The extruder count may have changed (a printer switch, a project load, an edit of the count):
+    // after the current event the extruder dropdown is refilled and shown or hidden, and the open
+    // panel refreshed; nothing is rebuilt
+    void on_extruders_changed();
 
     // The scope an item's overrides live at; false for an item that has none.
     static bool scope_of(const wxDataViewItem &item, OverrideScope &scope);
@@ -95,6 +105,15 @@ public:
     void sys_color_changed();
     void msw_rescale();
 
+    // For the test hooks only (GuiTestHooks).
+    // Runs `done` once the rows exist: now when they do, else at the end of the next prebuild
+    void on_prebuilt(std::function<void()> done);
+    // Called once as the next chunked prebuild begins (PREFLIGHT_REBUILD_OVERRIDES_AT_MS)
+    void set_on_prebuild_begin(std::function<void()> fn) { m_on_prebuild_begin = std::move(fn); }
+    // The categories the bar shows for the open item, and a selection made as a click on the bar does
+    int category_count() const { return int(m_bar_pages.size()); }
+    void select_category(int index);
+
 private:
     struct Group;
     struct Row
@@ -103,9 +122,10 @@ private:
         wxString label;
         const ConfigOptionDef *def{nullptr};
         Group *group{nullptr};
-        wxPanel *accent{nullptr}; // the edge that marks a checked row
+        // The edge that marks a checked row and the lock (closed: the value equals the project's;
+        // open: it differs), painted by one window
+        RowIcons *lock{nullptr};
         ::CheckBox *enable{nullptr};
-        wxStaticBitmap *lock{nullptr}; // closed: the value equals the project's; open: it differs
         wxStaticText *label_text{nullptr};
         wxWindow *control{nullptr};
         wxSizer *row_sizer{nullptr}; // hidden when the open item's scope cannot carry the key
@@ -137,6 +157,24 @@ private:
         wxPanel *panel{nullptr};
         std::vector<std::unique_ptr<Group>> groups;
     };
+    // A build under way, resumable row by row: the prebuild runs it in timed chunks, and a click
+    // that needs the rows before it ends runs the rest at once
+    struct BuildCursor
+    {
+        size_t extruders{0};
+        size_t spec_page{0};                  // index into setting_pages()
+        std::vector<const SettingRow *> rows; // the rows of the page being filled
+        size_t row{0};                        // the next of them
+        std::unique_ptr<Page> page;           // the page being filled
+        Group *group{nullptr};                // its last group
+        std::vector<ToggleState> rule_states; // the project's rules, the state a new row starts in
+        std::unordered_map<std::string, const ToggleState *> rules;
+    };
+
+    // The prebuild's time per chunk, and the pause between chunks in which input and paint are
+    // handled: a chunk stalls the window for about this long (a row costs a few ms)
+    static constexpr int PREBUILD_CHUNK_MS = 40;
+    static constexpr int PREBUILD_TICK_MS = 1;
 
     // Identity of the open item
     OverrideScope m_scope{OverrideScope::Object};
@@ -146,9 +184,18 @@ private:
     bool m_open{false};
 
     // The rows are built once for every key an object may carry (a sub-item hides the rows its
-    // scope cannot) and rebuilt only when the extruder count, the theme or the scale changes
+    // scope cannot) and rebuilt only when the theme or the scale changes
     bool m_built{false};
-    size_t m_built_extruders{0};
+    bool m_extruders_update_pending{false};         // on_extruders_changed's update is scheduled
+    std::vector<std::function<void()>> m_prebuilt;  // waiting for the rows (on_prebuilt)
+    std::function<void()> m_on_prebuild_begin;      // set_on_prebuild_begin
+    std::optional<BuildCursor> m_build;             // the build under way
+    std::vector<std::unique_ptr<Page>> m_old_pages; // a previous build's pages, still to be destroyed
+    std::vector<std::unique_ptr<Row>> m_old_rows;   // their rows' records
+    wxTimer m_build_timer;                          // drives the prebuild's chunks
+    bool m_scope_pending{false};                    // the prebuild's visibility pass is next
+    wxTimer m_layout_timer;                         // lays out the hidden pages, one per event
+    bool m_layout_ends_prebuild{false};             // the prebuild is done when they are
 
     bool m_updating{false};         // a refresh in progress: control events are ignored
     bool m_dead_space_bound{false}; // the panel's persistent widgets commit an edit on a click
@@ -157,7 +204,7 @@ private:
     wxStaticText *m_title{nullptr};
     wxButton *m_reset_all{nullptr};
     ScalableButton *m_close{nullptr};
-    OverrideCategoryBar *m_categories{nullptr};
+    CategoryBar *m_categories{nullptr};
     ScrollablePanel *m_scroll{nullptr};
     std::vector<std::unique_ptr<Page>> m_pages;
     std::vector<std::unique_ptr<Row>> m_rows;
@@ -178,8 +225,30 @@ private:
     DynamicPrintConfig effective_config() const;
 
     void apply_theme();
+    // Builds every row now, from scratch
     void build_rows();
-    void clear_rows();
+    // The rows exist when this returns: a build under way is finished, else one is made
+    void ensure_built();
+    // Counts and traces a synchronous full build (OVERRIDES_SYNC_BUILD, overrides.build.sync)
+    void count_sync_build();
+    // Rebuilds the rows for a new theme or scale: in chunks while closed, at once while open
+    void rebuild();
+    // Refills the extruder dropdown for the current extruder count
+    void update_extruder_row();
+    // Starts a build: the old rows go at once, or with `chunked` a few groups per prebuild chunk
+    void begin_build(bool chunked);
+    // Destroys the pages of a previous build until the budget is spent (no budget: all); true once
+    // none is left
+    bool destroy_old_pages(std::optional<std::chrono::milliseconds> budget);
+    // Builds until the budget is spent (no budget: to the end); true once the last page is done
+    bool continue_build(std::optional<std::chrono::milliseconds> budget);
+    void end_build();
+    void prime_row(Row &row);
+    void on_build_timer();
+    void on_layout_timer();
+    void end_prebuild();
+    void run_prebuilt_callbacks();
+    void clear_rows(bool later = false);
     // Shows the rows the open scope may carry, the groups and pages that keep one, and rebuilds
     // the category bar when the set of pages changed
     void apply_scope();
@@ -194,6 +263,8 @@ private:
     void refresh_header();
     void apply_rules(const DynamicPrintConfig &effective);
     void set_row_state(Row &row, bool checked, bool differs, const wxString &lock_tip);
+    // The enable checkbox's tooltip for the open item
+    wxString enable_tip(bool checked) const;
 
     // Writes: one undo snapshot, the write into the item's config, the consistency pass, the
     // re-slice of the owning object, then a refresh.
@@ -208,4 +279,3 @@ private:
 };
 
 } // namespace DSKY
-

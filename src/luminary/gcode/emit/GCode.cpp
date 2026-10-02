@@ -808,6 +808,7 @@ void GCodeGenerator::do_export(Print *print, const char *path, GCodeProcessorRes
     // Windows-specific heap compaction
     _heapmin();
 #endif
+    gx_timer.stage("gcode: heap compaction");
 
     // Write the post-processed G-code as TEXT to the output file.
     // Always write text here - callers handle binarization after post-processing scripts run.
@@ -2915,6 +2916,8 @@ struct SmoothPathGenerator
     // the paths that belong to no object (skirt, brim, support, tower).
     const PrintObjectConfig &default_object_config;
     bool enable_loop_clipping;
+    // The layer is spiralized by the vase filter, which drops its layer-start travel.
+    bool spiral_layer;
 
     GCode::ExtrusionOrder::PathSmoothingResult operator()(const Layer *layer, const PrintRegion *region,
                                                           const ExtrusionEntityReference &extrusion_reference,
@@ -2956,15 +2959,26 @@ struct SmoothPathGenerator
                 //   - Splitting at a vertex keeps 4 points - no artificial geometry
                 //   - The nearest vertex to the nozzle gives optimal travel distance
                 Point split_point = previous_point;
-                TravelOptimization::LoopVertexLocation nearest_vertex =
-                    TravelOptimization::find_nearest_vertex_in_loop(*loop, previous_point);
-                if (nearest_vertex.valid())
+                if (spiral_layer && loop->role().is_perimeter())
                 {
-                    split_point = nearest_vertex.vertex;
+                    // A spiralized loop starts where the previous layer ended, at the projection of that
+                    // position onto the loop. The spiral filter drops the travel to the start, so a start at
+                    // the nearest vertex instead lays the wall between the two points twice on that layer,
+                    // and when a vertex the seam sat on vanishes (a rib ends) the next vertex can be tens of
+                    // millimetres away.
                 }
                 else
                 {
-                    DBG_COUNT("LOOP_ENTRY_NO_VERTEX"); // the loop is split at the nozzle's own position
+                    TravelOptimization::LoopVertexLocation nearest_vertex =
+                        TravelOptimization::find_nearest_vertex_in_loop(*loop, previous_point);
+                    if (nearest_vertex.valid())
+                    {
+                        split_point = nearest_vertex.vertex;
+                    }
+                    else
+                    {
+                        DBG_COUNT("LOOP_ENTRY_NO_VERTEX"); // the loop is split at the nozzle's own position
+                    }
                 }
 
                 result = smooth_path_cache.resolve_or_fit_split_with_seam(*loop, extrusion_reference.flipped(),
@@ -3034,8 +3048,9 @@ std::vector<GCode::ExtrusionOrder::ExtruderExtrusions> GCodeGenerator::get_sorte
         first_layer ? Skirt::make_skirt_loops_per_extruder_1st_layer(print, layer_tools, m_skirt_done)
                     : Skirt::make_skirt_loops_per_extruder_other_layers(print, layer_tools, m_skirt_done)};
 
-    const SmoothPathGenerator smooth_path{m_seam_placer, smooth_path_caches, m_config, print.default_object_config(),
-                                          m_enable_loop_clipping};
+    const SmoothPathGenerator smooth_path{
+        m_seam_placer,          smooth_path_caches, m_config, print.default_object_config(),
+        m_enable_loop_clipping, m_spiral_layer};
 
     using GCode::ExtrusionOrder::ExtruderExtrusions;
     using GCode::ExtrusionOrder::get_extrusions;
@@ -3115,6 +3130,29 @@ static void dbg_gcode_order_fp(const double print_z,
             fp.length, fp.roles().c_str(), (unsigned long long) fp.hash, (unsigned long long) fp.ordered);
 }
 
+// The distance within which the spiral filter blends a layer's start into the previous layer and drops the
+// travel to it: twice the largest nozzle, the filter's own smoothing radius.
+static double spiral_blend_radius(const PrintConfig &config)
+{
+    return 2.0 * *std::max_element(config.nozzle_diameter.values.begin(), config.nozzle_diameter.values.end());
+}
+
+// First entity below the collection that is not itself a collection, or nullptr when it holds none.
+static const ExtrusionEntity *first_extrusion_leaf(const ExtrusionEntityCollection &collection)
+{
+    for (const ExtrusionEntity *entity : collection.entities)
+    {
+        if (const auto *nested = dynamic_cast<const ExtrusionEntityCollection *>(entity))
+        {
+            if (const ExtrusionEntity *leaf = first_extrusion_leaf(*nested))
+                return leaf;
+        }
+        else
+            return entity;
+    }
+    return nullptr;
+}
+
 // In sequential mode, process_layer is called once per each object and its copy,
 // therefore layers will contain a single entry and single_object_instance_idx will point to the copy of the object.
 // In non-sequential mode, process_layer is called per each print_z height with all object and support layers accumulated.
@@ -3176,6 +3214,7 @@ LayerResult GCodeGenerator::process_layer(
     // Check whether it is possible to apply the spiral vase logic for this layer.
     // Just a reminder: A spiral vase mode is allowed for a single object, single material print only.
     m_enable_loop_clipping = true;
+    m_spiral_layer = false;
     if (m_spiral_vase && layers.size() == 1 && support_layer == nullptr)
     {
         bool enable = (layer.id() > 0 || !print.has_brim()) &&
@@ -3183,14 +3222,26 @@ LayerResult GCodeGenerator::process_layer(
         if (enable)
         {
             for (const LayerRegion *layer_region : layer.regions())
+            {
                 if (size_t(layer_region->region().config().bottom_solid_layers.value) > layer.id() ||
                     layer_region->perimeters().items_count() > 1u || layer_region->fills().items_count() > 0)
                 {
                     enable = false;
                     break;
                 }
+                // The wall must be one closed loop: the spiral filter drops the travel to each layer's start,
+                // which an open line turns into an extruding drag across the part.
+                if (layer_region->perimeters().items_count() == 1u &&
+                    dynamic_cast<const ExtrusionLoop *>(first_extrusion_leaf(layer_region->perimeters())) == nullptr)
+                {
+                    DBG_COUNT("SPIRAL_GATE_NOT_LOOP");
+                    enable = false;
+                    break;
+                }
+            }
         }
         result.spiral_vase_enable = enable;
+        m_spiral_layer = enable;
         // If we're going to apply spiralvase to this layer, disable loop clipping.
         m_enable_loop_clipping = !enable;
     }
@@ -3918,7 +3969,20 @@ std::string GCodeGenerator::change_layer(coordf_t previous_layer_z, coordf_t pri
                                           this->m_config.travel_slope.get_at(extruder_id) < 90);
 
     const Vec3d to{to_3d(unscaled(first_point), print_z)};
-    if (this->last_position && print_z > previous_layer_z && !EXTRUDER_CONFIG(retract_layer_change))
+    if (vase_mode)
+    {
+        // A spiral layer change carries no retract: the spiral filter drops the short travel to the layer's
+        // start and blends it into the previous layer, so a retract would stay behind in place at the seam.
+        // A start farther than the blend radius (the loop moved because a region of the part ended) is a
+        // real travel the filter keeps, so it is retracted, without a wipe, whose moves the filter drops.
+        if (this->last_position &&
+            (this->point_to_gcode(*this->last_position) - unscaled(first_point)).norm() > spiral_blend_radius(m_config))
+        {
+            DBG_COUNT("SPIRAL_START_TRAVEL");
+            gcode += m_writer.retract();
+        }
+    }
+    else if (this->last_position && print_z > previous_layer_z && !EXTRUDER_CONFIG(retract_layer_change))
     {
         const Vec3d from{to_3d(this->point_to_gcode(*this->last_position), previous_layer_z)};
         const Polyline xy_path{this->get_layer_change_xy_path(from, to)};
@@ -5206,8 +5270,23 @@ std::string GCodeGenerator::travel_to_first_position(const Vec3crd &point, const
 
     if (!EXTRUDER_CONFIG(travel_ramping_lift) && this->last_position)
     {
-        const Vec3crd from{to_3d(*this->last_position, scaled(from_z))};
-        gcode = this->travel_to(from, point, role, "travel to first layer point", insert_gcode, EnforceFirstZ::True);
+        if (m_spiral_layer && (this->point_to_gcode(*this->last_position) - gcode_point.head<2>()).norm() <=
+                                  spiral_blend_radius(m_config))
+        {
+            // The spiral filter drops this travel and blends it into the previous layer, so a retract and lift
+            // here would stay behind in place at the seam; the layer starts with a plain XY move. A start
+            // beyond the blend radius is a real travel the filter keeps and takes the ordinary path.
+            gcode += insert_gcode();
+            gcode += this->writer().travel_to_xy(gcode_point.head<2>(), "travel to first layer point");
+            this->m_avoid_crossing_perimeters.reset_once_modifiers();
+            this->last_position = point.head<2>();
+        }
+        else
+        {
+            const Vec3crd from{to_3d(*this->last_position, scaled(from_z))};
+            gcode = this->travel_to(from, point, role, "travel to first layer point", insert_gcode,
+                                    EnforceFirstZ::True);
+        }
     }
     else
     {
@@ -5928,11 +6007,11 @@ std::string GCodeGenerator::_extrude(const ExtrusionAttributes &path_attr, const
     {
         if (path_attr.role != ExtrusionRole::InterlockingPerimeter)
         {
-            // Dynamic overhang speed is already quantized to a fixed grid upstream (calculate_overhang_speed).
-            // The cap_speed() volumetric limit below, and the per-layer CoolingBuffer rescaling further
-            // downstream, intentionally take it back off that grid - that is why the final G-code F values are
-            // not all grid-aligned. Do NOT re-quantize after those stages: rounding a volumetric-capped speed
-            // back up would exceed max_volumetric_speed and defeat the flow safety limit.
+            // calculate_overhang_speed() returns a configured band speed exactly, or a speed between two bands
+            // rounded to a fixed grid. The cap_speed() volumetric limit below, and the per-layer CoolingBuffer
+            // rescaling further downstream, can change it again, so the final G-code F values are not all on
+            // that grid. Do NOT re-quantize after those stages: rounding a volumetric-capped speed back up
+            // would exceed max_volumetric_speed and defeat the flow safety limit.
             speed = dynamic_print_and_fan_speeds.print_speed;
         }
     }

@@ -311,35 +311,36 @@ OverhangSpeeds calculate_overhang_speed(const ExtrusionAttributes &attributes, c
 {
     assert(attributes.overhang_attributes.has_value());
 
-    // Print speed is linearly interpolated between the configured overhang bands, then quantized to
-    // a coarse grid so consecutive segments on a gentle gradient collapse to one speed (fewer
-    // F-changes / smaller G-code) while staying within half a step of the true curve. The result is
-    // already on the grid - consume it directly, do not apply further arithmetic. Fan speed stays
-    // snapped to discrete bands to avoid emitting a new M106 on every segment.
+    // Print speed: a distance on a configured overhang band, or past either end of the bands, gets
+    // that band's speed exactly. A distance between two bands is interpolated linearly and rounded to
+    // a coarse grid so consecutive segments on a gentle gradient collapse to one speed (fewer F
+    // changes, smaller G-code); the rounded speed is kept within the two bands' speeds and stays
+    // within half a grid step of the true curve. Use the result as is, do not apply further
+    // arithmetic. Fan speed stays snapped to discrete bands to avoid emitting a new M106 on every
+    // segment.
     static constexpr float OVERHANG_SPEED_QUANTUM = 2.f; // mm/s; quality vs G-code-size knob, safe range 1-5
     auto interpolate_speed = [](const std::map<float, float> &values, float distance)
     {
         assert(!values.empty()); // always holds: the 100% (fully-supported) anchor is never dropped
-        float speed;
         auto upper = values.lower_bound(distance);
         if (upper == values.end())
         {
-            speed = values.rbegin()->second; // beyond full overhang: clamp to the most-overhang band
+            return values.rbegin()->second; // beyond full overhang: the most-overhang band's speed
         }
-        else if (upper == values.begin())
+        if (upper == values.begin() || upper->first == distance)
         {
-            speed = upper->second; // fully supported: clamp to base speed
+            return upper->second; // fully supported, or exactly on a band: that band's speed
         }
-        else
-        {
-            auto lower = std::prev(upper);
-            const float span = upper->first - lower->first;
-            const float t = (span > 0.f) ? (distance - lower->first) / span : 1.f;
-            speed = (1.f - t) * lower->second + t * upper->second;
-        }
-        // Quantize to the grid, but never round a positive speed down to 0 (that would emit an F0 move).
-        const float quantized = std::round(speed / OVERHANG_SPEED_QUANTUM) * OVERHANG_SPEED_QUANTUM;
-        return (speed > 0.f) ? std::max(quantized, OVERHANG_SPEED_QUANTUM) : quantized;
+        auto lower = std::prev(upper);
+        const float span = upper->first - lower->first;
+        const float t = (span > 0.f) ? (distance - lower->first) / span : 1.f;
+        const float speed = (1.f - t) * lower->second + t * upper->second;
+        const float slower = std::min(lower->second, upper->second);
+        const float faster = std::max(lower->second, upper->second);
+        const float rounded = std::round(speed / OVERHANG_SPEED_QUANTUM) * OVERHANG_SPEED_QUANTUM;
+        const float bounded = std::clamp(rounded, slower, faster);
+        // Never round a positive speed down to 0 (that would emit an F0 move): keep the unrounded speed.
+        return (speed > 0.f && bounded <= 0.f) ? speed : bounded;
     };
 
     auto snap_to_nearest_speed = [](const std::map<float, float> &values, float distance)

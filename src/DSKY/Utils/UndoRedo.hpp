@@ -39,14 +39,14 @@ namespace Luminary
 namespace UndoRedo
 {
 
+// A selection change takes no snapshot: undo and redo step through edits, never through clicks in
+// the object list or the 3D view, and a click after an undo keeps the redo steps
 enum class SnapshotType : unsigned char
 {
     // Some action modifying project state, outside any EnteringGizmo / LeavingGizmo interval.
     Action,
     // Some action modifying project state, inside some EnteringGizmo / LeavingGizmo interval.
     GizmoAction,
-    // Selection change at the Plater.
-    Selection,
     // New project, Reset project, Load project ...
     ProjectSeparator,
     // Entering a Gizmo, which opens a secondary Undo / Redo stack.
@@ -201,4 +201,3 @@ private:
 
 }; // namespace UndoRedo
 } // namespace Luminary
-

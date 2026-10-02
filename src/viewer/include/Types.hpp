@@ -58,9 +58,13 @@ struct ScenePassParams
 {
     bool enabled{false};
     Mat4x4 shadow_vp{};
+    // World size (mm) of one shadow-map texel; the toolpaths' shadow lookup offset is measured in it
+    float shadow_texel{0.0f};
     unsigned int shadow_tex_id{0};
     unsigned int ao_tex_id{0};
     std::array<float, 2> viewport_size{{0.0f, 0.0f}};
+    // Window position of the AO target's origin (the inset scene viewport's corner).
+    std::array<float, 2> viewport_origin{{0.0f, 0.0f}};
 };
 
 //

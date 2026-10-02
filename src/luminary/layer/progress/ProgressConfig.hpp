@@ -115,8 +115,9 @@ struct ProgressConfig
     // Takes ~15% of total time based on actual measurements
     struct DataConversionPhase
     {
-        // Convert from preFlight format to libvgcode format
-        // Progress reporting in preFlight.GCodeViewer.cpp load_as_gcode()
+        // The Preview's preparation: the conversion to libvgcode's format and the viewer's CPU tables. Reported by
+        // the slicing run's last step (BackgroundSlicingProcess::prepare_preview()), or by
+        // GCodeViewer::load_as_gcode() when the load prepares on the UI thread
         float conversion = 15.0f; // 15% of total (85-100%)
     } data_conversion;
 };

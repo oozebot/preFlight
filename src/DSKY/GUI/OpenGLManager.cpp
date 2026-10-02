@@ -9,20 +9,15 @@
 #include "GUI.hpp"
 #include "GUI_App.hpp"
 #include "luminary/presets/app_config/AppConfig.hpp"
-#if !PREFLIGHT_OPENGL_ES
 #include "GUI_Init.hpp"
-#endif // !PREFLIGHT_OPENGL_ES
 #include "I18N.hpp"
 #include "3DScene.hpp"
 #include "format.hpp"
 
 #include "luminary/platform/host/Platform.hpp"
+#include "luminary/core/diagnostics/DebugCounters.hpp"
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/classification.hpp>
@@ -38,6 +33,7 @@
 #ifdef __APPLE__
 // Part of hack to remove crash when closing the application on OSX 10.9.5 when building against newer wxWidgets
 #include <wx/platinfo.h>
+#include <OpenGL/OpenGL.h>
 
 #include "../Utils/MacDarkMode.hpp"
 #endif // __APPLE__
@@ -98,13 +94,16 @@ bool OpenGLManager::GLInfo::should_use_phong(const std::string &lighting_quality
     if (lighting_quality == "enhanced" || lighting_quality == "full")
         return true;
     // "auto": only disable for software renderers. Any hardware GPU that passes
-    // the OpenGL 3.2 minimum version check can handle per-pixel lighting.
+    // the OpenGL version check can handle per-pixel lighting.
     if (!m_detected)
         detect();
-    const std::string &r = m_renderer;
-    if (r.find("llvmpipe") != std::string::npos || r.find("SwiftShader") != std::string::npos)
-        return false;
-    return true;
+    return !is_software_renderer(m_renderer);
+}
+
+bool OpenGLManager::GLInfo::is_software_renderer(const std::string &renderer)
+{
+    return renderer.find("llvmpipe") != std::string::npos || renderer.find("softpipe") != std::string::npos ||
+           renderer.find("SwiftShader") != std::string::npos;
 }
 
 int OpenGLManager::GLInfo::get_max_tex_size() const
@@ -151,28 +150,18 @@ void OpenGLManager::GLInfo::detect() const
     if (Luminary::total_physical_memory() / (1024 * 1024 * 1024) < 6)
         *max_tex_size /= 2;
 
-#if PREFLIGHT_OPENGL_ES
-    // OpenGL ES doesn't have anisotropic filtering extension by default
-    // Leave m_max_anisotropy at default value
-#else
     if (GLAD_GL_EXT_texture_filter_anisotropic)
     {
         float *max_anisotropy = const_cast<float *>(&m_max_anisotropy);
         glsafe(::glGetFloatv(GL_MAX_TEXTURE_MAX_ANISOTROPY_EXT, max_anisotropy));
     }
-#endif
 
-#if PREFLIGHT_OPENGL_ES
-    // OpenGL ES is always "core-like" (no compatibility profile concept)
-    *const_cast<bool *>(&m_core_profile) = true;
-#else
     // For OpenGL 3.2+, check the context profile mask
     // GLAD core profile loader means we're targeting core, but verify via GL query
     GLint profileMask = 0;
     glsafe(::glGetIntegerv(GL_CONTEXT_PROFILE_MASK, &profileMask));
     if (profileMask & GL_CONTEXT_CORE_PROFILE_BIT)
         *const_cast<bool *>(&m_core_profile) = true;
-#endif
 
     int *samples = const_cast<int *>(&m_samples);
     glsafe(::glGetIntegerv(GL_SAMPLES, samples));
@@ -191,17 +180,8 @@ static Semver parse_version_string(const std::string &version)
     if (tokens.empty())
         return Semver::invalid();
 
-#if PREFLIGHT_OPENGL_ES
-    const std::string version_container = (tokens.size() > 1 && boost::istarts_with(tokens[1], "ES")) ? tokens[2]
-                                                                                                      : tokens[0];
-#endif // PREFLIGHT_OPENGL_ES
-
     std::vector<std::string> numbers;
-#if PREFLIGHT_OPENGL_ES
-    boost::split(numbers, version_container, boost::is_any_of("."), boost::token_compress_on);
-#else
     boost::split(numbers, tokens[0], boost::is_any_of("."), boost::token_compress_on);
-#endif // PREFLIGHT_OPENGL_ES
 
     unsigned int gl_major = 0;
     unsigned int gl_minor = 0;
@@ -249,9 +229,7 @@ std::string OpenGLManager::GLInfo::to_string(bool for_github) const
 
     out << h2_start << "OpenGL installation" << h2_end << line_end;
     out << b_start << "GL version:   " << b_end << m_version << " (" << m_version_string << ")" << line_end;
-#if !PREFLIGHT_OPENGL_ES
     out << b_start << "Profile:      " << b_end << (is_core_profile() ? "Core" : "Compatibility") << line_end;
-#endif // !PREFLIGHT_OPENGL_ES
     out << b_start << "Vendor:       " << b_end << m_vendor << line_end;
     out << b_start << "Renderer:     " << b_end << m_renderer << line_end;
     out << b_start << "GLSL version: " << b_end << m_glsl_version << line_end;
@@ -261,13 +239,7 @@ std::string OpenGLManager::GLInfo::to_string(bool for_github) const
         << (can_multisample() ? "Enabled (" + std::to_string(m_samples) + " samples)" : "Disabled") << line_end;
 
     {
-#if PREFLIGHT_OPENGL_ES
-        const std::string extensions_str = gl_get_string_safe(GL_EXTENSIONS, "");
-        std::vector<std::string> extensions_list;
-        boost::split(extensions_list, extensions_str, boost::is_any_of(" "), boost::token_compress_on);
-#else
         std::vector<std::string> extensions_list = get_extensions_list();
-#endif // PREFLIGHT_OPENGL_ES
 
         if (!extensions_list.empty())
         {
@@ -289,7 +261,6 @@ std::string OpenGLManager::GLInfo::to_string(bool for_github) const
     return out.str();
 }
 
-#if !PREFLIGHT_OPENGL_ES
 std::vector<std::string> OpenGLManager::GLInfo::get_extensions_list() const
 {
     std::vector<std::string> ret;
@@ -315,13 +286,14 @@ std::vector<std::string> OpenGLManager::GLInfo::get_extensions_list() const
 
     return ret;
 }
-#endif // !PREFLIGHT_OPENGL_ES
 
 OpenGLManager::GLInfo OpenGLManager::s_gl_info;
 bool OpenGLManager::s_compressed_textures_supported = false;
 bool OpenGLManager::s_force_power_of_two_textures = false;
 OpenGLManager::EMultisampleState OpenGLManager::s_multisample = OpenGLManager::EMultisampleState::Unknown;
 OpenGLManager::EFramebufferType OpenGLManager::s_framebuffers_type = OpenGLManager::EFramebufferType::Unknown;
+int OpenGLManager::s_msaa_requested = -1;
+int OpenGLManager::s_msaa_window_samples = 0;
 
 #ifdef __APPLE__
 // Part of hack to remove crash when closing the application on OSX 10.9.5 when building against newer wxWidgets
@@ -352,7 +324,6 @@ OpenGLManager::~OpenGLManager()
 #endif //__APPLE__
 }
 
-#if !PREFLIGHT_OPENGL_ES
 #ifdef _WIN32
 static void APIENTRY CustomGLDebugOutput(GLenum source, GLenum type, unsigned int id, GLenum severity, GLsizei length,
                                          const char *message, const void *userParam)
@@ -436,17 +407,12 @@ static void CustomGLDebugOutput(GLenum source, GLenum type, unsigned int id, GLe
     out += "]:\n";
     std::cout << out << "(" << id << "): " << message << "\n\n";
 }
-#endif // !PREFLIGHT_OPENGL_ES
 
 bool OpenGLManager::init_gl()
 {
     if (!m_gl_initialized)
     {
-#if PREFLIGHT_OPENGL_ES
-        int version = gladLoaderLoadGLES2();
-#else
         int version = gladLoaderLoadGL();
-#endif
         if (version == 0)
         {
             BOOST_LOG_TRIVIAL(error) << "Unable to init GLAD OpenGL loader";
@@ -464,37 +430,26 @@ bool OpenGLManager::init_gl()
 
         m_gl_initialized = true;
 
-#if PREFLIGHT_OPENGL_ES
-        // OpenGL ES 3.0 doesn't have S3TC compression by default
-        s_compressed_textures_supported = false;
-#else
         if (GLAD_GL_EXT_texture_compression_s3tc)
             s_compressed_textures_supported = true;
         else
             s_compressed_textures_supported = false;
-#endif
 
         // ARB_framebuffer_object is core in OpenGL 3.0+, so always available for our minimum 3.2 requirement
         s_framebuffers_type = EFramebufferType::Arb;
 
-#if PREFLIGHT_OPENGL_ES
-        bool valid_version = s_gl_info.is_version_greater_or_equal_to(3, 0);
-#elif defined(__linux__) && defined(__aarch64__)
+#if defined(__linux__) && defined(__aarch64__)
         // RPi 5 V3D GPU reports OpenGL 3.1 but supports the 3.2 extensions preFlight uses
         const bool valid_version = s_gl_info.is_version_greater_or_equal_to(3, 1);
 #else
         const bool valid_version = s_gl_info.is_version_greater_or_equal_to(3, 2);
-#endif // PREFLIGHT_OPENGL_ES
+#endif
 
         if (!valid_version)
         {
             // Complain about the OpenGL version.
             wxString message = format_wxstr(
-#if PREFLIGHT_OPENGL_ES
-                _L("preFlight requires OpenGL ES 3.0 capable graphics driver to run correctly, \n"
-                   "while OpenGL version %s, renderer %s, vendor %s was detected."),
-                s_gl_info.get_version_string(), s_gl_info.get_renderer(), s_gl_info.get_vendor());
-#elif defined(__linux__) && defined(__aarch64__)
+#if defined(__linux__) && defined(__aarch64__)
                 _L("preFlight requires OpenGL 3.1 capable graphics driver to run correctly,\n"
                    "while OpenGL version %s, renderer %s, vendor %s was detected."),
                 s_gl_info.get_version_string(), s_gl_info.get_renderer(), s_gl_info.get_vendor());
@@ -502,7 +457,7 @@ bool OpenGLManager::init_gl()
                 _L("preFlight requires OpenGL 3.2 capable graphics driver to run correctly,\n"
                    "while OpenGL version %s, renderer %s, vendor %s was detected."),
                 s_gl_info.get_version_string(), s_gl_info.get_renderer(), s_gl_info.get_vendor());
-#endif // PREFLIGHT_OPENGL_ES
+#endif
             message += "\n";
             message += _L("You may need to update your graphics card driver.");
 #ifdef _WIN32
@@ -515,6 +470,11 @@ bool OpenGLManager::init_gl()
 
         if (valid_version)
         {
+            // The next session's MSAA Auto reads the renderer before its context exists
+            if (AppConfig *config = DSKY::wxGetApp().app_config;
+                config != nullptr && config->get("gl_renderer_last") != s_gl_info.get_renderer())
+                config->set("gl_renderer_last", s_gl_info.get_renderer());
+
             // Determine whether to compile phong shaders based on lighting quality setting.
             // Shader compilation is GPU-blocking; skip it for Basic lighting to reduce
             // GPU pressure during startup (prevents TDR on some configurations).
@@ -535,7 +495,6 @@ bool OpenGLManager::init_gl()
                 wxString message = format_wxstr(_L("Unable to load the following shaders:\n%s"), error);
                 wxMessageBox(message, wxString("preFlight - ") + _L("Error loading shaders"), wxOK | wxICON_ERROR);
             }
-#if !PREFLIGHT_OPENGL_ES
             if (m_debug_enabled && s_gl_info.is_version_greater_or_equal_to(4, 3) && GLAD_GL_KHR_debug)
             {
                 ::glEnable(GL_DEBUG_OUTPUT);
@@ -544,7 +503,6 @@ bool OpenGLManager::init_gl()
                 ::glDebugMessageControl(GL_DONT_CARE, GL_DONT_CARE, GL_DONT_CARE, 0, nullptr, GL_TRUE);
                 std::cout << "Enabled OpenGL debug output\n";
             }
-#endif // !PREFLIGHT_OPENGL_ES
         }
 
 #ifdef _WIN32
@@ -568,6 +526,13 @@ bool OpenGLManager::init_gl()
         // Enable VSync to cap framerate and reduce idle GPU usage.
         // Without VSync, SwapBuffers() returns immediately and the render loop
         // can run at hundreds of FPS when the canvas is dirty, burning GPU.
+        int swap_interval = 1;
+#ifdef PREFLIGHT_TEST_HOOKS
+        // PREFLIGHT_VSYNC=0: frames are timed without the swap waiting for the display
+        if (const char *vsync = std::getenv("PREFLIGHT_VSYNC"); vsync != nullptr && std::string(vsync) == "0")
+            swap_interval = 0;
+#endif
+        (void) swap_interval;
 #ifdef _WIN32
         {
             typedef BOOL(WINAPI * PFNWGLSWAPINTERVALEXTPROC)(int interval);
@@ -575,7 +540,7 @@ bool OpenGLManager::init_gl()
                 wglGetProcAddress("wglSwapIntervalEXT"));
             if (wglSwapIntervalEXT)
             {
-                wglSwapIntervalEXT(1);
+                wglSwapIntervalEXT(swap_interval);
                 BOOST_LOG_TRIVIAL(info) << "VSync enabled via wglSwapIntervalEXT";
             }
             else
@@ -592,7 +557,7 @@ bool OpenGLManager::init_gl()
                 glXGetProcAddressARB(reinterpret_cast<const GLubyte *>("glXSwapIntervalMESA")));
             if (glXSwapIntervalMESA)
             {
-                glXSwapIntervalMESA(1);
+                glXSwapIntervalMESA(swap_interval);
                 BOOST_LOG_TRIVIAL(info) << "VSync enabled via glXSwapIntervalMESA";
                 vsync_set = true;
             }
@@ -604,7 +569,7 @@ bool OpenGLManager::init_gl()
                     glXGetProcAddressARB(reinterpret_cast<const GLubyte *>("glXSwapIntervalSGI")));
                 if (glXSwapIntervalSGI)
                 {
-                    glXSwapIntervalSGI(1);
+                    glXSwapIntervalSGI(swap_interval);
                     BOOST_LOG_TRIVIAL(info) << "VSync enabled via glXSwapIntervalSGI";
                     vsync_set = true;
                 }
@@ -612,26 +577,29 @@ bool OpenGLManager::init_gl()
             if (!vsync_set)
                 BOOST_LOG_TRIVIAL(warning) << "VSync not available on Linux";
         }
+#elif defined(__APPLE__) && defined(PREFLIGHT_TEST_HOOKS)
+        // The context keeps the system's swap interval unless the test hook turned vsync off; the context is
+        // current here (the canvas made it current before the loader ran)
+        if (swap_interval == 0)
+        {
+            const GLint interval = swap_interval;
+            if (CGLContextObj context = CGLGetCurrentContext();
+                context != nullptr && CGLSetParameter(context, kCGLCPSwapInterval, &interval) == kCGLNoError)
+                BOOST_LOG_TRIVIAL(info) << "VSync disabled via CGLSetParameter";
+            else
+                BOOST_LOG_TRIVIAL(warning) << "VSync could not be disabled (CGLSetParameter failed)";
+        }
 #endif
     }
 
     return true;
 }
 
-#if PREFLIGHT_OPENGL_ES
-wxGLContext *OpenGLManager::init_glcontext(wxGLCanvas &canvas)
-#else
 wxGLContext *OpenGLManager::init_glcontext(wxGLCanvas &canvas, const std::pair<int, int> &required_opengl_version,
                                            bool enable_compatibility_profile, bool enable_debug)
-#endif // PREFLIGHT_OPENGL_ES
 {
     if (m_context == nullptr)
     {
-#if PREFLIGHT_OPENGL_ES
-        wxGLContextAttrs attrs;
-        attrs.PlatformDefaults().ES2().MajorVersion(2).EndList();
-        m_context = new wxGLContext(&canvas, nullptr, &attrs);
-#else
         m_debug_enabled = enable_debug;
 
         const int gl_major = required_opengl_version.first;
@@ -710,7 +678,6 @@ wxGLContext *OpenGLManager::init_glcontext(wxGLCanvas &canvas, const std::pair<i
             // if no valid context was created use the default one
             m_context = new wxGLContext(&canvas, nullptr, &attrs);
         }
-#endif // PREFLIGHT_OPENGL_ES
 
 #ifdef __APPLE__
         // Part of hack to remove crash when closing the application on OSX 10.9.5 when building against newer wxWidgets
@@ -733,38 +700,19 @@ wxGLCanvas *OpenGLManager::create_wxglcanvas(wxWindow &parent, int msaa_samples)
     if (!s_msaa_probed)
     {
         s_multisample = EMultisampleState::Disabled;
+        s_msaa_requested = msaa_samples;
+        s_msaa_window_samples = 0;
         // Disable multi-sampling on ChromeOS, as the OpenGL virtualization swaps Red/Blue channels with multi-sampling
         // enabled, at least on some platforms.
-        if (msaa_samples != 0 && platform_flavor() != PlatformFlavor::LinuxOnChromium)
+        if (msaa_samples != 0 && platform_flavor() == PlatformFlavor::LinuxOnChromium)
+            DBG_COUNT_LOAD("RENDER_MSAA_DISABLED_CHROMEOS");
+        else if (msaa_samples != 0)
         {
-            if (msaa_samples < 0)
+            // Auto starts at 8x: 16x doubles the fill and framebuffer memory for no visible gain. A count the
+            // display cannot give steps down to the highest one it can, as Auto does, instead of leaving MSAA off.
+            const int first = msaa_samples < 0 ? 8 : msaa_samples;
+            for (int i = first; i >= 2; i /= 2)
             {
-                // Auto: try highest available, fall back gracefully
-                for (int i = 16; i >= 2; i /= 2)
-                {
-                    attribList.Reset();
-                    attribList.PlatformDefaults()
-                        .RGBA()
-                        .DoubleBuffer()
-                        .MinRGBA(8, 8, 8, 8)
-                        .Depth(24)
-                        .Stencil(8)
-                        .SampleBuffers(1)
-                        .Samplers(i);
-#ifdef __APPLE__
-                    attribList.SetNeedsARB(true);
-#endif // __APPLE__
-                    attribList.EndList();
-                    if (wxGLCanvas::IsDisplaySupported(attribList))
-                    {
-                        s_multisample = EMultisampleState::Enabled;
-                        break;
-                    }
-                }
-            }
-            else
-            {
-                // Explicit sample count requested
                 attribList.Reset();
                 attribList.PlatformDefaults()
                     .RGBA()
@@ -773,14 +721,22 @@ wxGLCanvas *OpenGLManager::create_wxglcanvas(wxWindow &parent, int msaa_samples)
                     .Depth(24)
                     .Stencil(8)
                     .SampleBuffers(1)
-                    .Samplers(msaa_samples);
+                    .Samplers(i);
 #ifdef __APPLE__
                 attribList.SetNeedsARB(true);
 #endif // __APPLE__
                 attribList.EndList();
                 if (wxGLCanvas::IsDisplaySupported(attribList))
+                {
                     s_multisample = EMultisampleState::Enabled;
+                    s_msaa_window_samples = i;
+                    break;
+                }
             }
+            if (s_multisample != EMultisampleState::Enabled)
+                DBG_COUNT_LOAD("RENDER_MSAA_UNAVAILABLE");
+            else if (msaa_samples > 0 && s_msaa_window_samples < msaa_samples)
+                DBG_COUNT_LOAD("RENDER_MSAA_STEPPED_DOWN");
         }
         s_msaa_probed = true;
         s_msaa_attribs = attribList;
@@ -801,6 +757,45 @@ wxGLCanvas *OpenGLManager::create_wxglcanvas(wxWindow &parent, int msaa_samples)
     }
 
     return new wxGLCanvas(&parent, attribList, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxWANTS_CHARS);
+}
+
+int OpenGLManager::resolve_msaa_request(const AppConfig *config, bool force_auto, bool count_fallbacks)
+{
+    int request = -1;
+    if (config != nullptr && !force_auto)
+    {
+        const std::string value = config->get("canvas_msaa");
+        if (value == "0")
+            request = 0;
+        else if (value == "2" || value == "4" || value == "8" || value == "16")
+            request = std::atoi(value.c_str());
+        else if (!value.empty() && value != "auto" && count_fallbacks)
+            DBG_COUNT_LOAD("RENDER_SETTING_UNKNOWN_VALUE");
+    }
+    // The canvas exists before its context does, so Auto judges the renderer by the previous session's: MSAA
+    // multiplies the fragment work a software rasterizer does on the CPU.
+    if (request < 0 && config != nullptr && GLInfo::is_software_renderer(config->get("gl_renderer_last")))
+    {
+        if (count_fallbacks)
+            DBG_COUNT_LOAD("RENDER_MSAA_SOFTWARE_RENDERER");
+        return 0;
+    }
+#ifdef _WIN32
+    // Over RDP each probe creates a temporary WGL context through the virtualization layer, and high sample
+    // counts multiply its GPU load (a TDR risk): Auto takes 2x in one probe, explicit counts stop at 4x.
+    if (GetSystemMetrics(SM_REMOTESESSION))
+    {
+        if (request < 0)
+            return 2;
+        if (request > 4)
+        {
+            if (count_fallbacks)
+                DBG_COUNT_LOAD("RENDER_MSAA_RDP_CAP");
+            return 4;
+        }
+    }
+#endif
+    return request;
 }
 
 } // namespace DSKY

@@ -3,6 +3,7 @@
 ///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
 ///|/
 #include "TextInput.hpp"
+#include "GdiCache.hpp"
 #include "ScrollBar.hpp"
 #include "UIColors.hpp"
 
@@ -57,16 +58,7 @@ TextInput::TextInput()
     border_width = 1;
 }
 
-TextInput::~TextInput()
-{
-#ifdef _WIN32
-    if (m_hEditBgBrush != NULL)
-    {
-        DeleteObject(m_hEditBgBrush);
-        m_hEditBgBrush = NULL;
-    }
-#endif
-}
+TextInput::~TextInput() {}
 
 TextInput::TextInput(wxWindow *parent, wxString text, wxString label, wxString icon, const wxPoint &pos,
                      const wxSize &size, long style)
@@ -380,15 +372,6 @@ void TextInput::SysColorsChanged()
     wxColour bg_normal = is_dark ? UIColors::InputBackgroundDark() : UIColors::InputBackgroundLight();
     wxColour fg_normal = is_dark ? UIColors::InputForegroundDark() : UIColors::InputForegroundLight();
 
-#ifdef _WIN32
-    // Invalidate the cached brush so it gets recreated with new color on next WM_CTLCOLOR
-    if (m_hEditBgBrush != NULL)
-    {
-        DeleteObject(m_hEditBgBrush);
-        m_hEditBgBrush = NULL;
-    }
-#endif
-
     // Set wxWindow background (needed for proper rendering)
     SetBackgroundColour(bg_normal);
     SetForegroundColour(fg_normal);
@@ -405,7 +388,24 @@ void TextInput::SysColorsChanged()
     // Apply themed colors to internal text control
     if (text_ctrl)
     {
-        text_ctrl->SetThemedColors(bg_normal, fg_normal);
+        wxColour text_bg = bg_normal, text_fg = fg_normal;
+#if defined(__APPLE__)
+        // A disabled field keeps the colours Enable(false) gave it: Windows picks them when it paints,
+        // here the text control shows the colours set last
+        if (!IsThisEnabled())
+        {
+            text_bg = is_dark ? UIColors::InputBackgroundDisabledDark() : UIColors::InputBackgroundDisabledLight();
+            text_fg = is_dark ? UIColors::InputForegroundDisabledDark() : UIColors::InputForegroundDisabledLight();
+        }
+#elif !defined(_WIN32)
+        // A disabled field keeps the colours Enable(false) gave it, as on macOS
+        if (!IsThisEnabled())
+        {
+            text_bg = background_color.colorForStates(state_handler.states());
+            text_fg = text_color.colorForStates(state_handler.states());
+        }
+#endif
+        text_ctrl->SetThemedColors(text_bg, text_fg);
 #ifdef _WIN32
         // Single-line and multiline edit controls both have visual styles disabled
         // so WM_CTLCOLOREDIT brush returns work. Just force a repaint.
@@ -533,13 +533,6 @@ bool TextInput::Enable(bool enable)
             fg_color = dark ? UIColors::InputForegroundDisabledDark() : UIColors::InputForegroundDisabledLight();
         }
 
-        // Invalidate cached brush so it gets recreated with new colors
-        if (m_hEditBgBrush != NULL)
-        {
-            DeleteObject(m_hEditBgBrush);
-            m_hEditBgBrush = NULL;
-        }
-
         // Use ThemedTextCtrl's themed colors for reliable Windows color handling
         text_ctrl->SetThemedColors(bg_color, fg_color);
 
@@ -640,9 +633,13 @@ void TextInput::DoSetSize(int x, int y, int width, int height, int sizeFlags)
             // Don't allow to set internal control height more, then its initial height
             textSize.y = text_ctrl->GetSize().y;
         }
-        wxClientDC dc(this);
-        const int r_shift = int(dd_icon_size.x == 0 ? (3. * dc.GetContentScaleFactor())
-                                                    : ((size.y - dd_icon_size.y) / 2));
+#ifdef _WIN32
+        // A client DC's content scale on Windows, read without creating one on every resize
+        const double content_scale = GetDPIScaleFactor();
+#else
+        const double content_scale = wxClientDC(this).GetContentScaleFactor();
+#endif
+        const int r_shift = int(dd_icon_size.x == 0 ? (3. * content_scale) : ((size.y - dd_icon_size.y) / 2));
         // Reserve space for the custom scrollbar on multiline controls (only when visible)
         int scrollbar_w = (m_scrollbar && m_scrollbar->IsShown()) ? ScrollBar::GetScaledScrollbarWidth() : 0;
         textSize.x = size.x - textPos.x - labelSize.x - dd_icon_size.x - r_shift - scrollbar_w;
@@ -766,25 +763,10 @@ WXLRESULT TextInput::MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam
         ::SetTextColor(hdc, RGB(fgColor.Red(), fgColor.Green(), fgColor.Blue()));
         ::SetBkMode(hdc, OPAQUE);
 
-        // Create native GDI brush directly
-        if (m_hEditBgBrush != NULL)
-        {
-            LOGBRUSH lb;
-            if (GetObject(m_hEditBgBrush, sizeof(lb), &lb) > 0)
-            {
-                COLORREF newColor = RGB(bgColor.Red(), bgColor.Green(), bgColor.Blue());
-                if (lb.lbColor != newColor)
-                {
-                    DeleteObject(m_hEditBgBrush);
-                    m_hEditBgBrush = NULL;
-                }
-            }
-        }
-        if (m_hEditBgBrush == NULL)
-        {
-            m_hEditBgBrush = CreateSolidBrush(RGB(bgColor.Red(), bgColor.Green(), bgColor.Blue()));
-        }
-        return (WXLRESULT) m_hEditBgBrush;
+        // The process-wide brush of the current colour, so a theme or enable change needs no invalidation
+        HBRUSH brush = DSKY::GdiCache::shared_solid_brush(RGB(bgColor.Red(), bgColor.Green(), bgColor.Blue()));
+        if (brush != NULL)
+            return (WXLRESULT) brush;
     }
     return wxNavigationEnabled<StaticBox>::MSWWindowProc(nMsg, wParam, lParam);
 }

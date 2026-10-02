@@ -47,7 +47,6 @@ bool init_gui_params(DSKY::GUI_InitParams &gui_params, int argc, char **argv, Da
     }
 #endif // _WIN32
 
-#if !PREFLIGHT_OPENGL_ES
     if (cli.misc_config.has("opengl-version"))
     {
         const Semver opengl_minimum = Semver(3, 2, 0);
@@ -87,7 +86,6 @@ bool init_gui_params(DSKY::GUI_InitParams &gui_params, int argc, char **argv, Da
         start_gui = true;
         gui_params.opengl_debug = true;
     }
-#endif // PREFLIGHT_OPENGL_ES
 
     if (cli.misc_config.has("delete-after-load"))
     {

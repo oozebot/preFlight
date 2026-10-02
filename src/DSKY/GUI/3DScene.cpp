@@ -9,11 +9,7 @@
 ///|/
 ///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
 ///|/
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 #include "3DScene.hpp"
 #include "GLShader.hpp"
@@ -194,10 +190,8 @@ void GLVolume::NonManifoldEdges::render()
         return;
     update();
 
-#if !PREFLIGHT_OPENGL_ES
     if (!DSKY::OpenGLManager::get_gl_info().is_core_profile())
         glsafe(::glLineWidth(2.0f * s_render_ctx->imgui->get_style_scaling()));
-#endif // !PREFLIGHT_OPENGL_ES
 
     GLShaderProgram *shader = s_render_ctx->get_current_shader();
     if (shader == nullptr)
@@ -206,17 +200,13 @@ void GLVolume::NonManifoldEdges::render()
     const DSKY::Camera &camera = *s_render_ctx->camera;
     shader->set_uniform("view_model_matrix", camera.get_view_matrix() * m_parent.world_matrix());
     shader->set_uniform("projection_matrix", camera.get_projection_matrix());
-#if !PREFLIGHT_OPENGL_ES
     if (DSKY::OpenGLManager::get_gl_info().is_core_profile())
     {
-#endif // !PREFLIGHT_OPENGL_ES
         const std::array<int, 4> &viewport = camera.get_viewport();
         shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
         shader->set_uniform("width", 0.5f);
         shader->set_uniform("gap_size", 0.0f);
-#if !PREFLIGHT_OPENGL_ES
     }
-#endif // !PREFLIGHT_OPENGL_ES
     m_model.set_color(complementary(m_parent.render_color));
     m_model.render();
 }
@@ -576,18 +566,10 @@ int GLVolumeCollection::load_object_volume(const ModelObject *model_object, int 
     return int(this->volumes.size() - 1);
 }
 
-#if PREFLIGHT_OPENGL_ES
-GLVolume *GLVolumeCollection::load_wipe_tower_preview(float pos_x, float pos_y, float width, float depth,
-                                                      const std::vector<std::pair<float, float>> &z_and_depth_pairs,
-                                                      float height, float cone_angle, float rotation_angle,
-                                                      bool size_unknown, float brim_width, size_t idx,
-                                                      TriangleMesh *out_mesh)
-#else
 GLVolume *GLVolumeCollection::load_wipe_tower_preview(float pos_x, float pos_y, float width, float depth,
                                                       const std::vector<std::pair<float, float>> &z_and_depth_pairs,
                                                       float height, float cone_angle, float rotation_angle,
                                                       bool size_unknown, float brim_width, size_t idx)
-#endif // PREFLIGHT_OPENGL_ES
 {
     if (height == 0.0f)
         height = 0.1f;
@@ -687,10 +669,6 @@ GLVolume *GLVolumeCollection::load_wipe_tower_preview(float pos_x, float pos_y, 
 
     GLVolume *result{new GLVolume(color)};
     GLVolume &v = *result;
-#if PREFLIGHT_OPENGL_ES
-    if (out_mesh != nullptr)
-        *out_mesh = mesh;
-#endif // PREFLIGHT_OPENGL_ES
     v.model.init_from(mesh);
     v.model.set_color(color);
     v.mesh_raycaster = std::make_unique<DSKY::MeshRaycaster>(std::make_shared<const TriangleMesh>(mesh));
@@ -771,13 +749,9 @@ void GLVolumeCollection::render(GLVolumeCollection::ERenderType type, bool disab
 
     GLShaderProgram *curr_shader = ctx.get_current_shader();
     GLShaderProgram *sink_shader = ctx.get_shader("flat");
-#if PREFLIGHT_OPENGL_ES
-    GLShaderProgram *edges_shader = ctx.get_shader("dashed_lines");
-#else
     GLShaderProgram *edges_shader = DSKY::OpenGLManager::get_gl_info().is_core_profile()
                                         ? ctx.get_shader("dashed_thick_lines")
                                         : ctx.get_shader("flat");
-#endif // PREFLIGHT_OPENGL_ES
     GLShaderProgram *mmu_painted_shader = ctx.get_shader("mm_color_preview");
     if (!mmu_painted_shader)
         mmu_painted_shader = ctx.get_shader("mm_gouraud"); // fallback

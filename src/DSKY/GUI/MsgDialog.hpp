@@ -33,6 +33,12 @@ struct HtmlContent
     t_link_clicked on_link_clicked{nullptr};
 };
 
+#ifdef PREFLIGHT_TEST_HOOKS
+// The test hooks' switch PREFLIGHT_AUTO_DISMISS_DIALOGS (set and not "0", read once per process): a
+// dialog that honours it is answered without being shown, and a question is declined
+bool auto_dismiss_dialogs();
+#endif
+
 // A message / query dialog with a bitmap on the left and any content on the right
 // with buttons underneath.
 struct MsgDialog : wxDialog
@@ -42,6 +48,11 @@ struct MsgDialog : wxDialog
     MsgDialog &operator=(MsgDialog &&) = delete;
     MsgDialog &operator=(const MsgDialog &) = delete;
     virtual ~MsgDialog() = default;
+
+    // In a build with the test hooks, under PREFLIGHT_AUTO_DISMISS_DIALOGS=1 (automated runs) the dialog
+    // is not shown: a notice returns its default button's id, a question is declined (Cancel, else No),
+    // and the GUI budget logs its title (a question is counted)
+    int ShowModal() override;
 
     void SetButtonLabel(wxWindowID btn_id, const wxString &label, bool set_focus = false);
 

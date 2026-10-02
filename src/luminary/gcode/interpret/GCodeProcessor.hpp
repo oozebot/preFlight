@@ -684,6 +684,8 @@ private:
     // count exceeds this value. 0 = full detail (no limit). Read from AppConfig.
     size_t m_preview_detail_threshold = 10'000'000;
     bool m_large_print_optimization_applied = false;
+    // Whether the last run skipped the interpolation, kept after finalize() reports and clears the flag above
+    bool m_preview_detail_reduced = false;
 
     // Per-job state for calculate_time progress reporting (was static locals)
     size_t m_ct_total_lines = 0;
@@ -739,6 +741,11 @@ public:
 
     void set_gcode_object(GCodeObject *gco);
     void set_preview_detail_threshold(size_t threshold) { m_preview_detail_threshold = threshold; }
+    // Whether the last processed G-code had more moves than the preview detail threshold, so the acceleration and
+    // deceleration points of the speed view were skipped
+    bool preview_detail_reduced() const { return m_preview_detail_reduced; }
+    // The notice shown when the preview detail was reduced, with the move count in millions to one decimal
+    static std::string preview_detail_reduced_message(size_t moves);
 
     float get_time(PrintEstimatedStatistics::ETimeMode mode) const;
     std::string get_time_dhm(PrintEstimatedStatistics::ETimeMode mode) const;

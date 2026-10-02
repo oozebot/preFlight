@@ -1886,6 +1886,7 @@ void GCodeProcessor::reset()
     m_accumulated_speed_moves.clear();
     m_used_filaments.reset();
     m_large_print_optimization_applied = false;
+    m_preview_detail_reduced = false;
     m_ct_total_lines = 0;
     m_ct_last_move_count = 0;
     m_ct_last_progress = 50;
@@ -2094,6 +2095,8 @@ void GCodeProcessor::run_preprocessing_scripts()
             if (!all_scripts.empty())
             {
                 m_print->set_status(85, _u8L("Preprocessing G-code"));
+                // The post-processing pass reports only above this; a re-parse after the scripts resets it
+                m_ct_last_progress = 85;
 
                 std::string res_dir = resources_dir();
                 GCodeObject *gco_for_scripts = input_gco;
@@ -2558,10 +2561,33 @@ void GCodeProcessor::post_process_gcode_object()
         return false;
     };
 
+    // The walk over the lines reports 75% to 83% of the bar, the rebuild after it 84%, each percent once
+    // and never below an earlier report, and polls cancellation at the same points.
+    auto report_status = [this](int percent)
+    {
+        if (m_print == nullptr)
+            return;
+        m_print->throw_if_canceled();
+        if (percent > m_ct_last_progress)
+        {
+            m_print->set_status(percent, _u8L("Processing G-code"));
+            m_ct_last_progress = percent;
+        }
+    };
+    // First line index at which the percent rises, so a line costs one compare
+    size_t next_status_line = 0;
+
     // Post-process the virtual file: insert M73 progress lines using g1_times_cache,
     // replace placeholder comments, and handle tool change backtrace (XL printers).
     for (size_t line_idx = 0; line_idx < input_line_count; ++line_idx)
     {
+        if (line_idx >= next_status_line)
+        {
+            const size_t step = line_idx * 9 / input_line_count;
+            report_status(75 + static_cast<int>(step));
+            next_status_line = ((step + 1) * input_line_count + 8) / 9;
+        }
+
         // The line with one trailing newline: a view into the input when it already ends in
         // "\n" without a carriage return, an owned copy otherwise (the last line, or CRLF).
         const std::string_view input = input_gco->get_line_text(line_idx);
@@ -2661,6 +2687,7 @@ void GCodeProcessor::post_process_gcode_object()
         if (!emitted)
             append_view(gcode_line, line_idx + 1);
     }
+    report_status(84);
 
     // Build post-processed GCodeObject with move linkage from output_lines.
     {
@@ -3151,8 +3178,11 @@ void GCodeProcessor::finalize(bool perform_post_process)
         m_accumulated_speed_moves.clear();
     }
 
-    // calculate_time() will report smooth progress from 50% to 85%
+    PerfStageTimer finalize_timer;
+    finalize_timer.reset();
+    // calculate_time() will report smooth progress from 50% to 75%
     calculate_time(m_result);
+    finalize_timer.stage("finalize: calculate_time");
 
     // Compute max commands-per-second metrics by scanning 1-second windows.
     {
@@ -3348,18 +3378,30 @@ void GCodeProcessor::finalize(bool perform_post_process)
     // update statistics (instant)
     update_estimated_statistics();
 
+    // A loaded G-code has no Print to warn through; its caller reads preview_detail_reduced()
+    m_preview_detail_reduced = m_large_print_optimization_applied;
     if (m_large_print_optimization_applied && m_print && perform_post_process)
     {
         m_print->active_step_add_warning(PrintStateBase::WarningLevel::NON_CRITICAL,
-                                         "Large print detected (" + std::to_string(m_result.moves.size() / 1'000'000) +
-                                             "M segments). Preview detail was reduced to improve slicing performance. "
-                                             "This does not affect print quality or time estimation.");
+                                         preview_detail_reduced_message(m_result.moves.size()));
         m_large_print_optimization_applied = false;
     }
 
+    finalize_timer.stage("finalize: metrics, caches and statistics");
     // post-process
     if (perform_post_process)
         post_process();
+    finalize_timer.stage("finalize: post_process");
+}
+
+std::string GCodeProcessor::preview_detail_reduced_message(size_t moves)
+{
+    char millions[32];
+    std::snprintf(millions, sizeof(millions), "%.1f", double(moves) / 1'000'000.0);
+    return format(_u8L("Large print detected (%1%M moves). Preview detail was lowered to save memory and processing "
+                       "time. This does not affect print quality or time estimation. The limit is set by Preview "
+                       "Detail in Preferences > Performance."),
+                  millions);
 }
 
 float GCodeProcessor::get_time(PrintEstimatedStatistics::ETimeMode mode) const
@@ -7689,8 +7731,8 @@ void GCodeProcessor::calculate_time(GCodeProcessorResult &result, size_t keep_la
         size_t line_count = m_result.gcode_object ? m_result.gcode_object->line_count() : 0;
         if (m_print && line_count > 0)
         {
-            int progress = 50 + static_cast<int>((result.moves.size() * 35.0) / line_count);
-            progress = std::min(progress, 85);
+            int progress = 50 + static_cast<int>((result.moves.size() * 25.0) / line_count);
+            progress = std::min(progress, 75);
             if (progress > m_ct_last_progress)
             {
                 m_print->set_status(progress, _u8L("Processing G-code"));
@@ -7790,9 +7832,10 @@ void GCodeProcessor::calculate_time(GCodeProcessorResult &result, size_t keep_la
     size_t line_count = m_result.gcode_object ? m_result.gcode_object->line_count() : 0;
     if (m_print && line_count > 0)
     {
-        // Progress from 50% to 85% based on moves processed vs total gcode lines (35% range)
-        int progress = 50 + static_cast<int>((result.moves.size() * 35.0) / line_count);
-        progress = std::min(progress, 85); // Cap at 85%
+        // Progress from 50% to 75% based on moves processed vs total gcode lines (25% range); the
+        // post-processing pass reports 75% to 84%
+        int progress = 50 + static_cast<int>((result.moves.size() * 25.0) / line_count);
+        progress = std::min(progress, 75); // Cap at 75%
 
         // Only update if progress increased (avoid UI flicker)
         if (progress > m_ct_last_progress)

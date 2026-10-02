@@ -2086,8 +2086,9 @@ void NotificationManager::SlicingProgressNotification::init()
 }
 bool NotificationManager::SlicingProgressNotification::set_progress_state(float percent)
 {
+    // A status without a percentage (a warnings update) leaves the bar and its label as they are
     if (percent < 0.f)
-        return true; //set_progress_state(SlicingProgressState::SP_CANCELLED);
+        return false;
     else if (percent >= 1.f)
     {
         // When reaching 100%, stay in current state (SP_PROGRESS or SP_RENDERING)

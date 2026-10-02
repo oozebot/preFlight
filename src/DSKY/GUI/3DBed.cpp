@@ -23,11 +23,7 @@
 #include "Camera.hpp"
 #include "Widgets/UIColors.hpp"
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 #include <boost/algorithm/string/predicate.hpp>
 #include <boost/filesystem/operations.hpp>
@@ -878,10 +874,8 @@ void Bed3D::render_contour(const Transform3d &view_matrix, const Transform3d &pr
         glsafe(::glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA));
 
         // draw contour
-#if !PREFLIGHT_OPENGL_ES
         if (!OpenGLManager::get_gl_info().is_core_profile())
             glsafe(::glLineWidth(1.5f * m_scale_factor));
-#endif // !PREFLIGHT_OPENGL_ES
         m_contourlines.render();
 
         glsafe(::glDisable(GL_BLEND));

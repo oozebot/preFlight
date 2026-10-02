@@ -4,6 +4,7 @@
 ///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
 ///|/
 #include "../include/Viewer.hpp"
+#include "../include/GCodeInputData.hpp"
 #include "ViewerImpl.hpp"
 
 namespace libvgcode
@@ -37,6 +38,32 @@ void Viewer::reset()
 void Viewer::load(GCodeInputData &&gcode_data)
 {
     m_impl->load(std::move(gcode_data));
+}
+
+PreparedLoad Viewer::prepare(GCodeInputData &&gcode_data, const PrepareSettings &settings,
+                             const std::function<void(float)> &progress, const std::function<bool()> &canceled)
+{
+    return prepare_load(std::move(gcode_data), settings, progress, canceled);
+}
+
+PrepareSettings Viewer::get_prepare_settings() const
+{
+    return m_impl->get_prepare_settings();
+}
+
+ViewSettings Viewer::get_view_settings() const
+{
+    return m_impl->get_view_settings();
+}
+
+const std::array<Color, GCODE_EXTRUSION_ROLES_COUNT> &Viewer::get_default_extrusion_roles_colors()
+{
+    return ViewerImpl::default_extrusion_roles_colors();
+}
+
+void Viewer::load(PreparedLoad &&prepared)
+{
+    m_impl->load(std::move(prepared));
 }
 
 void Viewer::render(const Mat4x4 &view_matrix, const Mat4x4 &projection_matrix)
@@ -193,6 +220,208 @@ float Viewer::get_wipes_radius() const
 void Viewer::set_wipes_radius(float radius)
 {
     m_impl->set_wipes_radius(radius);
+}
+
+bool Viewer::get_sample_shading() const
+{
+    return m_impl->get_sample_shading();
+}
+
+void Viewer::set_sample_shading(bool enable)
+{
+    m_impl->set_sample_shading(enable);
+}
+
+bool Viewer::is_sample_shading_active() const
+{
+    return m_impl->is_sample_shading_active();
+}
+
+bool Viewer::is_sample_shading_gated() const
+{
+    return m_impl->is_sample_shading_gated();
+}
+
+const std::string &Viewer::get_sample_shading_reason() const
+{
+    return m_impl->get_sample_shading_reason();
+}
+
+void Viewer::set_toolpath_prefilter(bool enable)
+{
+    m_impl->set_toolpath_prefilter(enable);
+}
+
+bool Viewer::get_toolpath_prefilter() const
+{
+    return m_impl->get_toolpath_prefilter();
+}
+
+void Viewer::set_output_pixel_scale(float scale)
+{
+    m_impl->set_output_pixel_scale(scale);
+}
+
+bool Viewer::is_toolpath_prefilter_active() const
+{
+    return m_impl->is_toolpath_prefilter_active();
+}
+
+const std::string &Viewer::get_toolpath_prefilter_reason() const
+{
+    return m_impl->get_toolpath_prefilter_reason();
+}
+
+const std::string &Viewer::get_toolpath_prefilter_shader_log() const
+{
+    return m_impl->get_toolpath_prefilter_shader_log();
+}
+
+const PrefilterNeighbourStats &Viewer::get_prefilter_neighbour_stats() const
+{
+    return m_impl->get_prefilter_neighbour_stats();
+}
+
+void Viewer::set_keep_prefilter_neighbours(bool keep)
+{
+    m_impl->set_keep_prefilter_neighbours(keep);
+}
+
+const std::vector<float> &Viewer::get_prefilter_offsets_x() const
+{
+    return m_impl->get_prefilter_offsets_x();
+}
+
+const std::vector<float> &Viewer::get_prefilter_offsets_y() const
+{
+    return m_impl->get_prefilter_offsets_y();
+}
+
+const std::vector<uint8_t> &Viewer::get_prefilter_flags() const
+{
+    return m_impl->get_prefilter_flags();
+}
+
+void Viewer::set_sealed_bead_culling(bool enable)
+{
+    m_impl->set_sealed_bead_culling(enable);
+}
+
+bool Viewer::get_sealed_bead_culling() const
+{
+    return m_impl->get_sealed_bead_culling();
+}
+
+const SealedBeadStats &Viewer::get_sealed_bead_stats() const
+{
+    return m_impl->get_sealed_bead_stats();
+}
+
+void Viewer::set_chunk_culling(bool enable)
+{
+    m_impl->set_chunk_culling(enable);
+}
+
+bool Viewer::get_chunk_culling() const
+{
+    return m_impl->get_chunk_culling();
+}
+
+const ViewChunkStats &Viewer::get_view_chunk_stats() const
+{
+    return m_impl->get_view_chunk_stats();
+}
+
+const PrintChunkStats &Viewer::get_print_chunk_stats() const
+{
+    return m_impl->get_print_chunk_stats();
+}
+
+void Viewer::set_occlusion_culling(bool enable)
+{
+    m_impl->set_occlusion_culling(enable);
+}
+
+bool Viewer::get_occlusion_culling() const
+{
+    return m_impl->get_occlusion_culling();
+}
+
+void Viewer::set_occlusion_occluder_cap(size_t segments)
+{
+    m_impl->set_occlusion_occluder_cap(segments);
+}
+
+size_t Viewer::get_occlusion_occluder_cap() const
+{
+    return m_impl->get_occlusion_occluder_cap();
+}
+
+void Viewer::set_occlusion_shadow_all_max(size_t segments)
+{
+    m_impl->set_occlusion_shadow_all_max(segments);
+}
+
+size_t Viewer::get_occlusion_shadow_all_max() const
+{
+    return m_impl->get_occlusion_shadow_all_max();
+}
+
+void Viewer::set_occlusion_shadow_merge(bool merge)
+{
+    m_impl->set_occlusion_shadow_merge(merge);
+}
+
+bool Viewer::get_occlusion_shadow_merge() const
+{
+    return m_impl->get_occlusion_shadow_merge();
+}
+
+const OcclusionStats &Viewer::get_occlusion_stats() const
+{
+    return m_impl->get_occlusion_stats();
+}
+
+void Viewer::reset_occlusion_bench()
+{
+    m_impl->reset_occlusion_bench();
+}
+
+const ViewUpdateStats &Viewer::get_view_update_stats() const
+{
+    return m_impl->get_view_update_stats();
+}
+
+void Viewer::reset_view_update_stats()
+{
+    m_impl->reset_view_update_stats();
+}
+
+const ListUploadStats &Viewer::get_list_upload_stats() const
+{
+    return m_impl->get_list_upload_stats();
+}
+
+#ifdef PREFLIGHT_TEST_HOOKS
+void Viewer::request_visibility_probe()
+{
+    m_impl->request_visibility_probe();
+}
+
+const VisibilityProbeStats &Viewer::get_visibility_probe_stats() const
+{
+    return m_impl->get_visibility_probe_stats();
+}
+
+const std::vector<uint8_t> &Viewer::get_visibility_probe_mask() const
+{
+    return m_impl->get_visibility_probe_mask();
+}
+#endif // PREFLIGHT_TEST_HOOKS
+
+const LoadPhaseStats &Viewer::get_load_phase_stats() const
+{
+    return m_impl->get_load_phase_stats();
 }
 
 size_t Viewer::get_layers_count() const

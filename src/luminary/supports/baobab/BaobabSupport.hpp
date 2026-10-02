@@ -51,7 +51,7 @@ namespace Baobab
 {
 // Development override for the canopy's contraction slope, from vertical. Zero means "use the
 // Maximum canopy angle setting" (`support_baobab_max_canopy_angle`); a positive value overrides
-// it for a sweep. Capped by the bead rule below, never by this value alone.
+// it. Capped by the bead rule below, never by this value alone.
 inline constexpr double taper_angle_deg = 0.;
 
 // Concentric wall loops around any section wide enough to carry them. Unconditional, unlike the
@@ -60,8 +60,9 @@ inline constexpr double taper_angle_deg = 0.;
 inline constexpr int wall_count = 2;
 } // namespace Baobab
 
-// Effective taper override: PREFLIGHT_BAOBAB_TAPER_DEG sweeps the canopy slope without a
-// rebuild; zero or unset defers to the Maximum canopy angle setting. Read once per process.
+// Effective taper override: in a build with the test hooks, PREFLIGHT_BAOBAB_TAPER_DEG sets the canopy
+// slope without a rebuild; zero or unset defers to the Maximum canopy angle setting. Read once per
+// process.
 double baobab_taper_angle_deg();
 
 // How far a printed outline may grow outward from the layer below, before the new bead

@@ -21,11 +21,7 @@
 #include "luminary/layer/print/Print.hpp"
 #include "DSKY/GUI/MsgDialog.hpp"
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 #include <algorithm>
 
 namespace DSKY

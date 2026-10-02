@@ -31,6 +31,95 @@ namespace DSKY
 {
 using namespace Luminary;
 
+#ifdef _WIN32
+namespace
+{
+// A bundle that makes its bitmap of each size once and shares it. wxBitmapBundle::GetBitmap(size)
+// sets the scale factor size / default size on the bitmap it returns, and on MSW setting a factor
+// the shared bitmap does not have yet copies it (AllocExclusive). wx's bundles keep their bitmaps at
+// the factor they were made with, so at a display scale other than 100% each request would copy one
+// (a GDI object per holder: six per CheckBox for its glyphs). The bitmap cached here already has the
+// factor, so every request of a size shares it.
+class SharedSizesBundle : public wxBitmapBundleImpl
+{
+public:
+    wxBitmap GetBitmap(const wxSize &size) override
+    {
+        for (const auto &[cached_size, bitmap] : m_bitmaps)
+            if (cached_size == size)
+                return bitmap;
+        wxBitmap bitmap = Make(size);
+        if (m_bitmaps.size() >= MAX_SIZES)
+            m_bitmaps.erase(m_bitmaps.begin());
+        m_bitmaps.emplace_back(size, bitmap);
+        return bitmap;
+    }
+
+protected:
+    // The bitmap of a size with its scale factor set, as wxBitmapBundle::GetBitmap returns it
+    virtual wxBitmap Make(const wxSize &size) = 0;
+
+private:
+    // The sizes one icon is drawn at: its default, a scaled one, and one more across a DPI change
+    static constexpr size_t MAX_SIZES = 3;
+
+    std::vector<std::pair<wxSize, wxBitmap>> m_bitmaps;
+};
+
+// An SVG icon: a bundle that lives for one call rasterizes each size, so only the shared bitmap stays
+class SharedSvgBundle : public SharedSizesBundle
+{
+public:
+    SharedSvgBundle(std::string data, const wxSize &default_size)
+        : m_data(std::move(data)), m_default_size(default_size)
+    {
+    }
+
+    wxSize GetDefaultSize() const override { return m_default_size; }
+    // Any scale renders, as wx's SVG bundle does
+    wxSize GetPreferredBitmapSizeAtScale(double scale) const override { return m_default_size * scale; }
+
+protected:
+    wxBitmap Make(const wxSize &size) override
+    {
+        return wxBitmapBundle::FromSVG(m_data.c_str(), m_default_size).GetBitmap(size);
+    }
+
+private:
+    std::string m_data;
+    wxSize m_default_size;
+};
+
+// Any other bundle (bitmaps made per display scale, PNG icons, colour swatches), which keeps its own
+class SharedBundle : public SharedSizesBundle
+{
+public:
+    explicit SharedBundle(const wxBitmapBundle &bundle) : m_bundle(bundle) {}
+
+    wxSize GetDefaultSize() const override { return m_bundle.GetDefaultSize(); }
+    wxSize GetPreferredBitmapSizeAtScale(double scale) const override
+    {
+        return m_bundle.GetPreferredBitmapSizeAtScale(scale);
+    }
+
+protected:
+    wxBitmap Make(const wxSize &size) override { return m_bundle.GetBitmap(size); }
+
+private:
+    wxBitmapBundle m_bundle;
+};
+} // namespace
+#endif
+
+wxBitmapBundle share_bitmap_sizes(const wxBitmapBundle &bundle)
+{
+#ifdef _WIN32
+    if (bundle.IsOk())
+        return wxBitmapBundle::FromImpl(new SharedBundle(bundle));
+#endif
+    return bundle;
+}
+
 // The active theme's accent as an "#RRGGBB" string, for recoloring the brand orange that is
 // baked into the SVG icons (the same string-replace path that turns black into white for dark themes).
 static std::string theme_accent_hex()
@@ -267,16 +356,22 @@ wxBitmapBundle *BitmapCache::insert_bndl(const std::string &name, const std::vec
 wxBitmapBundle *BitmapCache::insert_bndl(const std::string &bitmap_key, const char *data, size_t width, size_t height)
 {
     wxBitmapBundle *bndl = nullptr;
+    wxBitmapBundle svg = wxBitmapBundle::FromSVG(data, wxSize(width, height));
+#ifdef _WIN32
+    // An SVG that does not parse stays the invalid bundle wx returns for it
+    if (svg.IsOk())
+        svg = wxBitmapBundle::FromImpl(new SharedSvgBundle(data, wxSize(width, height)));
+#endif
     auto it = m_bndl_map.find(bitmap_key);
     if (it == m_bndl_map.end())
     {
-        bndl = new wxBitmapBundle(wxBitmapBundle::FromSVG(data, wxSize(width, height)));
+        bndl = new wxBitmapBundle(svg);
         m_bndl_map[bitmap_key] = bndl;
     }
     else
     {
         bndl = it->second;
-        *bndl = wxBitmapBundle::FromSVG(data, wxSize(width, height));
+        *bndl = svg;
     }
     return bndl;
 }
@@ -287,13 +382,13 @@ wxBitmapBundle *BitmapCache::insert_bndl(const std::string &bitmap_key, const wx
     auto it = m_bndl_map.find(bitmap_key);
     if (it == m_bndl_map.end())
     {
-        bndl = new wxBitmapBundle(bmp);
+        bndl = new wxBitmapBundle(share_bitmap_sizes(bmp));
         m_bndl_map[bitmap_key] = bndl;
     }
     else
     {
         bndl = it->second;
-        *bndl = wxBitmapBundle(bmp);
+        *bndl = share_bitmap_sizes(bmp);
     }
     return bndl;
 }
@@ -304,13 +399,13 @@ wxBitmapBundle *BitmapCache::insert_bndl(const std::string &bitmap_key, const wx
     auto it = m_bndl_map.find(bitmap_key);
     if (it == m_bndl_map.end())
     {
-        bndl = new wxBitmapBundle(wxBitmapBundle::FromBitmaps(bmps));
+        bndl = new wxBitmapBundle(share_bitmap_sizes(wxBitmapBundle::FromBitmaps(bmps)));
         m_bndl_map[bitmap_key] = bndl;
     }
     else
     {
         bndl = it->second;
-        *bndl = wxBitmapBundle::FromBitmaps(bmps);
+        *bndl = share_bitmap_sizes(wxBitmapBundle::FromBitmaps(bmps));
     }
     return bndl;
 }
@@ -823,7 +918,7 @@ wxBitmapBundle BitmapCache::mksolid(size_t width_in, size_t height_in, unsigned 
 
         bitmaps.push_back(wxImage_to_wxBitmap_with_alpha(std::move(image), scale));
     }
-    return wxBitmapBundle::FromBitmaps(bitmaps);
+    return share_bitmap_sizes(wxBitmapBundle::FromBitmaps(bitmaps));
 }
 
 wxBitmapBundle *BitmapCache::mksolid_bndl(size_t width, size_t height, const std::string &color, size_t border_width,

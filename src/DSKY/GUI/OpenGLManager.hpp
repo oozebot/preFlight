@@ -12,6 +12,11 @@ class wxGLCanvas;
 class wxGLContext;
 class wxGLAttributes;
 
+namespace Luminary
+{
+class AppConfig;
+}
+
 namespace DSKY
 {
 using namespace Luminary;
@@ -55,14 +60,6 @@ public:
         bool is_core_profile() const { return m_core_profile; }
 
         bool is_mesa() const;
-        bool is_es() const
-        {
-#if PREFLIGHT_OPENGL_ES
-            return true;
-#else
-            return false;
-#endif // PREFLIGHT_OPENGL_ES
-        }
 
         int get_max_tex_size() const;
         float get_max_anisotropy() const;
@@ -74,13 +71,14 @@ public:
         // Otherwise HTML formatted for the system info dialog.
         std::string to_string(bool for_github) const;
 
-#if !PREFLIGHT_OPENGL_ES
         std::vector<std::string> get_extensions_list() const;
-#endif // !PREFLIGHT_OPENGL_ES
 
         // Returns true if the current GPU + lighting quality setting should use phong shading.
         // Centralizes the GPU allowlist/blocklist logic for all callers.
         bool should_use_phong(const std::string &lighting_quality) const;
+
+        // True for a CPU rasterizer (llvmpipe, softpipe, SwiftShader), named by its GL_RENDERER string
+        static bool is_software_renderer(const std::string &renderer);
 
     private:
         void detect() const;
@@ -119,18 +117,17 @@ private:
 
     static EMultisampleState s_multisample;
     static EFramebufferType s_framebuffers_type;
+    // The MSAA request the canvas pixel format was created for, and the sample count it was granted
+    static int s_msaa_requested;
+    static int s_msaa_window_samples;
 
 public:
     OpenGLManager() = default;
     ~OpenGLManager();
 
     bool init_gl();
-#if PREFLIGHT_OPENGL_ES
-    wxGLContext *init_glcontext(wxGLCanvas &canvas);
-#else
     wxGLContext *init_glcontext(wxGLCanvas &canvas, const std::pair<int, int> &required_opengl_version,
                                 bool enable_compatibility_profile, bool enable_debug);
-#endif // PREFLIGHT_OPENGL_ES
 
     GLShaderProgram *get_shader(const std::string &shader_name) { return m_shaders_manager.get_shader(shader_name); }
     GLShaderProgram *get_current_shader() { return m_shaders_manager.get_current_shader(); }
@@ -143,11 +140,18 @@ public:
     static bool can_multisample() { return s_multisample == EMultisampleState::Enabled; }
     static bool are_framebuffers_supported() { return (s_framebuffers_type != EFramebufferType::Unknown); }
     static EFramebufferType get_framebuffers_type() { return s_framebuffers_type; }
-    // msaa_samples: -1 = auto (try highest available), 0 = off, 2/4/8/16 = explicit
+    // msaa_samples: -1 = auto (up to 8x), 0 = off, 2/4/8/16 = explicit; an explicit count the display
+    // cannot give steps down to the highest one it can
     static wxGLCanvas *create_wxglcanvas(wxWindow &parent, int msaa_samples = -1);
+    // The MSAA request for the canvas pixel format from the preferences: -1 Auto, 0 off, else samples.
+    // force_auto is the --opengl-aa command line option. count_fallbacks false only asks what a canvas created now
+    // would request, without counting the adjustments as fallbacks.
+    static int resolve_msaa_request(const AppConfig *config, bool force_auto, bool count_fallbacks = true);
+    static int msaa_requested() { return s_msaa_requested; }
+    // Samples of the pixel format the canvases were created with (0 without MSAA)
+    static int msaa_window_samples() { return s_msaa_window_samples; }
     static const GLInfo &get_gl_info() { return s_gl_info; }
     static bool force_power_of_two_textures() { return s_force_power_of_two_textures; }
 };
 
 } // namespace DSKY
-

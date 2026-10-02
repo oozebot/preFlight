@@ -8,7 +8,7 @@
 #
 # Usage: ./build.sh [options]
 #   -deps     Build dependencies only
-#   -debug    Build RelWithDebInfo instead of Release
+#   -debug    Build RelWithDebInfo instead of Release, with the test hooks
 #   -clean    Remove build directory and reconfigure from scratch
 #   -config   Run cmake configure only, don't build
 #   -flush    Force resource recompilation (Windows: icons, splash screen)
@@ -37,12 +37,13 @@ FLUSH=0
 JOBS=""
 ARCH=""
 TESTS=OFF
+TEST_HOOKS=OFF
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -deps)    BUILD_DEPS=1 ;;
-        -debug)   CONFIG="RelWithDebInfo"; BUILD_SUBDIR="_debug" ;;
+        -debug)   CONFIG="RelWithDebInfo"; BUILD_SUBDIR="_debug"; TEST_HOOKS=ON ;;
         -clean)   CLEAN=1 ;;
         -config)  CONFIG_ONLY=1 ;;
         -flush)   FLUSH=1 ;;
@@ -208,6 +209,7 @@ cmake "$SCRIPT_DIR" -G Ninja \
     -DPREFLIGHT_STATIC=1 \
     -DPREFLIGHT_PCH=1 \
     -DPREFLIGHT_BUILD_TESTS="$TESTS" \
+    -DPREFLIGHT_TEST_HOOKS="$TEST_HOOKS" \
     -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
     $CMAKE_EXTRA_ARGS
 

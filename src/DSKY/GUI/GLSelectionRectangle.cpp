@@ -12,11 +12,7 @@
 #include "Plater.hpp"
 #include <igl/project.h>
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 namespace DSKY
 {
@@ -82,20 +78,14 @@ void GLSelectionRectangle::render(const GLCanvas3D &canvas)
     const float top = -2.0f * (get_top() * cnv_inv_height - 0.5f);
     const float bottom = -2.0f * (get_bottom() * cnv_inv_height - 0.5f);
 
-#if !PREFLIGHT_OPENGL_ES
     if (!OpenGLManager::get_gl_info().is_core_profile())
         glsafe(::glLineWidth(1.5f * wxGetApp().imgui()->get_style_scaling()));
-#endif // !PREFLIGHT_OPENGL_ES
 
     glsafe(::glDisable(GL_DEPTH_TEST));
 
-#if PREFLIGHT_OPENGL_ES
-    GLShaderProgram *shader = wxGetApp().get_shader("dashed_lines");
-#else
     GLShaderProgram *shader = OpenGLManager::get_gl_info().is_core_profile()
                                   ? wxGetApp().get_shader("dashed_thick_lines")
                                   : wxGetApp().get_shader("flat");
-#endif // PREFLIGHT_OPENGL_ES
     if (shader != nullptr)
     {
         shader->start_using();
@@ -108,14 +98,11 @@ void GLSelectionRectangle::render(const GLCanvas3D &canvas)
             m_rectangle.reset();
 
             GLModel::Geometry init_data;
-#if !PREFLIGHT_OPENGL_ES
             if (OpenGLManager::get_gl_info().is_core_profile())
             {
-#endif // !PREFLIGHT_OPENGL_ES
                 init_data.format = {GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P4};
                 init_data.reserve_vertices(5);
                 init_data.reserve_indices(8);
-#if !PREFLIGHT_OPENGL_ES
             }
             else
             {
@@ -123,13 +110,10 @@ void GLSelectionRectangle::render(const GLCanvas3D &canvas)
                 init_data.reserve_vertices(4);
                 init_data.reserve_indices(4);
             }
-#endif // !PREFLIGHT_OPENGL_ES
 
             // vertices
-#if !PREFLIGHT_OPENGL_ES
             if (OpenGLManager::get_gl_info().is_core_profile())
             {
-#endif // !PREFLIGHT_OPENGL_ES
                 const float width = right - left;
                 const float height = top - bottom;
                 float perimeter = 0.0f;
@@ -149,7 +133,6 @@ void GLSelectionRectangle::render(const GLCanvas3D &canvas)
                 init_data.add_line(1, 2);
                 init_data.add_line(2, 3);
                 init_data.add_line(3, 4);
-#if !PREFLIGHT_OPENGL_ES
             }
             else
             {
@@ -164,25 +147,20 @@ void GLSelectionRectangle::render(const GLCanvas3D &canvas)
                 init_data.add_index(2);
                 init_data.add_index(3);
             }
-#endif // !PREFLIGHT_OPENGL_ES
 
             m_rectangle.init_from(std::move(init_data));
         }
 
         shader->set_uniform("view_model_matrix", Transform3d::Identity());
         shader->set_uniform("projection_matrix", Transform3d::Identity());
-#if !PREFLIGHT_OPENGL_ES
         if (OpenGLManager::get_gl_info().is_core_profile())
         {
-#endif // !PREFLIGHT_OPENGL_ES
             const std::array<int, 4> &viewport = wxGetApp().plater()->get_camera().get_viewport();
             shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
             shader->set_uniform("width", 0.25f);
             shader->set_uniform("dash_size", 0.01f);
             shader->set_uniform("gap_size", 0.0075f);
-#if !PREFLIGHT_OPENGL_ES
         }
-#endif // !PREFLIGHT_OPENGL_ES
 
         m_rectangle.set_color(ColorRGBA((m_state == EState::Select) ? 0.3f : 1.0f,
                                         (m_state == EState::Select) ? 1.0f : 0.3f, 0.3f, 1.0f));

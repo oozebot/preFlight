@@ -18,6 +18,7 @@
 #include <wx/progdlg.h>
 
 #include "luminary/config/catalog/PrintConfig.hpp"
+#include "luminary/core/text/Json.hpp"
 #include "DSKY/GUI/I18N.hpp"
 #include "DSKY/GUI/GUI.hpp"
 #include "DSKY/GUI/format.hpp"
@@ -88,9 +89,8 @@ bool Repetier::test(wxString &msg) const
 
                 try
                 {
-                    std::stringstream ss(body);
                     pt::ptree ptree;
-                    pt::read_json(ss, ptree);
+                    read_json_bounded(body, ptree);
 
                     const auto text = ptree.get_optional<std::string>("name");
                     const auto soft = ptree.get_optional<std::string>("software");
@@ -247,9 +247,8 @@ bool Repetier::get_groups(wxArrayString &groups) const
 
                 try
                 {
-                    std::stringstream ss(body);
                     pt::ptree ptree;
-                    pt::read_json(ss, ptree);
+                    read_json_bounded(body, ptree);
 
                     BOOST_FOREACH (boost::property_tree::ptree::value_type &v, ptree.get_child("groupNames."))
                     {
@@ -304,11 +303,10 @@ bool Repetier::get_printers(wxArrayString &printers) const
                     throw HostNetworkError(
                         DSKY::format(_L("HTTP status: %1%\nMessage body: \"%2%\""), http_status, body));
 
-                std::stringstream ss(body);
                 pt::ptree ptree;
                 try
                 {
-                    pt::read_json(ss, ptree);
+                    read_json_bounded(body, ptree);
                 }
                 catch (const pt::ptree_error &err)
                 {

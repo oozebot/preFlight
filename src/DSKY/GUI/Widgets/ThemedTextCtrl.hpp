@@ -5,7 +5,6 @@
 #pragma once
 
 #include <wx/textctrl.h>
-#include <wx/brush.h>
 
 #ifdef _WIN32
 #include <wx/msw/wrapwin.h>
@@ -38,7 +37,7 @@ public:
                 const wxPoint &pos = wxDefaultPosition, const wxSize &size = wxDefaultSize, long style = 0,
                 const wxValidator &validator = wxDefaultValidator, const wxString &name = wxTextCtrlNameStr);
 
-    virtual ~ThemedTextCtrl();
+    virtual ~ThemedTextCtrl() = default;
 
     /// Set both background and foreground colors
     /// These colors WILL be applied even on Windows, even after the control is visible
@@ -69,14 +68,8 @@ public:
 #endif
 
 private:
-    void UpdateBrush();
-
     wxColour m_themedBgColor;
     wxColour m_themedFgColor;
-    wxBrush m_bgBrush;
-#ifdef _WIN32
-    HBRUSH m_hBgBrush = NULL; // Native GDI brush for MSWControlColor
-#endif
     bool m_hasThemedColors = false;
     bool m_wheelScrollActive = false; // True after a click inside multiline, cleared on mouse-leave
 

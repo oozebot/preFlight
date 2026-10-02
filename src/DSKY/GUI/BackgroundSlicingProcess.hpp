@@ -8,6 +8,8 @@
 
 #include <string>
 #include <condition_variable>
+#include <functional>
+#include <memory>
 #include <mutex>
 
 #include <boost/thread.hpp>
@@ -29,9 +31,15 @@ class path;
 }
 } // namespace boost
 
+namespace DSKY
+{
+struct PreparedPreview;
+} // namespace DSKY
+
 namespace Luminary
 {
 
+class AppConfig;
 class DynamicPrintConfig;
 class Model;
 
@@ -118,6 +126,23 @@ public:
 
     GCodeProcessorResult *get_gcode_result() { return m_gcode_result; }
 
+    // The Preview's preparation of a G-code result, run on the slicing thread as a run's last step (the CPU part of
+    // loading the result into the Preview). Reports its progress in [0, 1] (1 at the end), polls `canceled` at every
+    // report and throws CanceledException when it returns true.
+    using PreviewPreparer = std::function<std::shared_ptr<DSKY::PreparedPreview>(
+        const GCodeProcessorResult &result, const std::function<void(float)> &progress,
+        const std::function<bool()> &canceled)>;
+    // Called on the UI thread when a run starts: the preparer for that run, which captures what it reads of the UI's
+    // state, or an empty one and the reason in `skip_reason` when the run prepares no Preview
+    using PreviewPreparerFactory = std::function<PreviewPreparer(std::string &skip_reason)>;
+    void set_preview_preparer_factory(PreviewPreparerFactory factory)
+    {
+        m_preview_preparer_factory = std::move(factory);
+    }
+    // The last run's prepared Preview, handed over once (UI thread). Null with the reason in `missing_reason` when
+    // the run left none, and while a run is in flight (the slicing thread writes it).
+    std::shared_ptr<DSKY::PreparedPreview> take_prepared_preview(std::string &missing_reason);
+
     void set_slicing_event_poster(DSKY::ISlicingEventPoster *poster) { m_slicing_event_poster = poster; }
 
     // Activate the FFF print.
@@ -134,7 +159,10 @@ public:
     std::string output_filepath_for_project(const boost::filesystem::path &project_path);
 
     // Start the background processing. Returns false if the background processing was already running.
+    // Called on the UI thread: it hands the preferences the worker reads to the Print before waking it.
     bool start();
+    // The Preview Detail preference as a move count, 0 for no limit
+    static size_t preview_detail_threshold(const AppConfig *config);
     // Cancel the background processing. Returns false if the background processing was not running.
     // A stopped background processing may be restarted with start().
     bool stop();
@@ -229,6 +257,14 @@ private:
 
     // Helper to wrap the FFF slicing & G-code generation.
     void process_fff();
+    // The run's last step on the slicing thread: the Preview's preparation of the exported result, when the run has
+    // a preparer. A failure is counted and leaves the Preview to prepare on the UI thread; a cancel is rethrown.
+    void prepare_preview();
+    // Drops the last run's prepared Preview with the reason (UI thread; nothing while a run is in flight)
+    void drop_prepared_preview(const char *reason);
+    // After a run cancelled inside its Preview preparation: the G-code export is invalidated and its result reset,
+    // as a slice cancelled before its end leaves them. UI thread, m_mutex held, the slicing thread idle.
+    void discard_cancelled_preparation();
 
     // Call Print::process() and catch all exceptions into ex, thus no exception could be thrown
     // by this method. This exception behavior is required to combine C++ exceptions with Win32 SEH exceptions
@@ -250,6 +286,16 @@ private:
     Print *m_fff_print = nullptr;
     // Data structure, to which the G-code export writes its annotations.
     GCodeProcessorResult *m_gcode_result = nullptr;
+    // The Preview preparation. The factory is set and called on the UI thread only. The run's preparer is written by
+    // the UI thread in start() under m_mutex before the run starts and read by the slicing thread during it. The
+    // prepared Preview, the reason it is missing and the cancelled flag are written by the slicing thread while the
+    // run is in flight, and read or written by the UI thread under m_mutex only while none is (the state change
+    // under m_mutex that ends a run hands them over).
+    PreviewPreparerFactory m_preview_preparer_factory;
+    PreviewPreparer m_preview_preparer;
+    std::shared_ptr<DSKY::PreparedPreview> m_prepared_preview;
+    std::string m_prepared_preview_missing{"no slice has run"};
+    bool m_preview_prepare_cancelled{false};
     // Callback function, used to write thumbnails into gcode.
     ThumbnailsGeneratorCallback m_thumbnail_cb = nullptr;
     // Temporary G-code path no longer needed with memory-based processing
@@ -308,4 +354,3 @@ private:
 };
 
 }; // namespace Luminary
-

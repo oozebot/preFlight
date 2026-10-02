@@ -17,6 +17,7 @@
 #include "luminary/gcode/postprocess/PostProcessor.hpp"
 #include "luminary/model/scene/Model.hpp"
 #include "luminary/format/reader/FileReader.hpp"
+#include "luminary/presets/preset/Preset.hpp"
 
 #include "CLI/CLI.hpp"
 #include "CLI/ProfilesSharingUtils.hpp"
@@ -200,13 +201,15 @@ static bool process_input_files(std::vector<Model> &models, DynamicPrintConfig &
 }
 
 static bool finalize_print_config(DynamicPrintConfig &print_config, PrinterTechnology &printer_technology,
-                                  const Data &cli)
+                                  const Data &cli, size_t &capped_extruders)
 {
     // Apply command line options to a more specific DynamicPrintConfig which provides normalize()
     // (command line options override --load files or congiguration which is loaded prom profiles)
     print_config.apply(cli.overrides_config, true);
     // Normalizing after importing the 3MFs / AMFs
     print_config.normalize_fdm();
+    // The GUI's extruder cap, applied to the assembled config
+    capped_extruders = Preset::cap_extruders(print_config);
 
     // preFlight prints FFF only. A project or profile asking for another technology is counted and
     // read as FFF, so the file still loads and slices. The --export-sla action is refused outright
@@ -243,8 +246,20 @@ bool load_print_data(std::vector<Model> &models, DynamicPrintConfig &print_confi
     if (!process_input_files(models, print_config, printer_technology, cli))
         return false;
 
-    if (!finalize_print_config(print_config, printer_technology, cli))
+    size_t capped_extruders = 0;
+    if (!finalize_print_config(print_config, printer_technology, cli, capped_extruders))
         return false;
+
+    if (capped_extruders > 0)
+    {
+        size_t reset = 0;
+        for (Model &model : models)
+            reset += model.reset_extruders_above(MAX_EXTRUDERS);
+        boost::nowide::cerr << "Warning: the printer has " << capped_extruders
+                            << " extruders; preFlight supports up to " << MAX_EXTRUDERS << ". Extruders "
+                            << MAX_EXTRUDERS + 1 << " to " << capped_extruders << " were removed, and " << reset
+                            << " object and part assignments to them now use the default extruder." << std::endl;
+    }
 
     return true;
 }

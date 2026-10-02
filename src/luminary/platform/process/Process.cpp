@@ -139,6 +139,33 @@ unsigned get_current_pid()
 #endif
 }
 
+std::string process_allocator()
+{
+#ifdef WIN32
+    // Read the live environment block: the C runtime's copy was taken before the shim set the variable.
+    constexpr DWORD max_len = 64;
+    wchar_t buf[max_len + 1];
+    // 0 means absent or empty; above max_len is the size the value would need.
+    const DWORD len = GetEnvironmentVariableW(L"PREFLIGHT_ALLOCATOR", buf, max_len + 1);
+    if (len == 0 || len > max_len)
+        return "crt:unreported";
+    std::string out;
+    out.reserve(len);
+    for (DWORD i = 0; i < len; ++i)
+    {
+        const wchar_t c = buf[i];
+        const bool valid = (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9') ||
+                           c == L'_' || c == L':';
+        if (!valid)
+            return "crt:unreported";
+        out += char(c);
+    }
+    return out;
+#else
+    return "system";
+#endif
+}
+
 std::string format_memsize_MB(size_t n)
 {
     std::string out;

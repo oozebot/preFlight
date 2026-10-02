@@ -209,9 +209,23 @@ private:
     Search::OptionsSearcher *m_searcher{nullptr};
     LogGui *m_log_gui{nullptr};
 
+#ifdef _WIN32
+    // A restart asked for while the main frame closes: the new process starts once this one leaves its main loop
+    bool m_relaunch_pending{false};
+    std::vector<std::string> m_relaunch_arguments;
+#endif
+
 public:
     bool OnInit() override;
+    int OnExit() override;
     bool initialized() const { return m_initialized; }
+    // The command line a restart runs preFlight with: this session's data directory, log level, renderer and
+    // OpenGL options, the G-code viewer mode and the current project if it is saved; files named at launch are
+    // not opened again
+    std::vector<std::string> restart_arguments() const;
+    // Runs preFlight again in a new process, which a change of the canvas pixel format (MSAA) needs. On Windows the
+    // main frame closes first, with its unsaved-changes prompts; a cancelled close keeps this session.
+    void restart_application();
 
     explicit GUI_App(EAppMode mode = EAppMode::Editor);
     ~GUI_App() override;
@@ -336,6 +350,9 @@ public:
                                                bool *postponed_apply_of_keeped_changes = nullptr);
     bool can_load_project();
     bool check_print_host_queue();
+    // Ends every running modal dialog (Cancel). Their loops return before the next event, so the main
+    // frame, deleted after that, never deletes a dialog its caller still holds on the stack.
+    void end_modal_dialogs();
     bool checked_tab(Tab *tab);
     void load_current_presets(bool check_printer_presets = true);
 
@@ -384,6 +401,9 @@ public:
     wxBookCtrlBase *tab_panel() const;
     int extruders_cnt() const;
     int extruders_edited_cnt() const;
+    // The largest value an option naming an extruder may take: for a role extruder (perimeter,
+    // infill, support, wipe tower, ...) the edited printer's extruder count, else `def_max`
+    int extruder_role_max(const std::string &opt_key, int def_max) const;
 
     std::vector<Tab *> tabs_list;
 

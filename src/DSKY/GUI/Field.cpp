@@ -1060,7 +1060,8 @@ void SpinCtrl::BUILD()
         text_value = wxString::Format(_T("%i"), default_value);
 
     const int min_val = m_opt.min == -FLT_MAX ? (int) 0 : (int) m_opt.min;
-    const int max_val = m_opt.max < FLT_MAX ? (int) m_opt.max : INT_MAX;
+    // An option naming an extruder stops at the printer's extruder count
+    const int max_val = wxGetApp().extruder_role_max(m_opt.opt_key, m_opt.max < FLT_MAX ? (int) m_opt.max : INT_MAX);
 
     auto temp = new ::SpinInput(m_parent, text_value, "", wxDefaultPosition, size, wxTE_PROCESS_ENTER | wxSP_ARROW_KEYS
 

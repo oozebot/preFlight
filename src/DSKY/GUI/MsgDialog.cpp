@@ -28,6 +28,7 @@
 #include "wxExtensions.hpp"
 #include "DSKY/GUI/MainFrame.hpp"
 #include "GUI_App.hpp"
+#include "GuiBudget.hpp"
 
 #include "Widgets/CheckBox.hpp"
 
@@ -114,6 +115,58 @@ MsgDialog::MsgDialog(wxWindow *parent, const wxString &title, const wxString &he
     apply_style(style);
 
     SetSizerAndFit(main_sizer);
+}
+
+#ifdef PREFLIGHT_TEST_HOOKS
+bool auto_dismiss_dialogs()
+{
+    static const bool auto_dismiss = []()
+    {
+        const char *value = std::getenv("PREFLIGHT_AUTO_DISMISS_DIALOGS");
+        return value != nullptr && *value != '\0' && std::string(value) != "0";
+    }();
+    return auto_dismiss;
+}
+#endif
+
+int MsgDialog::ShowModal()
+{
+#ifdef PREFLIGHT_TEST_HOOKS
+    // The test hooks' switch (debug builds): every dialog answered without being shown
+    if (!auto_dismiss_dialogs())
+        return wxDialog::ShowModal();
+
+    // A question is declined (Cancel, else No), so the switch never agrees to anything, and it is
+    // reported: an automated run answers questions ahead through the application config, so reaching
+    // one is its setup's mistake. A notice closes with its own default.
+    const bool question = get_button(wxID_YES) != nullptr || get_button(wxID_NO) != nullptr ||
+                          get_button(wxID_CANCEL) != nullptr;
+    int answer = GetAffirmativeId();
+    if (get_button(wxID_CANCEL) != nullptr)
+        answer = wxID_CANCEL;
+    else if (get_button(wxID_NO) != nullptr)
+        answer = wxID_NO;
+    else if (wxWindow *default_item = GetDefaultItem(); default_item != nullptr)
+        answer = default_item->GetId();
+    // The title and the message text, so the log says what was answered
+    wxString text;
+    std::function<void(wxWindow *)> collect = [&text, &collect](wxWindow *window)
+    {
+        for (wxWindow *child : window->GetChildren())
+        {
+            if (auto *html = dynamic_cast<wxHtmlWindow *>(child))
+                text += " " + html->ToText();
+            else if (auto *label = dynamic_cast<wxStaticText *>(child))
+                text += " " + label->GetLabel();
+            collect(child);
+        }
+    };
+    collect(this);
+    GuiBudget::dialog_dismissed(into_u8(GetTitle() + " |" + text.Left(600)), question);
+    return answer;
+#else
+    return wxDialog::ShowModal();
+#endif
 }
 
 void MsgDialog::SetButtonLabel(wxWindowID btn_id, const wxString &label, bool set_focus /* = false*/)
@@ -569,7 +622,7 @@ int RichMessageDialogBase::ShowModal()
     }
     Layout();
 
-    return wxDialog::ShowModal();
+    return MsgDialog::ShowModal();
 }
 
 // InfoDialog

@@ -10,11 +10,7 @@
 #include "DSKY/GUI/OpenGLManager.hpp"
 #include "luminary/model/scene/Model.hpp"
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 #include <wx/utils.h>
 
@@ -156,13 +152,11 @@ void GLGizmoMove3D::on_render()
     m_grabbers[2].center = {0.0, 0.0, half_box_size.z() + Offset};
     m_grabbers[2].color = AXES_COLOR[2];
 
-#if !PREFLIGHT_OPENGL_ES
     if (!OpenGLManager::get_gl_info().is_core_profile())
     {
         const float scale = m_imgui->get_style_scaling();
         glsafe(::glLineWidth((m_hover_id != -1) ? 2.0f * scale : 1.5f * scale));
     }
-#endif // !PREFLIGHT_OPENGL_ES
 
     auto render_grabber_connection = [this, &zero](unsigned int id)
     {
@@ -196,30 +190,22 @@ void GLGizmoMove3D::on_render()
 
     if (m_hover_id == -1)
     {
-#if PREFLIGHT_OPENGL_ES
-        GLShaderProgram *shader = m_parent.get_shader("dashed_lines");
-#else
         GLShaderProgram *shader = OpenGLManager::get_gl_info().is_core_profile()
                                       ? m_parent.get_shader("dashed_thick_lines")
                                       : m_parent.get_shader("flat");
-#endif // PREFLIGHT_OPENGL_ES
         if (shader != nullptr)
         {
             shader->start_using();
             const Camera &camera = m_parent.get_camera();
             shader->set_uniform("view_model_matrix", camera.get_view_matrix() * base_matrix);
             shader->set_uniform("projection_matrix", camera.get_projection_matrix());
-#if !PREFLIGHT_OPENGL_ES
             if (OpenGLManager::get_gl_info().is_core_profile())
             {
-#endif // !PREFLIGHT_OPENGL_ES
                 const std::array<int, 4> &viewport = camera.get_viewport();
                 shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
                 shader->set_uniform("width", 0.25f);
                 shader->set_uniform("gap_size", 0.0f);
-#if !PREFLIGHT_OPENGL_ES
             }
-#endif // !PREFLIGHT_OPENGL_ES
 
             // draw axes
             for (unsigned int i = 0; i < 3; ++i)
@@ -236,13 +222,9 @@ void GLGizmoMove3D::on_render()
     else
     {
         // draw axis
-#if PREFLIGHT_OPENGL_ES
-        GLShaderProgram *shader = m_parent.get_shader("dashed_lines");
-#else
         GLShaderProgram *shader = OpenGLManager::get_gl_info().is_core_profile()
                                       ? m_parent.get_shader("dashed_thick_lines")
                                       : m_parent.get_shader("flat");
-#endif // PREFLIGHT_OPENGL_ES
         if (shader != nullptr)
         {
             shader->start_using();
@@ -250,17 +232,13 @@ void GLGizmoMove3D::on_render()
             const Camera &camera = m_parent.get_camera();
             shader->set_uniform("view_model_matrix", camera.get_view_matrix() * base_matrix);
             shader->set_uniform("projection_matrix", camera.get_projection_matrix());
-#if !PREFLIGHT_OPENGL_ES
             if (OpenGLManager::get_gl_info().is_core_profile())
             {
-#endif /// !PREFLIGHT_OPENGL_ES
                 const std::array<int, 4> &viewport = camera.get_viewport();
                 shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
                 shader->set_uniform("width", 0.5f);
                 shader->set_uniform("gap_size", 0.0f);
-#if !PREFLIGHT_OPENGL_ES
             }
-#endif // !PREFLIGHT_OPENGL_ES
 
             render_grabber_connection(m_hover_id);
             shader->stop_using();

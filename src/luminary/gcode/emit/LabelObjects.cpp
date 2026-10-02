@@ -20,6 +20,7 @@
 #include "luminary/config/catalog/PrintConfig.hpp"
 #include "luminary/mesh/core/TriangleMesh.hpp"
 #include "luminary/core/Prelude.hpp"
+#include "luminary/core/diagnostics/DebugCounters.hpp"
 
 namespace Luminary::GCode
 {
@@ -65,6 +66,39 @@ Polygon instance_outline(const PrintInstance *pi)
 }
 
 }; // anonymous namespace
+
+std::string label_name_for_gcode(std::string name, LabelObjectsStyle style, GCodeFlavor flavor)
+{
+    // The name comes from the project: a line break or other control character would end the label
+    // line and start a G-code line of its own
+    bool replaced = false;
+    for (char &c : name)
+        if (const unsigned char u = static_cast<unsigned char>(c); u < 0x20 || u == 0x7F)
+        {
+            c = ' ';
+            replaced = true;
+        }
+    if (style == LabelObjectsStyle::Firmware && flavor == gcfKlipper)
+    {
+        // Disallow Klipper special chars, common illegal filename chars, etc.
+        const std::string banned = "\b\t\n\v\f\r \"#%&\'*-./:;<>\\";
+        std::replace_if(
+            name.begin(), name.end(), [&banned](char c) { return banned.find(c) != std::string::npos; }, '_');
+    }
+    else if (style == LabelObjectsStyle::Firmware && (flavor == gcfRepRapFirmware || flavor == gcfRapid))
+    {
+        // RepRapFirmware's M486 carries the name in double quotes
+        for (char &c : name)
+            if (c == '"')
+            {
+                c = '\'';
+                replaced = true;
+            }
+    }
+    if (replaced)
+        DBG_COUNT("LABEL_NAME_CHARS_REPLACED");
+    return name;
+}
 
 void LabelObjects::init(const SpanOfConstPtrs<PrintObject> &objects, LabelObjectsStyle label_object_style,
                         GCodeFlavor gcode_flavor)
@@ -160,15 +194,8 @@ void LabelObjects::init(const SpanOfConstPtrs<PrintObject> &objects, LabelObject
 
                 if (object_has_more_instances)
                     name += " (Instance " + std::to_string(instance_id) + ")";
-                if (m_flavor == gcfKlipper)
-                {
-                    // Disallow Klipper special chars, common illegal filename chars, etc.
-                    const std::string banned = "\b\t\n\v\f\r \"#%&\'*-./:;<>\\";
-                    std::replace_if(
-                        name.begin(), name.end(), [&banned](char c) { return banned.find(c) != std::string::npos; },
-                        '_');
-                }
             }
+            name = label_name_for_gcode(std::move(name), m_label_objects_style, m_flavor);
 
             // Now calculate the polygon and center for Cancel Object (this is not always used).
             Polygon outline = instance_outline(pi);

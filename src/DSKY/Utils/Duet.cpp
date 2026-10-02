@@ -7,6 +7,7 @@
 ///|/
 #include "Duet.hpp"
 #include "luminary/core/diagnostics/DebugCounters.hpp"
+#include "luminary/core/text/Json.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -236,8 +237,7 @@ Duet::ConnectionType Duet::connect(wxString &msg) const
                 try
                 {
                     pt::ptree root;
-                    std::istringstream iss(body);
-                    pt::read_json(iss, root);
+                    read_json_bounded(body, root);
                     auto key = root.get_optional<std::string>("sessionKey");
                     if (key)
                         msg = boost::nowide::widen(*key);
@@ -434,8 +434,7 @@ bool Duet::start_print(wxString &msg, const std::string &filename, ConnectionTyp
 int Duet::get_err_code_from_body(const std::string &body) const
 {
     pt::ptree root;
-    std::istringstream iss(body); // wrap returned json to istringstream
-    pt::read_json(iss, root);
+    read_json_bounded(body, root);
 
     return root.get<int>("err", 0);
 }

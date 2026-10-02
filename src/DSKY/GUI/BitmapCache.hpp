@@ -22,6 +22,10 @@ namespace DSKY
 {
 using namespace Luminary;
 
+// The bundle, made to share one bitmap per size at any display scale (Windows; elsewhere the bundle
+// itself). Every bundle BitmapCache makes goes through it.
+wxBitmapBundle share_bitmap_sizes(const wxBitmapBundle &bundle);
+
 class BitmapCache
 {
 public:

@@ -1614,7 +1614,7 @@ static void generate_initial_areas(const PrintObject &print_object, const TreeMo
     TreeSupportMeshGroupSettings mesh_group_settings(print_object);
     const bool baobab = is_baobab_object(print_object);
     // Zero leaves the stock tip grid alone; nonzero seeds one element per gather cell. For
-    // baobab the branch distance IS the effective gather spacing (config or env sweep).
+    // baobab the branch distance IS the effective gather spacing (the config's, or its override).
     const coord_t baobab_tip_spacing = baobab ? mesh_group_settings.support_tree_branch_distance : coord_t(0);
     BaobabSeedStats baobab_seed_stats;
     BaobabSeedStats *const baobab_stats = (baobab && (debug_enabled(DBG_BAOBAB) || debug_enabled(DBG_SUPPORT)))

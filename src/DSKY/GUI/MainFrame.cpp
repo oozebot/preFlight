@@ -46,6 +46,7 @@
 
 #include "Tab.hpp"
 #include "3DScene.hpp"
+#include "PhysicalPrinterDialog.hpp"
 #include "PrintHostDialogs.hpp"
 #include "wxExtensions.hpp"
 #include "GUI_ObjectList.hpp"
@@ -69,6 +70,7 @@
 #endif
 
 #include "GUI_App.hpp"
+#include "GuiBudget.hpp"
 #include "UnsavedChangesDialog.hpp"
 #include "MsgDialog.hpp"
 #include "TopBar.hpp"
@@ -298,6 +300,7 @@ MainFrame::MainFrame(const int font_point_size)
     Bind(wxEVT_CLOSE_WINDOW,
          [this](wxCloseEvent &event)
          {
+             GuiBudget::snapshot("frame.close");
              if (event.CanVeto() && m_plater->canvas3D()->get_gizmos_manager().is_in_editing_mode(true))
              {
                  // prevents to open the save dirty project dialog
@@ -330,6 +333,12 @@ MainFrame::MainFrame(const int font_point_size)
                  event.Veto();
                  return;
              }
+#ifdef _WIN32
+             // A modal dialog running now (the session is ending, or a close reached the disabled
+             // frame) ends first: its loop returns before this frame is deleted, which would delete
+             // the dialog its caller holds on the stack
+             wxGetApp().end_modal_dialogs();
+#endif
              this->shutdown();
 #ifdef __APPLE__
              // wxWidgets' SetDrawingEnabled calls enableFlushWindow
@@ -1241,6 +1250,15 @@ void MainFrame::show_printer_webview_tab(DynamicPrintConfig *dpc)
         return;
     }
 
+    // The web view and the connection check log in with the password the system store holds; the
+    // printer's own config keeps "stored". A store that cannot be read is logged, not shown: this
+    // runs on every printer selection.
+    const std::string printer_name = wxGetApp().preset_bundle->physical_printers.get_selected_printer_name();
+    m_printer_webview_config = PhysicalPrinter::with_stored_credentials(
+        *dpc, [&printer_name](std::string &user, std::string &password)
+        { return load_secret(printer_name, "printhost_password", user, password, false); });
+    dpc = &m_printer_webview_config;
+
     // A Klipper printer's web interface may live apart from Moonraker; uploads keep using the print host
     std::string url = PhysicalPrinter::web_interface_host(*dpc);
     if (url.find("http://") != 0 && url.find("https://") != 0)
@@ -1304,7 +1322,8 @@ void MainFrame::add_printer_webview_tab(const wxString &url)
     // Get printer name and config from physical_printers
     auto &phys_printers = wxGetApp().preset_bundle->physical_printers;
     wxString printer_name = from_u8(phys_printers.get_selected_printer_name());
-    auto *dpc = phys_printers.get_selected_printer_config();
+    // The selected printer's config with its stored password filled in (show_printer_webview_tab)
+    DynamicPrintConfig *dpc = &m_printer_webview_config;
 
     // On Linux without working EGL (VMs, RDP, software renderers, etc.),
     // WebKit2GTK's GPU process calls abort() during EGL initialization.
@@ -1805,7 +1824,8 @@ bool MainFrame::can_deselect() const
 
 bool MainFrame::can_delete() const
 {
-    return (m_plater != nullptr) && !m_plater->is_selection_empty();
+    // The Preview shows the selection but does not edit the platter: the menu's Delete key removes nothing there
+    return (m_plater != nullptr) && !m_plater->is_selection_empty() && !m_plater->is_preview_shown();
 }
 
 bool MainFrame::can_delete_all() const
@@ -2324,8 +2344,13 @@ void MainFrame::init_menubar_as_editor()
         editMenu->AppendSeparator();
         append_menu_item(
             editMenu, wxID_ANY, _L("&Delete Selected") + sep + hotkey_delete, _L("Deletes the current selection"),
-            [this](wxCommandEvent &) { m_plater->remove_selected(); }, "remove_menu", nullptr,
-            [this]() { return can_delete(); }, this);
+            [this](wxCommandEvent &)
+            {
+                // The accelerator can fire before the item's enabled state is refreshed
+                if (can_delete())
+                    m_plater->remove_selected();
+            },
+            "remove_menu", nullptr, [this]() { return can_delete(); }, this);
         append_menu_item(
             editMenu, wxID_ANY, _L("Delete &All") + sep + DSKY::shortkey_ctrl_prefix() + sep_space + hotkey_delete,
             _L("Deletes all objects"), [this](wxCommandEvent &) { m_plater->reset_with_confirm(); }, "delete_all_menu",
@@ -2730,10 +2755,11 @@ void MainFrame::load_config_file()
 // Load a config file containing a Print, Filament & Printer preset from command line.
 bool MainFrame::load_config_file(const std::string &path)
 {
+    size_t capped_extruders = 0;
     try
     {
-        ConfigSubstitutions config_substitutions =
-            wxGetApp().preset_bundle->load_config_file(path, ForwardCompatibilitySubstitutionRule::Enable);
+        ConfigSubstitutions config_substitutions = wxGetApp().preset_bundle->load_config_file(
+            path, ForwardCompatibilitySubstitutionRule::Enable, &capped_extruders);
         if (!config_substitutions.empty())
             show_substitutions_info(config_substitutions, path);
     }
@@ -2743,6 +2769,9 @@ bool MainFrame::load_config_file(const std::string &path)
         return false;
     }
 
+    if (capped_extruders > 0)
+        m_plater->notify_extruders_capped(boost::filesystem::path(path).filename().string(), capped_extruders);
+    m_plater->notify_capped_printer_presets();
     m_plater->notify_about_installed_presets();
     wxGetApp().load_current_presets();
     return true;
@@ -2917,6 +2946,7 @@ void MainFrame::load_configbundle(wxString file /* = wxEmptyString, const bool r
 
     // Load the currently selected preset into the GUI, update the preset selection box.
     wxGetApp().load_current_presets();
+    m_plater->notify_capped_printer_presets();
 
     const auto message = wxString::Format(_L("%d presets successfully imported."), presets_imported);
     DSKY::show_info(this, message, _L("Info"));
@@ -2924,8 +2954,12 @@ void MainFrame::load_configbundle(wxString file /* = wxEmptyString, const bool r
 
 // Load a provied DynamicConfig into the Print / Filament / Printer tabs, thus modifying the active preset.
 // Also update the plater with the new presets.
-void MainFrame::load_config(const DynamicPrintConfig &config)
+void MainFrame::load_config(const DynamicPrintConfig &config_in)
 {
+    DynamicPrintConfig config = config_in;
+    // The values land on the edited printer, which the warning names
+    if (const size_t capped = Preset::cap_extruders(config); capped > 0)
+        m_plater->notify_extruders_capped(wxGetApp().preset_bundle->printers.get_edited_preset().name, capped);
     PrinterTechnology printer_technology = wxGetApp().preset_bundle->printers.get_edited_preset().printer_technology();
     const auto *opt_printer_technology = config.option<ConfigOptionEnum<PrinterTechnology>>("printer_technology");
     if (opt_printer_technology != nullptr && opt_printer_technology->value != printer_technology)

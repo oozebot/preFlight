@@ -22,6 +22,7 @@
 #include "DSKY/GUI/Jobs/UIThreadWorker.hpp"
 
 #include <cstddef>
+#include <cstdlib>
 #include <algorithm>
 #include <chrono>
 #include <nanosvgrast.h>
@@ -89,6 +90,7 @@
 
 #include "GUI.hpp"
 #include "GUI_App.hpp"
+#include "GuiBudget.hpp"
 #include "GUI_ObjectList.hpp"
 #include "GUI_ObjectManipulation.hpp"
 #include "GUI_Utils.hpp"
@@ -114,6 +116,7 @@
 #include "Jobs/BoostThreadWorker.hpp"
 #include "luminary/gcode/scripting/PreProcessor.hpp"
 #include "BackgroundSlicingProcess.hpp"
+#include "PhysicalPrinterDialog.hpp"
 #include "PrintHostDialogs.hpp"
 #include "../Utils/ASCIIFolding.hpp"
 #include "../Utils/PrintHost.hpp"
@@ -161,11 +164,7 @@
 
 #include "Widgets/CheckBox.hpp"
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 using boost::optional;
 namespace fs = boost::filesystem;
@@ -758,6 +757,20 @@ Plater::priv::priv(Plater *q, MainFrame *main_frame)
 {
 }
 
+#ifdef PREFLIGHT_TEST_HOOKS
+// PREFLIGHT_PREVIEW_PREPARE=0 leaves every slice's Preview preparation to the UI thread's load, the path a result
+// without a preparation takes. Read once per session.
+static bool preview_prepare_disabled()
+{
+    static const bool disabled = []()
+    {
+        const char *env = std::getenv("PREFLIGHT_PREVIEW_PREPARE");
+        return env != nullptr && std::string(env) == "0";
+    }();
+    return disabled;
+}
+#endif // PREFLIGHT_TEST_HOOKS
+
 void Plater::priv::init()
 {
     for (int i = 0; i < s_multiple_beds.get_max_beds(); ++i)
@@ -770,6 +783,56 @@ void Plater::priv::init()
     background_process.set_gcode_result(&gcode_results.front());
     background_process.set_thumbnail_cb([this](const ThumbnailsParams &params)
                                         { return this->generate_thumbnails(params, Camera::EType::Ortho); });
+    // Each run's last step prepares the Preview of its G-code on the slicing thread; decided here, on the UI thread,
+    // when the run starts. Only the editor's active bed is prepared: autoslicing runs the other beds' prints, which a
+    // bed switch loads on the UI thread.
+    background_process.set_preview_preparer_factory(
+        [this](std::string &skip_reason) -> BackgroundSlicingProcess::PreviewPreparer
+        {
+            if (!wxGetApp().is_editor())
+            {
+                skip_reason = "not the editor";
+                return {};
+            }
+            if (s_multiple_beds.is_autoslicing())
+            {
+                skip_reason = "autoslicing";
+                return {};
+            }
+            if (background_process.fff_print() != &q->active_fff_print())
+            {
+                skip_reason = "not the active bed's print";
+                return {};
+            }
+#ifdef PREFLIGHT_TEST_HOOKS
+            if (preview_prepare_disabled())
+            {
+                skip_reason = "disabled by PREFLIGHT_PREVIEW_PREPARE=0";
+                return {};
+            }
+#endif
+            if (preview == nullptr || preview->get_canvas3d() == nullptr)
+            {
+                skip_reason = "no Preview";
+                return {};
+            }
+            // Taken now, on the UI thread: the preparer runs on the slicing thread. The view snapshot is what the
+            // load will install with (the palettes as the Preview will give them), so the preparation also builds
+            // the enabled lists and the colors; the install rebuilds whatever reads a setting changed meanwhile.
+            const GCodeViewer &gcode_viewer = preview->get_canvas3d()->get_gcode_viewer();
+            libvgcode::PrepareSettings settings = gcode_viewer.get_prepare_settings();
+            std::vector<std::string> tool_colors;
+            std::vector<std::string> color_print_colors;
+            preview->get_color_strings(tool_colors, color_print_colors);
+            settings.view = gcode_viewer.get_load_view_settings(tool_colors, color_print_colors);
+            const int bed = s_multiple_beds.get_active_bed();
+            return [settings, bed](const GCodeProcessorResult &result, const std::function<void(float)> &progress,
+                                   const std::function<bool()> &canceled)
+            {
+                return std::make_shared<PreparedPreview>(
+                    GCodeViewer::prepare_preview(result, bed, false, settings, progress, canceled));
+            };
+        });
     slicing_event_poster = std::make_unique<SlicingEventPoster_wx>(this->q, EVT_SLICING_UPDATE, EVT_SLICING_COMPLETED,
                                                                    EVT_PROCESS_COMPLETED, EVT_EXPORT_BEGAN);
     background_process.set_slicing_event_poster(slicing_event_poster.get());
@@ -1087,8 +1150,6 @@ void Plater::priv::init()
                                 wxGetApp().mainframe->Iconize();
                         });
     view3D_canvas->Bind(EVT_GLCANVAS_TAKE_SNAPSHOT, [this](StringEvent &evt) { this->take_snapshot(evt.data); });
-    view3D_canvas->Bind(EVT_GLCANVAS_TAKE_SNAPSHOT_SELECTION,
-                        [this](StringEvent &evt) { this->take_snapshot(evt.data, UndoRedo::SnapshotType::Selection); });
     view3D_canvas->Bind(EVT_GLCANVAS_TAKE_GIZMO_SNAPSHOT, [this](StringEvent &evt)
                         { this->take_snapshot(evt.data, UndoRedo::SnapshotType::GizmoAction); });
     view3D_canvas->Bind(EVT_GLCANVAS_MANIPULATION_DIRTY, [](SimpleEvent &) { wxGetApp().obj_manipul()->set_dirty(); });
@@ -1267,8 +1328,6 @@ void Plater::priv::init()
     preview->get_wxglcanvas()->Bind(EVT_GLCANVAS_UPDATE_BED_SHAPE, [this](SimpleEvent &) { q->set_bed_shape(); });
     preview->get_wxglcanvas()->Bind(EVT_GLCANVAS_TAKE_SNAPSHOT,
                                     [this](StringEvent &evt) { this->take_snapshot(evt.data); });
-    preview->get_wxglcanvas()->Bind(EVT_GLCANVAS_TAKE_SNAPSHOT_SELECTION, [this](StringEvent &evt)
-                                    { this->take_snapshot(evt.data, UndoRedo::SnapshotType::Selection); });
     preview->get_wxglcanvas()->Bind(EVT_GLCANVAS_UPDATE_INFO_ITEMS,
                                     [this](Event<int> &evt) { wxGetApp().obj_list()->update_info_items(evt.data); });
     preview->get_wxglcanvas()->Bind(EVT_GLCANVAS_OBJ_LIST_SELECTION_CHANGED,
@@ -1844,6 +1903,59 @@ void Plater::notify_about_installed_presets()
     }
 }
 
+void Plater::notify_extruders_capped(const std::string &source, size_t original_count)
+{
+    const std::string text = format(
+        // TRN: %1% is a file or printer preset name, %2% the extruder count it had, %3% the most preFlight
+        // supports, %4% the first extruder removed.
+        _u8L("%1%: this printer has %2% extruders; preFlight supports up to %3%. Extruders %4% to %2% were "
+             "removed, and anything assigned to them now uses the default extruder."),
+        source, original_count, MAX_EXTRUDERS, MAX_EXTRUDERS + 1);
+    GuiBudget::snapshot("notification.extruders_capped");
+    get_notification_manager()->push_notification(NotificationType::CustomNotification,
+                                                  NotificationManager::NotificationLevel::WarningNotificationLevel,
+                                                  text);
+}
+
+void Plater::notify_capped_printer_presets()
+{
+    const std::vector<std::string> names = wxGetApp().preset_bundle->printers.take_capped_on_load();
+    if (names.empty())
+        return;
+    std::string text = format(_u8L("These printer presets had more than %1% extruders and now use their first %1%:"),
+                              MAX_EXTRUDERS);
+    for (const std::string &name : names)
+        text += "\n - " + name;
+    GuiBudget::snapshot("notification.capped_presets");
+    get_notification_manager()->push_notification(NotificationType::CustomNotification,
+                                                  NotificationManager::NotificationLevel::WarningNotificationLevel,
+                                                  text);
+}
+
+void Plater::reset_extruder_assignments_above(size_t count)
+{
+    if (count == 0)
+        return;
+    // No undo snapshot: the count is not on the undo stack, so undo could only bring back assignments
+    // to extruders that no longer exist (update_after_undo_redo resets them again)
+    size_t reset = p->model.reset_extruders_above(count);
+    DynamicPrintConfig &print = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+    if (const size_t in_print = print.reset_extruders_above(count); in_print > 0)
+    {
+        reset += in_print;
+        if (Tab *tab = wxGetApp().get_tab(Preset::TYPE_PRINT))
+        {
+            tab->reload_config();
+            tab->update_dirty();
+        }
+    }
+    if (reset == 0)
+        return;
+    GuiBudget::measure("extruders.assignments_reset", static_cast<long long>(reset));
+    // The scene's colours and the slice follow; the object list's column is updated by the caller
+    update();
+}
+
 std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path> &input_files, bool load_model,
                                              bool load_config, bool imperial_units /* = false*/)
 {
@@ -1851,6 +1963,9 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path> &input_
     {
         return std::vector<size_t>();
     }
+
+    GuiBudget::snapshot("load.begin");
+    ScopeGuard budget_load_end([]() { GuiBudget::snapshot("load.end"); });
 
     auto *nozzle_dmrs = config->opt<ConfigOptionFloats>("nozzle_diameter");
 
@@ -2180,7 +2295,10 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path> &input_
 
             if (!config.empty())
             {
-                Preset::normalize(config); //???
+                // The objects' assignments to the removed extruders go to default below, with any
+                // other assignment above the count the printer ends up with
+                if (const size_t capped = Preset::normalize(config); capped > 0)
+                    q->notify_extruders_capped(into_u8(from_path(filename)), capped);
                 PresetBundle *preset_bundle = wxGetApp().preset_bundle;
 
                 // When loading a project, warn the user if:
@@ -2370,7 +2488,11 @@ std::vector<size_t> Plater::priv::load_files(const std::vector<fs::path> &input_
                 // Update filament colors for the MM-printer profile in the full config
                 // to avoid black (default) colors for Extruders in the ObjectList,
                 // when for extruder colors are used filament colors
-                q->update_filament_colors_in_full_config();
+                if (q->update_filament_colors_in_full_config())
+                    sidebar->update_extruder_colors();
+                // The objects follow the printer the project now uses: an assignment above its
+                // extruder count goes to default, as when the count is lowered
+                model.reset_extruders_above(size_t(wxGetApp().extruders_edited_cnt()));
                 is_project_file = true;
             }
 
@@ -2998,6 +3120,8 @@ void Plater::priv::delete_all_objects_from_model()
         view3D->enable_layers_editing(false);
 
     reset_gcode_toolpaths();
+    // A running slice owns its G-code result until it ends (its Preview preparation reads the moves)
+    background_process.stop();
     std::for_each(gcode_results.begin(), gcode_results.end(), [](auto &g) { g.reset(); });
 
     view3D->get_canvas3d()->reset_all_gizmos();
@@ -3038,6 +3162,8 @@ void Plater::priv::reset()
         view3D->enable_layers_editing(false);
 
     reset_gcode_toolpaths();
+    // A running slice owns its G-code result until it ends (its Preview preparation reads the moves)
+    this->background_process.stop();
     std::for_each(gcode_results.begin(), gcode_results.end(), [](auto &g) { g.reset(); });
 
     m_worker.cancel_all();
@@ -4213,6 +4339,18 @@ void Plater::priv::set_current_panel(wxPanel *panel)
         }
     }
 
+    // see: Plater::priv::object_list_changed()
+    const bool slice_on_entry = panel == preview && wxGetApp().is_editor() &&
+                                !background_process.is_export_scheduled() &&
+                                s_multiple_beds.is_bed_occupied(s_multiple_beds.get_active_bed()) &&
+                                is_sliceable(s_print_statuses[s_multiple_beds.get_active_bed()]);
+    // The shells are loaded, unfilled, while the Preview is still hidden, so the first frame it presents holds them
+    if (slice_on_entry)
+    {
+        preview->get_canvas3d()->load_gcode_shells();
+        preview->get_canvas3d()->set_shell_progress_height(0.0);
+    }
+
     wxPanel *old_panel = current_panel;
     current_panel = panel;
 
@@ -4260,6 +4398,15 @@ void Plater::priv::set_current_panel(wxPanel *panel)
     // The sidebar floats over the new panel, or hides, as that panel's state says.
     apply_sidebar();
 
+#ifdef _WIN32
+    // A window just shown or grown shows its old pixels at the top left and the background brush elsewhere until
+    // its first paint, and the work below (starting the slice) runs before the event loop would paint. Presenting
+    // a frame now, with the canvas shown and laid out, puts a complete image on screen first.
+    if (old_panel != current_panel)
+        if (GLCanvas3D *canvas = get_current_canvas3D(); canvas != nullptr)
+            canvas->render();
+#endif
+
     if (current_panel == view3D)
     {
         if (s_multiple_beds.stop_autoslice(true))
@@ -4305,13 +4452,9 @@ void Plater::priv::set_current_panel(wxPanel *panel)
 
         if (wxGetApp().is_editor())
         {
-            // see: Plater::priv::object_list_changed()
-            bool export_in_progress = this->background_process.is_export_scheduled();
-            if (s_multiple_beds.is_bed_occupied(s_multiple_beds.get_active_bed()) && !export_in_progress &&
-                is_sliceable(s_print_statuses[s_multiple_beds.get_active_bed()]))
+            if (slice_on_entry)
             {
                 preview->get_canvas3d()->init_gcode_viewer();
-                preview->get_canvas3d()->load_gcode_shells();
                 q->reslice();
             }
             // keeps current gcode preview, if any
@@ -4333,6 +4476,13 @@ void Plater::priv::set_current_panel(wxPanel *panel)
             wxGetApp().mainframe->m_modern_tabbar->SelectTab(DSKY::ModernTabBar::TAB_PREVIEW);
         }
     }
+
+#ifdef _WIN32
+    // The shells or the reloaded scene are on screen before the slice's first status arrives
+    if (old_panel != current_panel)
+        if (GLCanvas3D *canvas = get_current_canvas3D(); canvas != nullptr)
+            canvas->render();
+#endif
 
     current_panel->SetFocusFromKbd();
 }
@@ -5679,6 +5829,13 @@ void Plater::priv::undo()
     const std::vector<UndoRedo::Snapshot> &snapshots = this->undo_redo_stack().snapshots();
     auto it_current = std::lower_bound(snapshots.begin(), snapshots.end(),
                                        UndoRedo::Snapshot(this->undo_redo_stack().active_snapshot_time()));
+    // At the first snapshot there is nothing to undo (a caller that did not ask can_undo); stepping
+    // before it would read outside the snapshot list
+    if (it_current == snapshots.begin())
+    {
+        DBG_COUNT_LOAD("UNDO_AT_FIRST_SNAPSHOT");
+        return;
+    }
     if (--it_current != snapshots.begin())
         this->undo_redo_to(it_current);
 }
@@ -5758,6 +5915,15 @@ void Plater::priv::undo_redo_to(std::vector<UndoRedo::Snapshot>::const_iterator 
 
 void Plater::priv::update_after_undo_redo(const UndoRedo::Snapshot &snapshot, bool /* temp_snapshot_was_taken */)
 {
+    // The extruder count is a printer setting, which undo does not restore: a snapshot taken before
+    // the count was lowered still names the removed extruders, and they go to default again here,
+    // before the scene and the object list read the model
+    if (const size_t count = size_t(std::max(1, wxGetApp().extruders_edited_cnt())); model.has_extruders_above(count))
+    {
+        const size_t reset = model.reset_extruders_above(count);
+        DBG_COUNT_LOAD("EXTRUDER_ASSIGNMENTS_RESET_ON_UNDO");
+        GuiBudget::measure("extruders.assignments_reset_on_undo", static_cast<long long>(reset));
+    }
     this->view3D->get_canvas3d()->get_selection().clear();
     // Update volumes from the deserializd model, always stop / update the background processing.
     this->update((unsigned int) UpdateParams::FORCE_BACKGROUND_PROCESSING_UPDATE |
@@ -6045,6 +6211,7 @@ void Plater::load_gcode(const wxString &filename)
 
     // process gcode
     GCodeProcessor processor;
+    processor.set_preview_detail_threshold(BackgroundSlicingProcess::preview_detail_threshold(wxGetApp().app_config));
     try
     {
         p->notification_manager->push_download_progress_notification("Loading...", []() { return false; });
@@ -6068,6 +6235,14 @@ void Plater::load_gcode(const wxString &filename)
         return;
     }
     p->gcode_results.front() = std::move(processor.extract_result());
+    // A loaded G-code has no Print to carry the warning a slice shows, so the plater raises it; the notice of an
+    // earlier file goes
+    p->notification_manager->close_notification_of_type(NotificationType::PreviewDetailReduced);
+    if (processor.preview_detail_reduced())
+        p->notification_manager->push_notification(NotificationType::PreviewDetailReduced,
+                                                   NotificationManager::NotificationLevel::WarningNotificationLevel,
+                                                   GCodeProcessor::preview_detail_reduced_message(
+                                                       p->gcode_results.front().moves.size()));
 
     // show results
     try
@@ -6386,6 +6561,10 @@ public:
 
 protected:
     void on_dpi_changed(const wxRect &suggested_rect) override;
+    void on_sys_color_changed() override;
+
+private:
+    void apply_theme();
 };
 
 LoadProjectsDialog::LoadProjectsDialog(const std::vector<fs::path> &paths)
@@ -6510,8 +6689,26 @@ LoadProjectsDialog::LoadProjectsDialog(const std::vector<fs::path> &paths)
     SetSizer(main_sizer);
     main_sizer->SetSizeHints(this);
 
-    // Update DarkUi just for buttons
+    apply_theme();
+}
+
+// The dialog takes the window colour that UpdateDlgDarkUI gives its controls: the "Action" box paints
+// its interior in the dialog's colour, and each radio button paints its own row in the window colour.
+void LoadProjectsDialog::apply_theme()
+{
+#ifdef _WIN32
+    wxGetApp().UpdateDarkUI(this);
+#else
+    SetBackgroundColour(wxGetApp().get_window_default_clr());
+#endif
+    // Every child (text, radio buttons, combo boxes, buttons) on Windows and Linux; the dialog is themed above
     wxGetApp().UpdateDlgDarkUI(this, true);
+}
+
+void LoadProjectsDialog::on_sys_color_changed()
+{
+    apply_theme();
+    Refresh();
 }
 
 void LoadProjectsDialog::on_dpi_changed(const wxRect &suggested_rect)
@@ -6729,6 +6926,7 @@ bool Plater::preview_zip_archive(const boost::filesystem::path &archive_path)
 class ProjectDropDialog : public DPIDialog
 {
     int m_action{0};
+    ::CheckBox *m_dont_show_again{nullptr};
 
 public:
     enum class LoadType : unsigned char
@@ -6743,8 +6941,22 @@ public:
 
     int get_action() const { return m_action + 1; }
 
+#ifdef PREFLIGHT_TEST_HOOKS
+    // Under PREFLIGHT_AUTO_DISMISS_DIALOGS (a test hook) the dialog is not shown and returns
+    // wxID_CANCEL, so the load is abandoned as on a Cancel click
+    int ShowModal() override;
+#endif
+
 protected:
     void on_dpi_changed(const wxRect &suggested_rect) override;
+    void on_sys_color_changed() override;
+
+private:
+    void apply_theme();
+
+#ifdef PREFLIGHT_TEST_HOOKS
+    std::string m_filename; // named in the log line of a declined dialog
+#endif
 };
 
 ProjectDropDialog::ProjectDropDialog(const std::string &filename)
@@ -6752,6 +6964,9 @@ ProjectDropDialog::ProjectDropDialog(const std::string &filename)
                 format_wxstr("%1% - %2%", PREFLIGHT_APP_NAME, _L("Load project file")), wxDefaultPosition,
                 wxDefaultSize, wxDEFAULT_DIALOG_STYLE)
 {
+#ifdef PREFLIGHT_TEST_HOOKS
+    m_filename = filename;
+#endif
     SetFont(wxGetApp().normal_font());
     int em = wxGetApp().em_unit();
 
@@ -6795,20 +7010,51 @@ ProjectDropDialog::ProjectDropDialog(const std::string &filename)
     main_sizer->Add(stb_sizer, 1, wxEXPAND | wxRIGHT | wxLEFT, em);
 
     wxBoxSizer *bottom_sizer = new wxBoxSizer(wxHORIZONTAL);
-    ::CheckBox *check = new ::CheckBox(this, _L("Don't show again"));
-    check->Bind(wxEVT_CHECKBOX, [](wxCommandEvent &evt)
-                { wxGetApp().app_config->set("show_drop_project_dialog", evt.IsChecked() ? "0" : "1"); });
+    m_dont_show_again = new ::CheckBox(this, _L("Don't show again"));
+    m_dont_show_again->Bind(wxEVT_CHECKBOX, [](wxCommandEvent &evt)
+                            { wxGetApp().app_config->set("show_drop_project_dialog", evt.IsChecked() ? "0" : "1"); });
 
-    bottom_sizer->Add(check, 0, wxEXPAND | wxRIGHT, em / 2);
+    bottom_sizer->Add(m_dont_show_again, 0, wxEXPAND | wxRIGHT, em / 2);
     bottom_sizer->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxLEFT, em / 2);
     main_sizer->Add(bottom_sizer, 0, wxEXPAND | wxALL, em);
 
     SetSizer(main_sizer);
     main_sizer->SetSizeHints(this);
 
-    // Update DarkUi just for buttons
+    apply_theme();
+}
+
+// The dialog takes the window colour that UpdateDlgDarkUI gives its controls: the "Action" box paints
+// its interior in the dialog's colour, and each radio button paints its own row in the window colour.
+void ProjectDropDialog::apply_theme()
+{
+#ifdef _WIN32
+    wxGetApp().UpdateDarkUI(this);
+#else
+    SetBackgroundColour(wxGetApp().get_window_default_clr());
+#endif
+    // Every child (text, radio buttons, check box, buttons) on Windows and Linux; the dialog is themed above
     wxGetApp().UpdateDlgDarkUI(this, true);
 }
+
+void ProjectDropDialog::on_sys_color_changed()
+{
+    apply_theme();
+    m_dont_show_again->sys_color_changed();
+    Refresh();
+}
+
+#ifdef PREFLIGHT_TEST_HOOKS
+int ProjectDropDialog::ShowModal()
+{
+    if (!auto_dismiss_dialogs())
+        return DPIDialog::ShowModal();
+    // Declined and reported as MsgDialog declines a question: an automated run answers this one ahead
+    // through the application config (show_drop_project_dialog, drop_project_action)
+    GuiBudget::dialog_dismissed(into_u8(GetTitle()) + " | " + m_filename, true);
+    return wxID_CANCEL;
+}
+#endif
 
 void ProjectDropDialog::on_dpi_changed(const wxRect &suggested_rect)
 {
@@ -8095,14 +8341,33 @@ void Plater::regenerate_active_preview_data()
         reslice();
 }
 
+void Plater::preview_detail_changed()
+{
+    if (!wxGetApp().is_editor())
+    {
+        reload_gcode_from_disk();
+        return;
+    }
+    // A slice in flight took the old value when it started: stopped here and started again below. Its
+    // cancel event arrives while the new slice runs, so it is dropped.
+    const bool was_in_flight = p->background_process.in_flight();
+    if (was_in_flight)
+        p->background_process.stop();
+    bool invalidated = false;
+    for (const std::unique_ptr<Print> &print : p->fff_prints)
+        invalidated |= print->invalidate_gcode_export();
+    if (was_in_flight || (invalidated && p->sidebar_processing_active()))
+        reslice();
+}
+
 void Plater::reslice()
 {
     // There is "invalid data" button instead "slice now"
     if (!is_sliceable(s_print_statuses[s_multiple_beds.get_active_bed()]))
         return;
 
-    // Deselect all objects so Delete/Backspace in Preview won't remove platter objects
-    deselect_all();
+    // The selection is kept: the Preview draws its bounding box. An open gizmo edits in Prepare, so it is closed.
+    p->reset_all_gizmos();
 
     // Reset preview clipping plane so the slicing shell animation shows full objects
     GCodeViewer &gcode_viewer = p->preview->get_canvas3d()->get_gcode_viewer();
@@ -8190,41 +8455,6 @@ void Plater::reslice_FFF_until_step(PrintObjectStep step, const ModelObject &obj
 {
     this->reslice_until_step_inner(PrintObjectStep(step), object, postpone_error_messages);
 }
-
-namespace
-{
-bool load_secret(const std::string &id, const std::string &opt, std::string &usr, std::string &psswd)
-{
-#if wxUSE_SECRETSTORE
-    wxSecretStore store = wxSecretStore::GetDefault();
-    wxString errmsg;
-    if (!store.IsOk(&errmsg))
-    {
-        std::string msg = DSKY::format("%1% (%2%).", _u8L("This system doesn't support storing passwords securely"),
-                                       errmsg);
-        BOOST_LOG_TRIVIAL(error) << msg;
-        show_error(nullptr, msg);
-        return false;
-    }
-    const wxString service = DSKY::format_wxstr(L"%1%/PhysicalPrinter/%2%/%3%", PREFLIGHT_APP_NAME, id, opt);
-    wxString username;
-    wxSecretValue password;
-    if (!store.Load(service, username, password))
-    {
-        std::string msg(_u8L("Failed to load credentials from the system password store."));
-        BOOST_LOG_TRIVIAL(error) << msg;
-        show_error(nullptr, msg);
-        return false;
-    }
-    usr = into_u8(username);
-    psswd = into_u8(password.GetAsString());
-    return true;
-#else
-    BOOST_LOG_TRIVIAL(error) << "wxUSE_SECRETSTORE not supported. Cannot load password from the system store.";
-    return false;
-#endif // wxUSE_SECRETSTORE
-}
-} // namespace
 
 void Plater::printables_to_connect_gcode(const std::string & /*url*/) {}
 
@@ -8354,38 +8584,13 @@ void Plater::send_gcode()
     if (!physical_printer_config || p->model.objects.empty())
         return;
 
-    // Passwords and API keys
-    // "stored" indicates data are stored secretly, load them from store.
-    std::string printer_name = wxGetApp().preset_bundle->physical_printers.get_selected_printer().name;
-    if (physical_printer_config->opt_string("printhost_password") == "stored" &&
-        physical_printer_config->opt_string("printhost_password") == "stored")
-    {
-        std::string username;
-        std::string password;
-        if (load_secret(printer_name, "printhost_password", username, password))
-        {
-            if (!username.empty())
-                physical_printer_config->opt_string("printhost_user") = username;
-            if (!password.empty())
-                physical_printer_config->opt_string("printhost_password") = password;
-        }
-        else
-        {
-            physical_printer_config->opt_string("printhost_user") = std::string();
-            physical_printer_config->opt_string("printhost_password") = std::string();
-        }
-    }
-    /*
-    if (physical_printer_config->opt_string("printhost_apikey") == "stored") {
-        std::string username;
-        std::string password;
-        if (load_secret(printer_name, "printhost_apikey", username, password) && !password.empty())
-            physical_printer_config->opt_string("printhost_apikey") = password;
-        else
-            physical_printer_config->opt_string("printhost_apikey") = std::string();
-    }
-    */
-    send_gcode_inner(physical_printer_config);
+    // The upload carries the password the system store holds; the selected printer's own config keeps
+    // "stored", so a later save or config bundle export never writes the password
+    const std::string printer_name = wxGetApp().preset_bundle->physical_printers.get_selected_printer().name;
+    DynamicPrintConfig request_config = PhysicalPrinter::with_stored_credentials(
+        *physical_printer_config, [&printer_name](std::string &user, std::string &password)
+        { return load_secret(printer_name, "printhost_password", user, password); });
+    send_gcode_inner(&request_config);
 }
 
 std::string Plater::get_upload_filename()
@@ -8668,7 +8873,7 @@ void Plater::on_config_change(const DynamicPrintConfig &config)
 
             if (update_filament_colors_in_full_config())
             {
-                p->sidebar->obj_list()->update_extruder_colors();
+                p->sidebar->update_extruder_colors();
                 continue;
             }
         }
@@ -8709,7 +8914,7 @@ void Plater::on_config_change(const DynamicPrintConfig &config)
         else if (opt_key == "extruder_colour")
         {
             update_scheduled = true;
-            p->sidebar->obj_list()->update_extruder_colors();
+            p->sidebar->update_extruder_colors();
         }
         else if (opt_key == "max_print_height")
         {
@@ -8836,7 +9041,7 @@ void Plater::force_filament_colors_update()
     if (update_scheduled)
     {
         update();
-        p->sidebar->obj_list()->update_extruder_colors();
+        p->sidebar->update_extruder_colors();
     }
 
     if (p->main_frame->is_loaded())

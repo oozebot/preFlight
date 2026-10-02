@@ -446,6 +446,10 @@ CONFIG_OPTION_ENUM_DECLARE_STATIC_MAPS(FanSpinupResponseType)
 
 class DynamicPrintConfig;
 
+// The most extruders a printer may have: the extruder count inputs stop there, and a config
+// loaded with more keeps its first ones (Preset::cap_extruders)
+static constexpr size_t MAX_EXTRUDERS = 24;
+
 // Defines every configuration option, including the properties of the GUI dialogs.
 // Does not store the actual values, but defines default values.
 class PrintConfigDef : public ConfigDef
@@ -462,6 +466,9 @@ public:
     // The extruder retract keys could be overidden by the same values defined at the Filament level
     // (then the key is further prefixed with the "filament_" prefix).
     const std::vector<std::string> &extruder_retract_keys() const { return m_extruder_retract_keys; }
+    // Integer options naming one extruder, 1 based; 0 means the default where the option allows it.
+    // "extruder" is an object's, a part's or a layer range's own extruder.
+    const std::vector<std::string> &extruder_assignment_keys() const { return m_extruder_assignment_keys; }
 
 private:
     void init_common_params();
@@ -472,6 +479,7 @@ private:
 
     std::vector<std::string> m_extruder_option_keys;
     std::vector<std::string> m_extruder_retract_keys;
+    std::vector<std::string> m_extruder_assignment_keys;
 };
 
 // The one and only global definition of the configuration options.
@@ -542,6 +550,13 @@ public:
     void normalize_fdm();
 
     void set_num_extruders(unsigned int num_extruders);
+
+    // Sets every extruder assignment naming an extruder above extruder_count to its default.
+    // Returns the number of assignments reset.
+    size_t reset_extruders_above(size_t extruder_count);
+    // Removes every extruder assignment naming an extruder above extruder_count, so the value comes
+    // from the level below (an object's from the print's). Returns the number removed.
+    size_t erase_extruders_above(size_t extruder_count);
 
     // Validate the PrintConfig. Returns an empty string on success, otherwise an error message is returned.
     std::string validate();
@@ -1416,6 +1431,11 @@ public:
             this->touch();
         return out;
     }
+    // An own extruder above extruder_count becomes 0 (default), an override naming one is removed so
+    // the value follows the print settings again. Returns the number of assignments reset.
+    size_t reset_extruders_above(size_t extruder_count);
+    // Whether reset_extruders_above(extruder_count) would reset anything
+    bool has_extruders_above(size_t extruder_count) const;
 
     // Getters are thread safe.
     // The following implicit conversion breaks the Cereal serialization.

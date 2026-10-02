@@ -12,7 +12,12 @@
 #include "luminary/presets/app_config/AppConfig.hpp"
 #include "luminary/platform/files/FileIO.hpp"
 #include "luminary/platform/process/Process.hpp"
+#include "luminary/core/Raii.hpp"
+#include "luminary/core/diagnostics/DebugCounters.hpp"
+#include "GuiBudget.hpp"
+#include "Widgets/CategoryBar.hpp"
 #include "Widgets/CollapsibleSection.hpp"
+#include "Widgets/RowIcons.hpp"
 #include "Widgets/SwitchButton.hpp"
 #include "ConfigManipulation.hpp"
 #include "GUI.hpp"
@@ -305,8 +310,13 @@ wxStaticBoxSizer *TabbedSettingsPanel::CreateFlatStaticBoxSizer(wxWindow *parent
     wxWeakRef<wxWindow> weak_header = header_panel;
     auto reposition_header = [weak_header, stb, y_pos]()
     {
-        if (!weak_header)
+        // Past the 16-bit window coordinate range, wx moves the header by scrolling the shared parent,
+        // which moves every box and re-enters here through their move events; nested calls are skipped.
+        static bool s_repositioning = false;
+        if (!weak_header || s_repositioning)
             return;
+        s_repositioning = true;
+        Luminary::ScopeGuard repositioning_guard([]() { s_repositioning = false; });
         wxPoint p = stb->GetPosition();
         weak_header->SetPosition(wxPoint(p.x + 8, p.y + y_pos)); // x+8 matches static-box label inset
         weak_header->Raise();
@@ -350,21 +360,34 @@ wxStaticBoxSizer *TabbedSettingsPanel::CreateFlatStaticBoxSizer(wxWindow *parent
     return sizer;
 }
 
+#ifdef PREFLIGHT_TEST_HOOKS
+wxStaticBoxSizer *TabbedSettingsPanel::CreateDetachedGroupBox(wxWindow *parent, const wxString &label)
+{
+    wxStaticBoxSizer *sizer = CreateFlatStaticBoxSizer(parent, label);
+    m_section_checkboxes.pop_back();
+    m_building_group.clear();
+    return sizer;
+}
+#endif
+
+std::string TabbedSettingsPanel::BudgetName() const
+{
+    switch (GetPresetType())
+    {
+    case Preset::TYPE_PRINT:
+        return "print";
+    case Preset::TYPE_FILAMENT:
+        return "filament";
+    case Preset::TYPE_PRINTER:
+        return "printer";
+    default:
+        return "panel";
+    }
+}
+
 // ============================================================================
 // DPI-scaled sizes for consistent UI scaling
 // ============================================================================
-
-// Icon size for lock/undo icons (16px at default em=10)
-static int GetScaledIconSize()
-{
-    return int(1.6 * wxGetApp().em_unit());
-}
-
-static wxSize GetScaledIconSizeWx()
-{
-    int size = GetScaledIconSize();
-    return wxSize(size, size);
-}
 
 // Standard input control width (70px at default em=10)
 static int GetScaledInputWidth()
@@ -383,6 +406,9 @@ static int GetIconMargin()
 {
     return wxGetApp().em_unit() / 5;
 }
+
+// The chevron of the nozzle/filament rows' title, the size the sidebar's section headers use
+static constexpr int EXTRUDER_ROWS_CHEVRON_SIZE = 16;
 
 // Map a sidebar row key to the key used in the [sidebar_visibility] AppConfig section.
 // The sidebar uses "nozzle_diameter" where the Tab stores visibility under "extruders_count".
@@ -408,12 +434,63 @@ static bool is_key_pinned(const std::string &key)
     return true; // unset = pinned by default
 }
 
-// Write the pinned state for a key to the shared [sidebar_visibility] storage, saving immediately
-// so it persists across sessions/crashes.
-static void set_key_pinned(const std::string &key, bool pinned)
+// Write the pinned state of one pin to the shared [sidebar_visibility] storage (a per-extruder row
+// writes one key per extruder), saving immediately so it persists across sessions/crashes.
+static void set_keys_pinned(const std::vector<std::string> &keys, bool pinned)
 {
-    get_app_config()->set("sidebar_visibility", sidebar_visibility_key(key), pinned ? "1" : "0");
+    for (const std::string &key : keys)
+        get_app_config()->set("sidebar_visibility", sidebar_visibility_key(key), pinned ? "1" : "0");
     get_app_config()->save();
+}
+
+// A row's lock mark: open while the value differs from the system preset
+static void set_lock(RowIcons *row, bool differs_from_system)
+{
+    if (row == nullptr)
+        return;
+    row->SetIcon(RowIcons::Lock, *get_bmp_bundle(differs_from_system ? "lock_open" : "lock_closed"));
+    row->SetTip(RowIcons::Lock, differs_from_system ? _L("Value differs from system preset")
+                                                    : _L("Value is same as in the system preset"));
+}
+
+// A row's undo mark: the arrow, clickable, while the value differs from the saved preset
+static void set_undo(RowIcons *row, bool modified)
+{
+    if (row == nullptr)
+        return;
+    row->SetIcon(RowIcons::Undo, *get_bmp_bundle(modified ? "undo" : "dot"));
+    row->SetTip(RowIcons::Undo, modified ? _L("Click to revert to original value") : wxString());
+    row->SetHandCursor(RowIcons::Undo, modified);
+}
+
+// A row's icons after a DPI change
+static void rescale_icons(RowIcons *row)
+{
+    if (row != nullptr)
+        row->Rescale();
+}
+
+// The Printer panel's Extruders page keeps its rows under bare keys, so a key built on that page
+// and on another shares one row record: the later row's handlers and marks act on the other's.
+// The settings spec keeps the pages apart (--check-settings-spec); a spec that does not is counted
+// and logged here, the row still built.
+static void note_extruder_key_collision(const std::string &opt_key, const char *what)
+{
+    DBG_COUNT_LOAD("SIDEBAR_EXTRUDER_KEY_COLLISION");
+    BOOST_LOG_TRIVIAL(error) << "Sidebar: the key " << opt_key << " of the Extruders page is also " << what
+                             << "; the two share one row record";
+}
+
+// A per-extruder float vector of either kind: ConfigOptionPercents derives from ConfigOptionFloats,
+// but option<ConfigOptionFloats>() matches the exact type and returns nothing for it
+static const ConfigOptionFloats *float_values(const DynamicPrintConfig &config, const std::string &key)
+{
+    return dynamic_cast<const ConfigOptionFloats *>(config.option(key));
+}
+
+static ConfigOptionFloats *float_values(DynamicPrintConfig &config, const std::string &key, bool create)
+{
+    return dynamic_cast<ConfigOptionFloats *>(config.optptr(key, create));
 }
 
 // Whether a single sidebar row should be shown. In edit mode every row is shown; otherwise it
@@ -494,11 +571,16 @@ static void ApplyDarkModeToStaticBoxes(wxWindow *window)
         label->SetBackgroundColour(panel_bg);
         label->Refresh();
     }
-    // Apply to static bitmaps (lock/undo icons)
+    // Apply to static bitmaps and a row's lock/undo icons
     else if (wxStaticBitmap *bitmap = dynamic_cast<wxStaticBitmap *>(window))
     {
         bitmap->SetBackgroundColour(panel_bg);
         bitmap->Refresh();
+    }
+    else if (RowIcons *icons = dynamic_cast<RowIcons *>(window))
+    {
+        icons->SetBackgroundColour(panel_bg);
+        icons->Refresh();
     }
     // Apply to panels
     else if (wxPanel *panel = dynamic_cast<wxPanel *>(window))
@@ -644,6 +726,7 @@ void TabbedSettingsPanel::BuildUI()
     // Create a single ScrollablePanel that holds all sections in one scrollable list
     m_scroll_area = new ScrollablePanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize);
     m_scroll_area->sys_color_changed();
+    m_scroll_area->SetBudgetTag("sidebar." + BudgetName());
 
     auto *content_panel = m_scroll_area->GetContentPanel();
     auto *content_sizer = new wxBoxSizer(wxVERTICAL);
@@ -833,13 +916,14 @@ static std::string registry_escape(const std::string &value)
     return out;
 }
 
-void TabbedSettingsPanel::DumpRegistry(const std::string &path) const
+void TabbedSettingsPanel::DumpRegistry(const std::string &path)
 {
     boost::nowide::ofstream out(path);
     out << "page\tgroup\torder\tkey\twidget\tshown\tenabled\tvalue\treason\n";
     const DynamicPrintConfig &config = GetEditedConfig();
-    for (const RowPlacement &row : m_row_placements)
+    for (const RowPlacement &row : RegistryPlacements())
     {
+        BeforeRegistryRow(row);
         RegistryRowInfo info;
         const bool found = LookupRegistryRow(row.key, info);
         const std::string base_key = row.key.substr(0, row.key.find('#'));
@@ -849,6 +933,7 @@ void TabbedSettingsPanel::DumpRegistry(const std::string &path) const
             << ((found && info.enabled) ? 1 : 0) << '\t' << registry_escape(value) << '\t'
             << registry_escape(found ? info.reason : std::string()) << '\n';
     }
+    AfterRegistryRows();
 }
 
 void TabbedSettingsPanel::ApplyToggleRules()
@@ -909,6 +994,8 @@ void TabbedSettingsPanel::EnsureContentBuilt(int index)
     // This must be called after content is built so all controls exist
     ApplyToggleRules();
 
+    GuiBudget::snapshot("sidebar." + BudgetName() + "." + into_u8(m_tabs[index].definition.name));
+
     // Bind dead space click handlers on new content to commit field changes
     // Use CallAfter to defer until after Plater construction is complete
     // (during construction, m_plater->sidebar() would crash because Plater::p is not yet assigned)
@@ -945,13 +1032,10 @@ void TabbedSettingsPanel::UpdateVisibilityCheckboxes()
     {
         if (!cb)
             continue;
-        // Hide through the containing sizer so the row reclaims the space outside edit mode
-        if (wxSizer *cs = cb->GetContainingSizer())
-            cs->Show(cb, s_sidebar_edit_mode);
-        else
-            cb->Show(s_sidebar_edit_mode);
+        // The pin slot takes no room outside edit mode
+        cb->ShowSlot(RowIcons::Pin, s_sidebar_edit_mode);
         if (s_sidebar_edit_mode) // refresh bitmap to the shared pinned state while editing
-            cb->SetBitmap(*get_bmp_bundle(is_key_pinned(key) ? "check_on" : "check_off", 16));
+            cb->SetIcon(RowIcons::Pin, *get_bmp_bundle(is_key_pinned(PinReadKey(key)) ? "check_on" : "check_off", 16));
     }
 }
 
@@ -964,8 +1048,8 @@ void TabbedSettingsPanel::SetGroupPinned(wxSizer *group_sizer, bool pinned)
     {
         if (!cb || !group_windows.count(cb))
             continue;
-        set_key_pinned(key, pinned);
-        cb->SetBitmap(*get_bmp_bundle(pinned ? "check_on" : "check_off", 16));
+        set_keys_pinned(PinWriteKeys(key), pinned);
+        cb->SetIcon(RowIcons::Pin, *get_bmp_bundle(pinned ? "check_on" : "check_off", 16));
     }
 }
 
@@ -988,16 +1072,28 @@ void TabbedSettingsPanel::UpdateSectionCheckboxes()
             // track the box's visibility explicitly. Otherwise an emptied group (all rows unpinned)
             // hides its box but leaves the label floating over the rows that move up to fill the gap.
             bool box_shown = sc.box->IsShown();
+            const bool was_shown = sc.header_panel->IsShown();
             sc.header_panel->Show(box_shown);
             if (box_shown)
             {
+                // Only what changed: every header of the panel passes here on each visibility update
                 int w = s_sidebar_edit_mode ? sc.full_w : sc.label_w;
-                sc.header_panel->SetMinSize(wxSize(w, sc.height));
-                sc.header_panel->SetSize(w, sc.height);
-                sc.header_panel->Layout();
+                const wxSize size(w, sc.height);
+                if (sc.header_panel->GetMinSize() != size)
+                    sc.header_panel->SetMinSize(size);
+                if (sc.header_panel->GetSize() != size)
+                {
+                    sc.header_panel->SetSize(size);
+                    sc.header_panel->Layout();
+                }
                 wxPoint p = sc.box->GetPosition();
-                sc.header_panel->SetPosition(wxPoint(p.x + 8, p.y + sc.y_pos));
-                sc.header_panel->Raise();
+                const wxPoint position(p.x + 8, p.y + sc.y_pos);
+                const bool moved = sc.header_panel->GetPosition() != position;
+                if (moved)
+                    sc.header_panel->SetPosition(position);
+                // A header that stayed shown in place keeps its place in the z-order
+                if (moved || !was_shown)
+                    sc.header_panel->Raise();
             }
         }
 
@@ -1009,7 +1105,7 @@ void TabbedSettingsPanel::UpdateSectionCheckboxes()
             bool any_pinned = false;
             for (auto &[key, cb] : m_visibility_checkboxes)
             {
-                if (cb && group_windows.count(cb) && is_key_pinned(key))
+                if (cb && group_windows.count(cb) && is_key_pinned(PinReadKey(key)))
                 {
                     any_pinned = true;
                     break;
@@ -1020,13 +1116,17 @@ void TabbedSettingsPanel::UpdateSectionCheckboxes()
     }
 }
 
-void TabbedSettingsPanel::UpdateSidebarVisibility()
+void TabbedSettingsPanel::UpdateSidebarVisibility(bool freeze, int only_tab)
 {
-    Freeze();
+    // Freezing walks every window of the panel twice; an extruder switch skips it
+    if (freeze)
+        Freeze();
 
     // Step 0: Fold state. Edit Visibility opens every category; the normal view restores the
     // stored states. Runs before the walk so the content containers are shown or hidden first.
-    ApplyCategoryStates();
+    // A walk of one category leaves the fold states as they are.
+    if (only_tab < 0)
+        ApplyCategoryStates();
 
     // Step 1: Let subclass show/hide individual rows based on sidebar_visibility config
     UpdateRowVisibility();
@@ -1048,6 +1148,8 @@ void TabbedSettingsPanel::UpdateSidebarVisibility()
     // Step 2: Walk sizer hierarchy to show/hide groups and sections
     for (size_t tab_idx = 0; tab_idx < m_tabs.size(); ++tab_idx)
     {
+        if (only_tab >= 0 && int(tab_idx) != only_tab)
+            continue;
         auto &tab = m_tabs[tab_idx];
         if (!tab.content || !tab.content_built)
             continue;
@@ -1187,16 +1289,15 @@ void TabbedSettingsPanel::UpdateSidebarVisibility()
     // children, undoing the individual row hiding from step 1. Re-applying restores correct state.
     UpdateRowVisibility();
 
-    // Step 4a: Apply pin-checkbox visibility LAST. Steps 2-4 call wxSizerItem::Show(true), which
-    // recursively re-shows every child of a shown row (including the checkbox), so this must run
-    // after them to keep checkboxes hidden outside Edit Visibility mode.
+    // Step 4a: The pin slots follow Edit Visibility mode
     UpdateVisibilityCheckboxes();
     UpdateSectionCheckboxes();
 
     // Step 5: Update layout and scrollbar
     UpdateContentLayout();
 
-    Thaw();
+    if (freeze)
+        Thaw();
 }
 
 void TabbedSettingsPanel::UpdateSizerProportions()
@@ -1284,6 +1385,8 @@ void TabbedSettingsPanel::ApplyCategoryStates()
 
 void TabbedSettingsPanel::RebuildContent()
 {
+    GuiBudget::snapshot("sidebar." + BudgetName() + ".rebuild.begin");
+
     // Release any mouse capture before destroying windows, or NotifyCaptureLost
     // crashes on a window that is destroyed while it still holds the capture.
     wxWindow *captured = wxWindow::GetCapture();
@@ -1325,6 +1428,8 @@ void TabbedSettingsPanel::RebuildContent()
         m_scroll_area->Destroy();
         m_scroll_area = nullptr;
     }
+    // Destruction is synchronous, so the old pages are gone before the new ones are built
+    GuiBudget::snapshot("sidebar." + BudgetName() + ".rebuild.destroyed");
 
     // Clear tab state
     for (auto &tab : m_tabs)
@@ -1346,6 +1451,7 @@ void TabbedSettingsPanel::RebuildContent()
         BuildUI();
         Layout();
     }
+    GuiBudget::snapshot("sidebar." + BudgetName() + ".rebuild.end");
 }
 
 void TabbedSettingsPanel::ScheduleRebuild(std::function<void()> after)
@@ -1427,37 +1533,37 @@ void TabbedSettingsPanel::ToggleOptionControl(wxWindow *control, bool enable)
     }
 }
 
-wxStaticBitmap *TabbedSettingsPanel::AddPinCheckbox(wxWindow *parent, wxSizer *left_sizer, const std::string &opt_key)
+RowIcons *TabbedSettingsPanel::AddRowIcons(wxWindow *parent, wxSizer *left_sizer, const std::string &pin_key)
 {
-    wxColour bg_color = SidebarColors::Background();
+    // One window for the row's icons, each where its own window used to stand
+    auto *icons = new RowIcons(parent, !pin_key.empty(), true, true);
+    icons->SetBackgroundColour(SidebarColors::Background());
+    set_lock(icons, false);
+    set_undo(icons, false);
 
-    // Pin checkbox - leads the row, mirroring the main-settings checkbox (same check_on/check_off
-    // bitmaps and the same shared [sidebar_visibility] key, so its state matches the Tab page exactly).
-    // Shown only in Edit Visibility mode; clicking toggles whether the setting stays pinned.
-    auto *checkbox = new wxStaticBitmap(parent, wxID_ANY,
-                                        *get_bmp_bundle(is_key_pinned(opt_key) ? "check_on" : "check_off", 16));
-    checkbox->SetMinSize(GetScaledIconSizeWx());
-    checkbox->SetBackgroundColour(bg_color);
-    checkbox->SetToolTip(_L("Show this setting in the sidebar"));
+    // Pin - leads the row, mirroring the main-settings checkbox (same check_on/check_off bitmaps and
+    // the same shared [sidebar_visibility] key, so its state matches the Tab page exactly). Shown
+    // only in Edit Visibility mode; clicking toggles whether the setting stays pinned.
+    if (!pin_key.empty())
     {
-        wxStaticBitmap *cb = checkbox;
-        const std::string key = opt_key;
-        cb->Bind(wxEVT_LEFT_DOWN,
-                 [this, cb, key](wxMouseEvent &)
-                 {
-                     const bool now_pinned = !is_key_pinned(key);
-                     set_key_pinned(key, now_pinned);
-                     cb->SetBitmap(*get_bmp_bundle(now_pinned ? "check_on" : "check_off", 16));
-                     cb->Refresh();
-                     // Keep the owning section-header tri-state in sync with this row's pin state
-                     UpdateSectionCheckboxes();
-                 });
+        icons->SetIcon(RowIcons::Pin,
+                       *get_bmp_bundle(is_key_pinned(PinReadKey(pin_key)) ? "check_on" : "check_off", 16));
+        icons->SetTip(RowIcons::Pin, _L("Show this setting in the sidebar"));
+        icons->SetOnClick(RowIcons::Pin,
+                          [this, icons, key = pin_key]()
+                          {
+                              const bool now_pinned = !is_key_pinned(PinReadKey(key));
+                              set_keys_pinned(PinWriteKeys(key), now_pinned);
+                              icons->SetIcon(RowIcons::Pin, *get_bmp_bundle(now_pinned ? "check_on" : "check_off", 16));
+                              // Keep the owning section-header tri-state in sync with this row's pin state
+                              UpdateSectionCheckboxes();
+                          });
+        // No room is taken outside edit mode
+        icons->ShowSlot(RowIcons::Pin, s_sidebar_edit_mode);
+        m_visibility_checkboxes.emplace_back(pin_key, icons);
     }
-    left_sizer->Add(checkbox, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, GetIconMargin());
-    // Hide through the sizer so no gap is reserved outside edit mode
-    left_sizer->Show(checkbox, s_sidebar_edit_mode);
-    m_visibility_checkboxes.emplace_back(opt_key, checkbox);
-    return checkbox;
+    left_sizer->Add(icons, 0, wxALIGN_CENTER_VERTICAL);
+    return icons;
 }
 
 TabbedSettingsPanel::RowUIContext TabbedSettingsPanel::CreateRowUIBase(wxWindow *parent, const std::string &opt_key,
@@ -1483,21 +1589,10 @@ TabbedSettingsPanel::RowUIContext TabbedSettingsPanel::CreateRowUIBase(wxWindow 
     // Set background color using unified accessor
     wxColour bg_color = SidebarColors::Background();
 
-    // Pin checkbox - leads the row, mirroring the main-settings checkbox.
-    ctx.visibility_checkbox = AddPinCheckbox(parent, ctx.left_sizer, opt_key);
-
-    // Create lock icon
-    ctx.lock_icon = new wxStaticBitmap(parent, wxID_ANY, *get_bmp_bundle("lock_closed"));
-    ctx.lock_icon->SetMinSize(GetScaledIconSizeWx());
-    ctx.lock_icon->SetBackgroundColour(bg_color);
-    ctx.lock_icon->SetToolTip(_L("Value is same as in the system preset"));
-    ctx.left_sizer->Add(ctx.lock_icon, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, GetIconMargin());
-
-    // Create undo icon
-    ctx.undo_icon = new wxStaticBitmap(parent, wxID_ANY, *get_bmp_bundle("dot"));
-    ctx.undo_icon->SetMinSize(GetScaledIconSizeWx());
-    ctx.undo_icon->SetBackgroundColour(bg_color);
-    ctx.left_sizer->Add(ctx.undo_icon, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, GetIconMargin());
+    // The pin (mirroring the main-settings checkbox), the lock and the undo mark, in one window
+    ctx.visibility_checkbox = AddRowIcons(parent, ctx.left_sizer, opt_key);
+    ctx.lock_icon = ctx.visibility_checkbox;
+    ctx.undo_icon = ctx.visibility_checkbox;
 
     // Label with colon - use ellipsis to allow shrinking
     wxString label_with_colon = label + ":";
@@ -1515,28 +1610,28 @@ TabbedSettingsPanel::RowUIContext TabbedSettingsPanel::CreateRowUIBase(wxWindow 
     return ctx;
 }
 
-void TabbedSettingsPanel::BindUndoHandler(wxStaticBitmap *undo_icon, const std::string &opt_key,
+void TabbedSettingsPanel::BindUndoHandler(RowIcons *undo_icon, const std::string &opt_key,
                                           std::function<void(const std::string &)> on_setting_changed)
 {
     if (!undo_icon)
         return;
 
-    undo_icon->Bind(wxEVT_LEFT_DOWN,
-                    [this, opt_key, on_setting_changed](wxMouseEvent &)
-                    {
-                        // Get original value and restore it
-                        const Preset *system_preset = GetSystemPresetParent();
-                        if (system_preset && system_preset->config.has(opt_key))
-                        {
-                            DynamicPrintConfig &config = GetEditedConfig();
-                            std::string original_value = system_preset->config.opt_serialize(opt_key);
-                            config.set_deserialize_strict(opt_key, original_value);
-                            on_setting_changed(opt_key);
-                        }
-                    });
+    undo_icon->SetOnClick(RowIcons::Undo,
+                          [this, opt_key, on_setting_changed]()
+                          {
+                              // Get original value and restore it
+                              const Preset *system_preset = GetSystemPresetParent();
+                              if (system_preset && system_preset->config.has(opt_key))
+                              {
+                                  DynamicPrintConfig &config = GetEditedConfig();
+                                  std::string original_value = system_preset->config.opt_serialize(opt_key);
+                                  config.set_deserialize_strict(opt_key, original_value);
+                                  on_setting_changed(opt_key);
+                              }
+                          });
 }
 
-void TabbedSettingsPanel::UpdateUndoUICommon(const std::string &opt_key, wxWindow *undo_icon, wxWindow *lock_icon,
+void TabbedSettingsPanel::UpdateUndoUICommon(const std::string &opt_key, RowIcons *undo_icon, RowIcons *lock_icon,
                                              const std::string &original_value)
 {
     const DynamicPrintConfig &config = GetEditedConfig();
@@ -1550,21 +1645,7 @@ void TabbedSettingsPanel::UpdateUndoUICommon(const std::string &opt_key, wxWindo
     bool is_modified = (current_value != original_value);
 
     // Update undo icon - show dot when unchanged, undo arrow when modified
-    if (auto *bmp = dynamic_cast<wxStaticBitmap *>(undo_icon))
-    {
-        if (is_modified)
-        {
-            bmp->SetBitmap(*get_bmp_bundle("undo"));
-            bmp->SetToolTip(_L("Click to revert to original value"));
-            bmp->SetCursor(wxCursor(wxCURSOR_HAND));
-        }
-        else
-        {
-            bmp->SetBitmap(*get_bmp_bundle("dot"));
-            bmp->SetToolTip(wxEmptyString);
-            bmp->SetCursor(wxNullCursor);
-        }
-    }
+    set_undo(undo_icon, is_modified);
 
     // Check if value differs from system preset (for lock icon)
     const Preset *system_preset = GetSystemPresetParent();
@@ -1577,19 +1658,7 @@ void TabbedSettingsPanel::UpdateUndoUICommon(const std::string &opt_key, wxWindo
     }
 
     // Update lock icon - show lock_open when different from system, lock_closed when same
-    if (auto *bmp = dynamic_cast<wxStaticBitmap *>(lock_icon))
-    {
-        if (differs_from_system)
-        {
-            bmp->SetBitmap(*get_bmp_bundle("lock_open"));
-            bmp->SetToolTip(_L("Value differs from system preset"));
-        }
-        else
-        {
-            bmp->SetBitmap(*get_bmp_bundle("lock_closed"));
-            bmp->SetToolTip(_L("Value is same as in the system preset"));
-        }
-    }
+    set_lock(lock_icon, differs_from_system);
 }
 
 void TabbedSettingsPanel::msw_rescale()
@@ -1806,16 +1875,8 @@ void PrintSettingsPanel::CreateMultilineSettingRow(wxWindow *parent, wxSizer *si
     // Set background color using unified accessor
     wxColour bg_color = SidebarColors::Background();
 
-    auto *lock_icon = new wxStaticBitmap(parent, wxID_ANY, *get_bmp_bundle("lock_closed"));
-    lock_icon->SetMinSize(GetScaledIconSizeWx());
-    lock_icon->SetBackgroundColour(bg_color);
-    lock_icon->SetToolTip(_L("Value is same as in the system preset"));
-    label_sizer->Add(lock_icon, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, GetIconMargin());
-
-    auto *undo_icon = new wxStaticBitmap(parent, wxID_ANY, *get_bmp_bundle("dot"));
-    undo_icon->SetMinSize(GetScaledIconSizeWx());
-    undo_icon->SetBackgroundColour(bg_color);
-    label_sizer->Add(undo_icon, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, GetIconMargin());
+    // The lock and undo marks, in one window
+    RowIcons *icons = AddRowIcons(parent, label_sizer, std::string());
 
     wxString label_with_colon = label + ":";
     auto *label_text = new wxStaticText(parent, wxID_ANY, label_with_colon);
@@ -1855,30 +1916,30 @@ void PrintSettingsPanel::CreateMultilineSettingRow(wxWindow *parent, wxSizer *si
     // Store UI elements
     SettingUIElements ui_elem;
     ui_elem.control = text;
-    ui_elem.lock_icon = lock_icon;
-    ui_elem.undo_icon = undo_icon;
+    ui_elem.lock_icon = icons;
+    ui_elem.undo_icon = icons;
     ui_elem.original_value = original_value;
     m_setting_controls[opt_key] = ui_elem;
     NoteRowPlacement(opt_key);
 
     UpdateUndoUI(opt_key);
 
-    // Bind undo icon click
-    undo_icon->Bind(wxEVT_LEFT_DOWN,
-                    [this, opt_key](wxMouseEvent &)
-                    {
-                        auto it = m_setting_controls.find(opt_key);
-                        if (it == m_setting_controls.end())
-                            return;
+    // Undo mark click
+    icons->SetOnClick(RowIcons::Undo,
+                      [this, opt_key]()
+                      {
+                          auto it = m_setting_controls.find(opt_key);
+                          if (it == m_setting_controls.end())
+                              return;
 
-                        if (auto *txt = dynamic_cast<wxTextCtrl *>(it->second.control))
-                        {
-                            txt->SetValue(from_u8(it->second.original_value));
-                        }
+                          if (auto *txt = dynamic_cast<wxTextCtrl *>(it->second.control))
+                          {
+                              txt->SetValue(from_u8(it->second.original_value));
+                          }
 
-                        OnSettingChanged(opt_key);
-                        UpdateUndoUI(opt_key);
-                    });
+                          OnSettingChanged(opt_key);
+                          UpdateUndoUI(opt_key);
+                      });
 }
 
 void PrintSettingsPanel::CreateSettingRow(wxWindow *parent, wxSizer *sizer, const std::string &opt_key,
@@ -1892,8 +1953,8 @@ void PrintSettingsPanel::CreateSettingRow(wxWindow *parent, wxSizer *sizer, cons
         return; // Option not found
 
     const ConfigOptionDef *opt_def = ctx.opt_def;
-    wxStaticBitmap *lock_icon = ctx.lock_icon;
-    wxStaticBitmap *undo_icon = ctx.undo_icon;
+    RowIcons *lock_icon = ctx.lock_icon;
+    RowIcons *undo_icon = ctx.undo_icon;
     wxBoxSizer *row_sizer = ctx.row_sizer;
     wxString tooltip = ctx.tooltip;
 
@@ -1970,7 +2031,9 @@ void PrintSettingsPanel::CreateSettingRow(wxWindow *parent, wxSizer *sizer, cons
     {
         auto *value_sizer = new wxBoxSizer(wxHORIZONTAL);
         int min_val = opt_def->min > INT_MIN ? static_cast<int>(opt_def->min) : 0;
-        int max_val = opt_def->max < INT_MAX ? static_cast<int>(opt_def->max) : 10000;
+        // An option naming an extruder stops at the printer's extruder count
+        int max_val = wxGetApp().extruder_role_max(opt_key,
+                                                   opt_def->max < INT_MAX ? static_cast<int>(opt_def->max) : 10000);
         int value = 0;
         if (config.has(opt_key))
         {
@@ -2093,65 +2156,65 @@ void PrintSettingsPanel::CreateSettingRow(wxWindow *parent, wxSizer *sizer, cons
         // Set initial icon state based on system preset comparison
         UpdateUndoUI(opt_key);
 
-        // Bind undo icon click to revert value
-        undo_icon->Bind(wxEVT_LEFT_DOWN,
-                        [this, opt_key](wxMouseEvent &)
-                        {
-                            auto it = m_setting_controls.find(opt_key);
-                            if (it == m_setting_controls.end())
-                                return;
+        // Undo mark click reverts the value
+        undo_icon->SetOnClick(RowIcons::Undo,
+                              [this, opt_key]()
+                              {
+                                  auto it = m_setting_controls.find(opt_key);
+                                  if (it == m_setting_controls.end())
+                                      return;
 
-                            const ConfigOptionDef *def = print_config_def.get(opt_key);
-                            if (!def)
-                                return;
+                                  const ConfigOptionDef *def = print_config_def.get(opt_key);
+                                  if (!def)
+                                      return;
 
-                            // Revert to original value
-                            switch (def->type)
-                            {
-                            case coBool:
-                                if (auto *cb = dynamic_cast<::CheckBox *>(it->second.control))
-                                {
-                                    cb->SetValue(it->second.original_value == "1");
-                                }
-                                break;
-                            case coInt:
-                                if (auto *spin = dynamic_cast<SpinInput *>(it->second.control))
-                                {
-                                    spin->SetValue(std::stoi(it->second.original_value));
-                                }
-                                break;
-                            case coEnum:
-                                if (auto *combo = dynamic_cast<::ComboBox *>(it->second.control))
-                                {
-                                    if (def->enum_def && def->enum_def->has_values())
-                                    {
-                                        const auto &values = def->enum_def->values();
-                                        for (size_t idx = 0; idx < values.size(); ++idx)
-                                        {
-                                            if (values[idx] == it->second.original_value)
-                                            {
-                                                combo->SetSelection(static_cast<int>(idx));
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                                break;
-                            default:
-                                if (auto *text_input = dynamic_cast<::TextInput *>(it->second.control))
-                                {
-                                    text_input->SetValue(from_u8(it->second.original_value));
-                                }
-                                else if (auto *text = dynamic_cast<wxTextCtrl *>(it->second.control))
-                                {
-                                    text->SetValue(from_u8(it->second.original_value));
-                                }
-                                break;
-                            }
+                                  // Revert to original value
+                                  switch (def->type)
+                                  {
+                                  case coBool:
+                                      if (auto *cb = dynamic_cast<::CheckBox *>(it->second.control))
+                                      {
+                                          cb->SetValue(it->second.original_value == "1");
+                                      }
+                                      break;
+                                  case coInt:
+                                      if (auto *spin = dynamic_cast<SpinInput *>(it->second.control))
+                                      {
+                                          spin->SetValue(std::stoi(it->second.original_value));
+                                      }
+                                      break;
+                                  case coEnum:
+                                      if (auto *combo = dynamic_cast<::ComboBox *>(it->second.control))
+                                      {
+                                          if (def->enum_def && def->enum_def->has_values())
+                                          {
+                                              const auto &values = def->enum_def->values();
+                                              for (size_t idx = 0; idx < values.size(); ++idx)
+                                              {
+                                                  if (values[idx] == it->second.original_value)
+                                                  {
+                                                      combo->SetSelection(static_cast<int>(idx));
+                                                      break;
+                                                  }
+                                              }
+                                          }
+                                      }
+                                      break;
+                                  default:
+                                      if (auto *text_input = dynamic_cast<::TextInput *>(it->second.control))
+                                      {
+                                          text_input->SetValue(from_u8(it->second.original_value));
+                                      }
+                                      else if (auto *text = dynamic_cast<wxTextCtrl *>(it->second.control))
+                                      {
+                                          text->SetValue(from_u8(it->second.original_value));
+                                      }
+                                      break;
+                                  }
 
-                            OnSettingChanged(opt_key);
-                            UpdateUndoUI(opt_key);
-                        });
+                                  OnSettingChanged(opt_key);
+                                  UpdateUndoUI(opt_key);
+                              });
     }
 
     sizer->Add(row_sizer, 0, wxEXPAND | wxTOP | wxBOTTOM, em / 4);
@@ -2476,6 +2539,20 @@ void PrintSettingsPanel::RefreshFromConfig()
     ApplyToggleRules();
 }
 
+void PrintSettingsPanel::UpdateExtruderRoleRanges()
+{
+    for (const std::string &key : print_config_def.extruder_assignment_keys())
+    {
+        auto it = m_setting_controls.find(key);
+        const ConfigOptionDef *def = print_config_def.get(key);
+        if (it == m_setting_controls.end() || def == nullptr)
+            continue;
+        if (auto *spin = dynamic_cast<SpinInput *>(it->second.control))
+            spin->SetRange(def->min > INT_MIN ? static_cast<int>(def->min) : 0,
+                           wxGetApp().extruder_role_max(key, def->max < INT_MAX ? static_cast<int>(def->max) : 10000));
+    }
+}
+
 void PrintSettingsPanel::ResetOriginalValues()
 {
     const DynamicPrintConfig &config = wxGetApp().preset_bundle->prints.get_selected_preset().config;
@@ -2494,13 +2571,10 @@ void PrintSettingsPanel::ApplyToggleState(const std::string &registry_key, bool 
 void PrintSettingsPanel::msw_rescale()
 {
     // Update icon sizes and rescale controls for DPI scaling
-    wxSize icon_size = GetScaledIconSizeWx();
     for (auto &[opt_key, ui_elem] : m_setting_controls)
     {
-        if (ui_elem.lock_icon)
-            ui_elem.lock_icon->SetMinSize(icon_size);
-        if (ui_elem.undo_icon)
-            ui_elem.undo_icon->SetMinSize(icon_size);
+        // The lock and undo marks share one window
+        rescale_icons(ui_elem.lock_icon);
         // Rescale SpinInput controls so internal buttons reposition correctly
         if (auto *spin = dynamic_cast<SpinInputBase *>(ui_elem.control))
             spin->Rescale();
@@ -2615,13 +2689,12 @@ std::vector<TabbedSettingsPanel::TabDefinition> PrinterSettingsPanel::GetTabDefi
 {
     std::vector<TabDefinition> tabs = {{"general", _L("General"), "printer"}, {"limits", _L("Machine limits"), "cog"}};
 
-    // Add extruder tabs dynamically
-    for (size_t i = 0; i < m_extruders_count; ++i)
-    {
-        wxString name = wxString::Format("extruder_%zu", i);
-        wxString title = m_extruders_count == 1 ? _L("Extruder") : wxString::Format(_L("Extruder %zu"), i + 1);
-        tabs.push_back({name, title, "funnel"});
-    }
+    // One section for the extruders whatever their count: with several, a strip selects the one
+    // its page shows
+    if (m_extruders_count <= 1)
+        tabs.push_back({"extruder_0", _L("Extruder"), "funnel"});
+    else
+        tabs.push_back({"extruder", _L("Extruders"), "funnel"});
 
     // Add Single extruder MM tab after extruder tabs (to match main settings order)
     if (ShouldShowSingleExtruderMM())
@@ -2637,12 +2710,21 @@ wxPanel *PrinterSettingsPanel::BuildTabContent(int tab_index)
         return nullptr;
 
     const wxString &tab_name = GetTabName(tab_index);
-    if (tab_name.StartsWith("extruder_"))
+    if (tab_name == "extruder" || tab_name == "extruder_0")
     {
-        // Every extruder tab renders the spec's extruder page with its own index
-        long extruder_idx = 0;
-        tab_name.Mid(9).ToLong(&extruder_idx);
-        return BuildPageFromSpec("extruder_0", static_cast<size_t>(extruder_idx));
+        // The spec's extruder page, built once for the selected extruder (the last one selected,
+        // kept while the count allows) and re-bound to another on a switch
+        const std::string stored = get_app_config()->get("sidebar_expanded", "printer/extruder_selected");
+        size_t selected = 0;
+        if (!stored.empty())
+            selected = size_t(std::max(0, std::atoi(stored.c_str())));
+        m_selected_extruder = std::min(selected, m_extruders_count > 0 ? m_extruders_count - 1 : 0);
+        m_extruder_tab_index = tab_index;
+        wxPanel *content = BuildPageFromSpec("extruder_0", m_selected_extruder);
+        MigrateExtruderPins();
+        if (m_extruders_count > 1)
+            BuildExtruderSelector(content);
+        return content;
     }
 
     wxPanel *content = BuildPageFromSpec(into_u8(tab_name));
@@ -2812,15 +2894,17 @@ void PrinterSettingsPanel::AfterSpecRow(wxWindow * /*parent*/, wxSizer * /*group
     }
 }
 
-void PrinterSettingsPanel::AddApplyToOtherExtrudersButton(wxWindow *parent, wxSizer *sizer, size_t extruder_idx)
+void PrinterSettingsPanel::AddApplyToOtherExtrudersButton(wxWindow *parent, wxSizer *sizer, size_t /*extruder_idx*/)
 {
     const int em = wxGetApp().em_unit();
     auto *btn_sizer = new wxBoxSizer(wxHORIZONTAL);
     auto *btn = new ScalableButton(parent, wxID_ANY, "copy", _L("Apply below settings to other extruders"),
                                    wxDefaultSize, wxDefaultPosition, wxBU_LEFT | wxBU_EXACTFIT);
     btn->Bind(wxEVT_BUTTON,
-              [this, extruder_idx](wxCommandEvent &)
+              [this](wxCommandEvent &)
               {
+                  // From the extruder the page shows at the click
+                  const size_t extruder_idx = m_selected_extruder;
                   static const std::vector<std::string> extruder_options = {"fan_spinup_time",
                                                                             "fan_spinup_response_type",
                                                                             "min_layer_height",
@@ -2972,18 +3056,8 @@ void PrinterSettingsPanel::AddExtruderCountRow(wxWindow *parent, wxSizer *group)
     // Set background color using unified accessor
     wxColour bg_color = SidebarColors::Background();
 
-    // Lock icon - shows lock_closed when value matches system preset
-    auto *lock_icon = new wxStaticBitmap(parent, wxID_ANY, *get_bmp_bundle("lock_closed"));
-    lock_icon->SetMinSize(GetScaledIconSizeWx());
-    lock_icon->SetBackgroundColour(bg_color);
-    lock_icon->SetToolTip(_L("Value is same as in the system preset"));
-    left_sizer->Add(lock_icon, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, GetIconMargin());
-
-    // Undo icon - shows dot when unchanged, undo arrow when modified
-    auto *undo_icon = new wxStaticBitmap(parent, wxID_ANY, *get_bmp_bundle("dot"));
-    undo_icon->SetMinSize(GetScaledIconSizeWx());
-    undo_icon->SetBackgroundColour(bg_color);
-    left_sizer->Add(undo_icon, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, GetIconMargin());
+    // The lock (against the system preset) and undo (against the saved preset) marks, in one window
+    RowIcons *icons = AddRowIcons(parent, left_sizer, std::string());
 
     auto *label_text = new wxStaticText(parent, wxID_ANY, _L("Extruders:"), wxDefaultPosition, wxDefaultSize,
                                         wxST_ELLIPSIZE_END);
@@ -3015,15 +3089,15 @@ void PrinterSettingsPanel::AddExtruderCountRow(wxWindow *parent, wxSizer *group)
     wxString text_value = wxString::Format("%d", extruder_count);
 
     // Simple creation - just like Tab.cpp does it (fixed 70px width)
-    auto *spin = new SpinInput(parent, text_value, "", wxDefaultPosition, wxSize(GetScaledInputWidth(), -1), 0, 1, 256,
-                               extruder_count);
+    auto *spin = new SpinInput(parent, text_value, "", wxDefaultPosition, wxSize(GetScaledInputWidth(), -1), 0, 1,
+                               int(MAX_EXTRUDERS), extruder_count);
     spin->SetToolTip(_L("Number of extruders of the printer."));
 
     // Store UI elements for undo tracking (use nozzle_diameter as the key)
     SettingUIElements ui_elem;
     ui_elem.control = spin;
-    ui_elem.lock_icon = lock_icon;
-    ui_elem.undo_icon = undo_icon;
+    ui_elem.lock_icon = icons;
+    ui_elem.undo_icon = icons;
     ui_elem.original_value = original_value;
     ui_elem.row_sizer = row_sizer;
     ui_elem.parent_sizer = group;
@@ -3032,140 +3106,146 @@ void PrinterSettingsPanel::AddExtruderCountRow(wxWindow *parent, wxSizer *group)
     // Update undo UI to reflect current state
     UpdateUndoUI("nozzle_diameter");
 
-    // Wire up undo icon click to revert
-    undo_icon->Bind(wxEVT_LEFT_DOWN,
-                    [this, spin](wxMouseEvent &)
-                    {
-                        auto it = m_setting_controls.find("nozzle_diameter");
-                        if (it == m_setting_controls.end())
-                            return;
+    // Undo mark click reverts
+    icons->SetOnClick(RowIcons::Undo,
+                      [this, spin]()
+                      {
+                          auto it = m_setting_controls.find("nozzle_diameter");
+                          if (it == m_setting_controls.end())
+                              return;
 
-                        // Revert to original value
-                        DynamicPrintConfig &config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
-                        config.set_deserialize_strict("nozzle_diameter", it->second.original_value);
+                          // Revert to original value
+                          DynamicPrintConfig &config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+                          config.set_deserialize_strict("nozzle_diameter", it->second.original_value);
 
-                        // Clear preserved original value since we're reverting
-                        m_preserved_original_values.erase("nozzle_diameter");
+                          // Clear preserved original value since we're reverting
+                          m_preserved_original_values.erase("nozzle_diameter");
 
-                        // Update spin to show original count
-                        if (auto *nozzle_opt = config.option<ConfigOptionFloats>("nozzle_diameter"))
-                        {
-                            int count = static_cast<int>(nozzle_opt->values.size());
-                            spin->SetValue(count);
-                            UpdateExtruderCount(static_cast<size_t>(count));
-                        }
+                          // Update spin to show original count
+                          if (auto *nozzle_opt = config.option<ConfigOptionFloats>("nozzle_diameter"))
+                          {
+                              int count = static_cast<int>(nozzle_opt->values.size());
+                              spin->SetValue(count);
+                              UpdateExtruderCount(static_cast<size_t>(count));
+                          }
 
-                        // Update undo UI
-                        UpdateUndoUI("nozzle_diameter");
+                          // Update undo UI
+                          UpdateUndoUI("nozzle_diameter");
 
-                        // Sync with tab - must call extruders_count_changed to properly rebuild
-                        if (auto *nozzle_opt2 = config.option<ConfigOptionFloats>("nozzle_diameter"))
-                        {
-                            size_t count = nozzle_opt2->values.size();
-                            if (auto *tab = dynamic_cast<TabPrinter *>(wxGetApp().get_tab(Preset::TYPE_PRINTER)))
-                            {
-                                tab->extruders_count_changed(count);
-                                tab->update_dirty();
-                            }
-                        }
-                    });
+                          // Sync with tab - must call extruders_count_changed to properly rebuild
+                          if (auto *nozzle_opt2 = config.option<ConfigOptionFloats>("nozzle_diameter"))
+                          {
+                              size_t count = nozzle_opt2->values.size();
+                              if (auto *tab = dynamic_cast<TabPrinter *>(wxGetApp().get_tab(Preset::TYPE_PRINTER)))
+                              {
+                                  tab->extruders_count_changed(count);
+                                  tab->update_dirty();
+                              }
+                          }
+                      });
 
+    m_extruder_count_spin = spin;
     spin->Bind(wxEVT_SPINCTRL,
                [this, spin](wxCommandEvent &)
                {
                    // Guard against events during rebuild
-                   if (m_disable_update)
-                       return;
-
-                   int new_count = spin->GetValue();
-                   if (new_count < 1)
-                       new_count = 1;
-
-                   DynamicPrintConfig &config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
-
-                   // Resize nozzle_diameter array
-                   auto *nozzle_opt = config.option<ConfigOptionFloats>("nozzle_diameter", true);
-                   if (nozzle_opt)
-                   {
-                       std::vector<double> diameters = nozzle_opt->values;
-                       double default_diameter = diameters.empty() ? 0.4 : diameters[0];
-                       diameters.resize(static_cast<size_t>(new_count), default_diameter);
-                       nozzle_opt->values = diameters;
-                   }
-
-                   // Resize other per-extruder options to match
-                   static const std::vector<std::string> extruder_options = {"extruder_colour",
-                                                                             "extruder_offset",
-                                                                             "retract_length",
-                                                                             "retract_lift",
-                                                                             "retract_lift_above",
-                                                                             "retract_lift_below",
-                                                                             "retract_speed",
-                                                                             "deretract_speed",
-                                                                             "retract_restart_extra",
-                                                                             "retract_before_travel",
-                                                                             "retract_layer_change",
-                                                                             "retract_before_wipe",
-                                                                             "wipe",
-                                                                             "wipe_extend",
-                                                                             "wipe_length",
-                                                                             "retract_length_toolchange",
-                                                                             "retract_restart_extra_toolchange",
-                                                                             "min_layer_height",
-                                                                             "max_layer_height",
-                                                                             "fan_spinup_time",
-                                                                             "fan_spinup_response_type",
-                                                                             "travel_ramping_lift",
-                                                                             "travel_max_lift",
-                                                                             "travel_slope",
-                                                                             "travel_lift_before_obstacle"};
-
-                   for (const std::string &opt_key : extruder_options)
-                   {
-                       ConfigOption *opt = config.option(opt_key, true);
-                       if (opt)
-                       {
-                           auto *vec_opt = dynamic_cast<ConfigOptionVectorBase *>(opt);
-                           if (vec_opt)
-                               vec_opt->resize(static_cast<size_t>(new_count));
-                       }
-                   }
-
-                   // Mark preset as dirty
-                   wxGetApp().preset_bundle->printers.get_edited_preset().set_dirty(true);
-
-                   // Update undo UI for nozzle_diameter
-                   UpdateUndoUI("nozzle_diameter");
-
-                   // Update filament presets for the new extruder count (expands extruders_filaments vector)
-                   wxGetApp().preset_bundle->update_multi_material_filament_presets();
-
-                   // Sync with Printer Settings tab - must call extruders_count_changed
-                   // to properly rebuild extruder pages
-                   if (auto *tab = dynamic_cast<TabPrinter *>(wxGetApp().get_tab(Preset::TYPE_PRINTER)))
-                   {
-                       tab->extruders_count_changed(static_cast<size_t>(new_count));
-                       tab->update_dirty();
-                   }
-
-                   // Preserve original value before rebuild (so undo button persists)
-                   auto it = m_setting_controls.find("nozzle_diameter");
-                   if (it != m_setting_controls.end() &&
-                       m_preserved_original_values.find("nozzle_diameter") == m_preserved_original_values.end())
-                   {
-                       m_preserved_original_values["nozzle_diameter"] = it->second.original_value;
-                   }
-
-                   // Rebuild extruder tabs
-                   UpdateExtruderCount(static_cast<size_t>(new_count));
-
-                   // Trigger plater update - this will also trigger sidebar preset updates
-                   if (GetPlater())
-                       GetPlater()->on_config_change(config);
+                   if (!m_disable_update)
+                       SetExtruderCount(spin->GetValue());
                });
     value_sizer->Add(spin, 0, wxALIGN_CENTER_VERTICAL);
     row_sizer->Add(value_sizer, 1, wxEXPAND);
     group->Add(row_sizer, 0, wxEXPAND | wxTOP | wxBOTTOM, em / 4);
+}
+
+void PrinterSettingsPanel::SetExtruderCount(int new_count)
+{
+    if (new_count < 1)
+        new_count = 1;
+    // A caller other than the spinner (a test hook) shows the count on it
+    if (m_extruder_count_spin != nullptr && m_extruder_count_spin->GetValue() != new_count)
+        m_extruder_count_spin->SetValue(new_count);
+
+    DynamicPrintConfig &config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+
+    // Resize nozzle_diameter array
+    auto *nozzle_opt = config.option<ConfigOptionFloats>("nozzle_diameter", true);
+    if (nozzle_opt)
+    {
+        std::vector<double> diameters = nozzle_opt->values;
+        double default_diameter = diameters.empty() ? 0.4 : diameters[0];
+        diameters.resize(static_cast<size_t>(new_count), default_diameter);
+        nozzle_opt->values = diameters;
+    }
+
+    // Resize other per-extruder options to match
+    static const std::vector<std::string> extruder_options = {"extruder_colour",
+                                                              "extruder_offset",
+                                                              "retract_length",
+                                                              "retract_lift",
+                                                              "retract_lift_above",
+                                                              "retract_lift_below",
+                                                              "retract_speed",
+                                                              "deretract_speed",
+                                                              "retract_restart_extra",
+                                                              "retract_before_travel",
+                                                              "retract_layer_change",
+                                                              "retract_before_wipe",
+                                                              "wipe",
+                                                              "wipe_extend",
+                                                              "wipe_length",
+                                                              "retract_length_toolchange",
+                                                              "retract_restart_extra_toolchange",
+                                                              "min_layer_height",
+                                                              "max_layer_height",
+                                                              "fan_spinup_time",
+                                                              "fan_spinup_response_type",
+                                                              "travel_ramping_lift",
+                                                              "travel_max_lift",
+                                                              "travel_slope",
+                                                              "travel_lift_before_obstacle"};
+
+    for (const std::string &opt_key : extruder_options)
+    {
+        ConfigOption *opt = config.option(opt_key, true);
+        if (opt)
+        {
+            auto *vec_opt = dynamic_cast<ConfigOptionVectorBase *>(opt);
+            if (vec_opt)
+                vec_opt->resize(static_cast<size_t>(new_count));
+        }
+    }
+
+    // Mark preset as dirty
+    wxGetApp().preset_bundle->printers.get_edited_preset().set_dirty(true);
+
+    // Update undo UI for nozzle_diameter
+    UpdateUndoUI("nozzle_diameter");
+
+    // Update filament presets for the new extruder count (expands extruders_filaments vector)
+    wxGetApp().preset_bundle->update_multi_material_filament_presets();
+
+    // Sync with Printer Settings tab - must call extruders_count_changed
+    // to properly rebuild extruder pages
+    if (auto *tab = dynamic_cast<TabPrinter *>(wxGetApp().get_tab(Preset::TYPE_PRINTER)))
+    {
+        tab->extruders_count_changed(static_cast<size_t>(new_count));
+        tab->update_dirty();
+    }
+
+    // Preserve original value before rebuild (so undo button persists)
+    auto it = m_setting_controls.find("nozzle_diameter");
+    if (it != m_setting_controls.end() &&
+        m_preserved_original_values.find("nozzle_diameter") == m_preserved_original_values.end())
+    {
+        m_preserved_original_values["nozzle_diameter"] = it->second.original_value;
+    }
+
+    // Rebuild extruder tabs
+    UpdateExtruderCount(static_cast<size_t>(new_count));
+
+    // Trigger plater update - this will also trigger sidebar preset updates
+    if (GetPlater())
+        GetPlater()->on_config_change(config);
 }
 
 bool PrinterSettingsPanel::ShouldShowSingleExtruderMM() const
@@ -3317,14 +3397,19 @@ void PrinterSettingsPanel::CreateSettingRow(wxWindow *parent, wxSizer *sizer, co
 {
     int em = wxGetApp().em_unit();
 
+    // The Extruders page stores its rows under bare keys: a key of that page on another page
+    // would share its row (check_settings_spec keeps the spec's rows apart)
+    if (IsExtruderRowKey(opt_key))
+        note_extruder_key_collision(opt_key, "a row of another page");
+
     // Create the common row header (icons, label, sizers)
     RowUIContext ctx = CreateRowUIBase(parent, opt_key, label);
     if (!ctx.row_sizer)
         return; // Option not found
 
     const ConfigOptionDef *opt_def = ctx.opt_def;
-    wxStaticBitmap *lock_icon = ctx.lock_icon;
-    wxStaticBitmap *undo_icon = ctx.undo_icon;
+    RowIcons *lock_icon = ctx.lock_icon;
+    RowIcons *undo_icon = ctx.undo_icon;
     wxBoxSizer *row_sizer = ctx.row_sizer;
     wxString tooltip = ctx.tooltip;
 
@@ -3397,33 +3482,31 @@ void PrinterSettingsPanel::CreateSettingRow(wxWindow *parent, wxSizer *sizer, co
         UpdateUndoUI("thumbnails");
 
         // Undo icon reverts to the saved value (the button holds no value of its own).
-        undo_icon->Bind(wxEVT_LEFT_DOWN,
-                        [this](wxMouseEvent &)
-                        {
-                            auto it = m_setting_controls.find("thumbnails");
-                            if (it == m_setting_controls.end())
-                                return;
-                            DisableUpdateGuard guard(m_disable_update);
-                            // Revert to the live SAVED preset value (the snapshot can go stale across rebuilds).
-                            const DynamicPrintConfig &saved_config =
-                                wxGetApp().preset_bundle->printers.get_selected_preset().config;
-                            const std::string saved_raw = saved_config.has("thumbnails")
-                                                              ? saved_config.opt_string("thumbnails")
-                                                              : std::string();
-                            DynamicPrintConfig &cfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
-                            cfg.set_key_value("thumbnails", new ConfigOptionString(saved_raw));
-                            it->second.original_value = saved_config.has("thumbnails")
-                                                            ? saved_config.opt_serialize("thumbnails")
-                                                            : std::string();
-                            UpdateUndoUI("thumbnails");
-                            wxGetApp().preset_bundle->printers.get_edited_preset().set_dirty(true);
-                            if (auto *tab = wxGetApp().get_tab(Preset::TYPE_PRINTER))
-                            {
-                                tab->reload_config();
-                                tab->update_dirty();
-                                tab->update_changed_ui();
-                            }
-                        });
+        undo_icon->SetOnClick(
+            RowIcons::Undo,
+            [this]()
+            {
+                auto it = m_setting_controls.find("thumbnails");
+                if (it == m_setting_controls.end())
+                    return;
+                DisableUpdateGuard guard(m_disable_update);
+                // Revert to the live SAVED preset value (the snapshot can go stale across rebuilds).
+                const DynamicPrintConfig &saved_config = wxGetApp().preset_bundle->printers.get_selected_preset().config;
+                const std::string saved_raw = saved_config.has("thumbnails") ? saved_config.opt_string("thumbnails")
+                                                                             : std::string();
+                DynamicPrintConfig &cfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+                cfg.set_key_value("thumbnails", new ConfigOptionString(saved_raw));
+                it->second.original_value = saved_config.has("thumbnails") ? saved_config.opt_serialize("thumbnails")
+                                                                           : std::string();
+                UpdateUndoUI("thumbnails");
+                wxGetApp().preset_bundle->printers.get_edited_preset().set_dirty(true);
+                if (auto *tab = wxGetApp().get_tab(Preset::TYPE_PRINTER))
+                {
+                    tab->reload_config();
+                    tab->update_dirty();
+                    tab->update_changed_ui();
+                }
+            });
 
         sizer->Add(row_sizer, 0, wxEXPAND | wxTOP | wxBOTTOM, em / 4);
         return;
@@ -3497,7 +3580,9 @@ void PrinterSettingsPanel::CreateSettingRow(wxWindow *parent, wxSizer *sizer, co
     {
         auto *value_sizer = new wxBoxSizer(wxHORIZONTAL);
         int min_val = opt_def->min > INT_MIN ? static_cast<int>(opt_def->min) : 0;
-        int max_val = opt_def->max < INT_MAX ? static_cast<int>(opt_def->max) : 10000;
+        // An option naming an extruder stops at the printer's extruder count
+        int max_val = wxGetApp().extruder_role_max(opt_key,
+                                                   opt_def->max < INT_MAX ? static_cast<int>(opt_def->max) : 10000);
         int value = 0;
         if (config.has(opt_key))
         {
@@ -3671,65 +3756,65 @@ void PrinterSettingsPanel::CreateSettingRow(wxWindow *parent, wxSizer *sizer, co
         // Set initial icon state
         UpdateUndoUI(opt_key);
 
-        // Bind undo icon click to revert value
-        undo_icon->Bind(wxEVT_LEFT_DOWN,
-                        [this, opt_key](wxMouseEvent &)
-                        {
-                            auto it = m_setting_controls.find(opt_key);
-                            if (it == m_setting_controls.end())
-                                return;
+        // Undo mark click reverts the value
+        undo_icon->SetOnClick(RowIcons::Undo,
+                              [this, opt_key]()
+                              {
+                                  auto it = m_setting_controls.find(opt_key);
+                                  if (it == m_setting_controls.end())
+                                      return;
 
-                            const ConfigOptionDef *def = print_config_def.get(opt_key);
-                            if (!def)
-                                return;
+                                  const ConfigOptionDef *def = print_config_def.get(opt_key);
+                                  if (!def)
+                                      return;
 
-                            // Revert to original value
-                            switch (def->type)
-                            {
-                            case coBool:
-                                if (auto *cb = dynamic_cast<::CheckBox *>(it->second.control))
-                                {
-                                    cb->SetValue(it->second.original_value == "1");
-                                }
-                                break;
-                            case coInt:
-                                if (auto *spin = dynamic_cast<SpinInput *>(it->second.control))
-                                {
-                                    spin->SetValue(std::stoi(it->second.original_value));
-                                }
-                                break;
-                            case coEnum:
-                                if (auto *combo = dynamic_cast<::ComboBox *>(it->second.control))
-                                {
-                                    if (def->enum_def && def->enum_def->has_values())
-                                    {
-                                        const auto &values = def->enum_def->values();
-                                        for (size_t idx = 0; idx < values.size(); ++idx)
-                                        {
-                                            if (values[idx] == it->second.original_value)
-                                            {
-                                                combo->SetSelection(static_cast<int>(idx));
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                                break;
-                            default:
-                                if (auto *text_input = dynamic_cast<::TextInput *>(it->second.control))
-                                {
-                                    text_input->SetValue(from_u8(it->second.original_value));
-                                }
-                                else if (auto *text = dynamic_cast<wxTextCtrl *>(it->second.control))
-                                {
-                                    text->SetValue(from_u8(it->second.original_value));
-                                }
-                                break;
-                            }
+                                  // Revert to original value
+                                  switch (def->type)
+                                  {
+                                  case coBool:
+                                      if (auto *cb = dynamic_cast<::CheckBox *>(it->second.control))
+                                      {
+                                          cb->SetValue(it->second.original_value == "1");
+                                      }
+                                      break;
+                                  case coInt:
+                                      if (auto *spin = dynamic_cast<SpinInput *>(it->second.control))
+                                      {
+                                          spin->SetValue(std::stoi(it->second.original_value));
+                                      }
+                                      break;
+                                  case coEnum:
+                                      if (auto *combo = dynamic_cast<::ComboBox *>(it->second.control))
+                                      {
+                                          if (def->enum_def && def->enum_def->has_values())
+                                          {
+                                              const auto &values = def->enum_def->values();
+                                              for (size_t idx = 0; idx < values.size(); ++idx)
+                                              {
+                                                  if (values[idx] == it->second.original_value)
+                                                  {
+                                                      combo->SetSelection(static_cast<int>(idx));
+                                                      break;
+                                                  }
+                                              }
+                                          }
+                                      }
+                                      break;
+                                  default:
+                                      if (auto *text_input = dynamic_cast<::TextInput *>(it->second.control))
+                                      {
+                                          text_input->SetValue(from_u8(it->second.original_value));
+                                      }
+                                      else if (auto *text = dynamic_cast<wxTextCtrl *>(it->second.control))
+                                      {
+                                          text->SetValue(from_u8(it->second.original_value));
+                                      }
+                                      break;
+                                  }
 
-                            OnSettingChanged(opt_key);
-                            UpdateUndoUI(opt_key);
-                        });
+                                  OnSettingChanged(opt_key);
+                                  UpdateUndoUI(opt_key);
+                              });
     }
 
     sizer->Add(row_sizer, 0, wxEXPAND | wxTOP | wxBOTTOM, em / 4);
@@ -3755,16 +3840,8 @@ void PrinterSettingsPanel::CreateMultilineSettingRow(wxWindow *parent, wxSizer *
     // Set background color using unified accessor
     wxColour bg_color = SidebarColors::Background();
 
-    auto *lock_icon = new wxStaticBitmap(parent, wxID_ANY, *get_bmp_bundle("lock_closed"));
-    lock_icon->SetMinSize(GetScaledIconSizeWx());
-    lock_icon->SetBackgroundColour(bg_color);
-    lock_icon->SetToolTip(_L("Value is same as in the system preset"));
-    header_sizer->Add(lock_icon, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, GetIconMargin());
-
-    auto *undo_icon = new wxStaticBitmap(parent, wxID_ANY, *get_bmp_bundle("dot"));
-    undo_icon->SetMinSize(GetScaledIconSizeWx());
-    undo_icon->SetBackgroundColour(bg_color);
-    header_sizer->Add(undo_icon, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, GetIconMargin());
+    // The lock and undo marks, in one window
+    RowIcons *icons = AddRowIcons(parent, header_sizer, std::string());
 
     wxString label_with_colon = label + ":";
     auto *label_text = new wxStaticText(parent, wxID_ANY, label_with_colon);
@@ -3804,8 +3881,8 @@ void PrinterSettingsPanel::CreateMultilineSettingRow(wxWindow *parent, wxSizer *
     // Store UI elements
     SettingUIElements ui_elem;
     ui_elem.control = text;
-    ui_elem.lock_icon = lock_icon;
-    ui_elem.undo_icon = undo_icon;
+    ui_elem.lock_icon = icons;
+    ui_elem.undo_icon = icons;
     ui_elem.label_text = label_text;
     ui_elem.original_value = original_value;
     ui_elem.row_sizer = container_sizer;
@@ -3815,22 +3892,22 @@ void PrinterSettingsPanel::CreateMultilineSettingRow(wxWindow *parent, wxSizer *
 
     UpdateUndoUI(opt_key);
 
-    // Bind undo icon click
-    undo_icon->Bind(wxEVT_LEFT_DOWN,
-                    [this, opt_key](wxMouseEvent &)
-                    {
-                        auto it = m_setting_controls.find(opt_key);
-                        if (it == m_setting_controls.end())
-                            return;
+    // Undo mark click
+    icons->SetOnClick(RowIcons::Undo,
+                      [this, opt_key]()
+                      {
+                          auto it = m_setting_controls.find(opt_key);
+                          if (it == m_setting_controls.end())
+                              return;
 
-                        if (auto *txt = dynamic_cast<wxTextCtrl *>(it->second.control))
-                        {
-                            txt->SetValue(from_u8(it->second.original_value));
-                        }
+                          if (auto *txt = dynamic_cast<wxTextCtrl *>(it->second.control))
+                          {
+                              txt->SetValue(from_u8(it->second.original_value));
+                          }
 
-                        OnSettingChanged(opt_key);
-                        UpdateUndoUI(opt_key);
-                    });
+                          OnSettingChanged(opt_key);
+                          UpdateUndoUI(opt_key);
+                      });
 
     sizer->Add(container_sizer, 0, wxEXPAND | wxTOP | wxBOTTOM, em / 4);
 }
@@ -3854,22 +3931,17 @@ void PrinterSettingsPanel::CreateExtruderSettingRow(wxWindow *parent, wxSizer *s
     // Set background color using unified accessor
     wxColour bg_color = SidebarColors::Background();
 
-    // Create composite key for tracking this specific extruder's setting
-    std::string composite_key = opt_key + "#" + std::to_string(extruder_idx);
+    // The row is stored under its bare key and stands for the selected extruder: its handlers read
+    // m_selected_extruder when they run, and ExtruderKey() gives "key#<selected>" where an index is
+    // needed. A bare key of this page must be on no other page of the panel.
+    if (m_setting_controls.count(opt_key) != 0)
+        note_extruder_key_collision(opt_key, "an Extruders page row");
+    m_extruder_row_keys.insert(opt_key);
 
-    // Pin checkbox leads the row, pinned per-extruder under the same composite key the row hides on
-    AddPinCheckbox(parent, left_sizer, composite_key);
-
-    auto *lock_icon = new wxStaticBitmap(parent, wxID_ANY, *get_bmp_bundle("lock_closed"));
-    lock_icon->SetMinSize(GetScaledIconSizeWx());
-    lock_icon->SetBackgroundColour(bg_color);
-    lock_icon->SetToolTip(_L("Value is same as in the system preset"));
-    left_sizer->Add(lock_icon, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, GetIconMargin());
-
-    auto *undo_icon = new wxStaticBitmap(parent, wxID_ANY, *get_bmp_bundle("dot"));
-    undo_icon->SetMinSize(GetScaledIconSizeWx());
-    undo_icon->SetBackgroundColour(bg_color);
-    left_sizer->Add(undo_icon, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, GetIconMargin());
+    // The pin leads the row (it reads the selected extruder's pin and writes every extruder's), then
+    // the lock and undo marks, in one window
+    RowIcons *lock_icon = AddRowIcons(parent, left_sizer, opt_key);
+    RowIcons *undo_icon = lock_icon;
 
     wxString label_with_colon = label + ":";
     auto *label_text = new wxStaticText(parent, wxID_ANY, label_with_colon, wxDefaultPosition, wxDefaultSize,
@@ -3883,6 +3955,7 @@ void PrinterSettingsPanel::CreateExtruderSettingRow(wxWindow *parent, wxSizer *s
     row_sizer->Add(left_sizer, 1, wxEXPAND);
 
     wxWindow *value_ctrl = nullptr;
+    wxWindow *value_ctrl_y = nullptr; // the Y field of a point row
     const DynamicPrintConfig &config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
     // Get SAVED preset config for original_value (not the edited/in-memory version)
     const Preset &saved_preset = wxGetApp().preset_bundle->printers.get_selected_preset();
@@ -3914,8 +3987,8 @@ void PrinterSettingsPanel::CreateExtruderSettingRow(wxWindow *parent, wxSizer *s
         if (!tooltip.empty())
             checkbox->SetToolTip(tooltip);
 
-        checkbox->Bind(wxEVT_CHECKBOX, [this, opt_key, extruder_idx](wxCommandEvent &)
-                       { OnExtruderSettingChanged(opt_key, extruder_idx); });
+        checkbox->Bind(wxEVT_CHECKBOX,
+                       [this, opt_key](wxCommandEvent &) { OnExtruderSettingChanged(opt_key, m_selected_extruder); });
 
         value_sizer->Add(checkbox, 0, wxALIGN_CENTER_VERTICAL);
         value_sizer->AddStretchSpacer(1);
@@ -3934,7 +4007,7 @@ void PrinterSettingsPanel::CreateExtruderSettingRow(wxWindow *parent, wxSizer *s
 
         if (config.has(opt_key))
         {
-            auto *opt = config.option<ConfigOptionFloats>(opt_key);
+            auto *opt = float_values(config, opt_key);
             if (opt && extruder_idx < opt->values.size())
             {
                 text->SetValue(wxString::Format("%g", opt->values[extruder_idx]));
@@ -3943,7 +4016,7 @@ void PrinterSettingsPanel::CreateExtruderSettingRow(wxWindow *parent, wxSizer *s
         // Get original value from SAVED preset (for undo comparison)
         if (saved_config.has(opt_key))
         {
-            auto *saved_opt = saved_config.option<ConfigOptionFloats>(opt_key);
+            auto *saved_opt = float_values(saved_config, opt_key);
             if (saved_opt && extruder_idx < saved_opt->values.size())
                 original_value = into_u8(wxString::Format("%g", saved_opt->values[extruder_idx]));
         }
@@ -3951,9 +4024,9 @@ void PrinterSettingsPanel::CreateExtruderSettingRow(wxWindow *parent, wxSizer *s
             text->SetToolTip(tooltip);
 
         text->Bind(wxEVT_KILL_FOCUS,
-                   [this, opt_key, extruder_idx](wxFocusEvent &evt)
+                   [this, opt_key](wxFocusEvent &evt)
                    {
-                       OnExtruderSettingChanged(opt_key, extruder_idx);
+                       OnExtruderSettingChanged(opt_key, m_selected_extruder);
                        evt.Skip();
                    });
 
@@ -4012,8 +4085,8 @@ void PrinterSettingsPanel::CreateExtruderSettingRow(wxWindow *parent, wxSizer *s
         if (!tooltip.empty())
             spin->SetToolTip(tooltip);
 
-        spin->Bind(wxEVT_SPINCTRL, [this, opt_key, extruder_idx](wxCommandEvent &)
-                   { OnExtruderSettingChanged(opt_key, extruder_idx); });
+        spin->Bind(wxEVT_SPINCTRL,
+                   [this, opt_key](wxCommandEvent &) { OnExtruderSettingChanged(opt_key, m_selected_extruder); });
 
         value_sizer->Add(spin, 0, wxALIGN_CENTER_VERTICAL);
         row_sizer->Add(value_sizer, 1, wxEXPAND);
@@ -4051,7 +4124,7 @@ void PrinterSettingsPanel::CreateExtruderSettingRow(wxWindow *parent, wxSizer *s
             color_btn->SetMinSize(wxSize(1, -1));
 
             color_btn->Bind(wxEVT_BUTTON,
-                            [this, color_btn, opt_key, extruder_idx](wxCommandEvent &)
+                            [this, color_btn, opt_key](wxCommandEvent &)
                             {
                                 wxColourData data;
                                 data.SetColour(color_btn->GetBackgroundColour());
@@ -4061,7 +4134,7 @@ void PrinterSettingsPanel::CreateExtruderSettingRow(wxWindow *parent, wxSizer *s
                                     wxColour new_color = dlg.GetColourData().GetColour();
                                     color_btn->SetBackgroundColour(new_color);
                                     color_btn->Refresh();
-                                    OnExtruderSettingChanged(opt_key, extruder_idx);
+                                    OnExtruderSettingChanged(opt_key, m_selected_extruder);
                                 }
                             });
 
@@ -4072,8 +4145,9 @@ void PrinterSettingsPanel::CreateExtruderSettingRow(wxWindow *parent, wxSizer *s
                                                  wxDefaultPosition, wxBU_LEFT | wxBU_EXACTFIT);
             reset_btn->SetToolTip(_L("Reset to Filament Color"));
             reset_btn->Bind(wxEVT_BUTTON,
-                            [this, color_btn, opt_key, extruder_idx](wxCommandEvent &)
+                            [this, color_btn, opt_key](wxCommandEvent &)
                             {
+                                const size_t extruder_idx = m_selected_extruder;
                                 DynamicPrintConfig &cfg = wxGetApp().preset_bundle->printers.get_edited_preset().config;
                                 auto *opt = cfg.option<ConfigOptionStrings>(opt_key, true);
                                 if (opt && extruder_idx < opt->values.size())
@@ -4091,6 +4165,10 @@ void PrinterSettingsPanel::CreateExtruderSettingRow(wxWindow *parent, wxSizer *s
                                     }
                                     if (GetPlater())
                                         GetPlater()->on_config_change(cfg);
+                                    // The cell's colour and mark follow the reset colour
+                                    UpdateUndoUI(opt_key);
+                                    UpdateExtruderSelector();
+                                    UpdateExtruderMarks();
                                 }
                             });
             value_sizer->Add(reset_btn, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, em / 4);
@@ -4124,9 +4202,9 @@ void PrinterSettingsPanel::CreateExtruderSettingRow(wxWindow *parent, wxSizer *s
                 text->SetToolTip(tooltip);
 
             text->Bind(wxEVT_KILL_FOCUS,
-                       [this, opt_key, extruder_idx](wxFocusEvent &evt)
+                       [this, opt_key](wxFocusEvent &evt)
                        {
-                           OnExtruderSettingChanged(opt_key, extruder_idx);
+                           OnExtruderSettingChanged(opt_key, m_selected_extruder);
                            evt.Skip();
                        });
 
@@ -4188,8 +4266,11 @@ void PrinterSettingsPanel::CreateExtruderSettingRow(wxWindow *parent, wxSizer *s
 #endif
         }
 
-        auto update_point = [this, opt_key, extruder_idx, x_text, y_text]()
+        auto update_point = [this, opt_key, x_text, y_text]()
         {
+            if (m_disable_update)
+                return; // a re-bind writing the selected extruder's values into the fields
+            const size_t extruder_idx = m_selected_extruder;
             double x = 0, y = 0;
             x_text->GetValue().ToDouble(&x);
             y_text->GetValue().ToDouble(&y);
@@ -4211,6 +4292,8 @@ void PrinterSettingsPanel::CreateExtruderSettingRow(wxWindow *parent, wxSizer *s
                 }
                 if (GetPlater())
                     GetPlater()->on_config_change(cfg);
+                UpdateUndoUI(opt_key);
+                UpdateExtruderMarks();
             }
         };
 
@@ -4234,6 +4317,7 @@ void PrinterSettingsPanel::CreateExtruderSettingRow(wxWindow *parent, wxSizer *s
 
         row_sizer->Add(value_sizer, 1, wxEXPAND);
         value_ctrl = x_text; // Store first control for tracking
+        value_ctrl_y = y_text;
         break;
     }
 
@@ -4298,8 +4382,8 @@ void PrinterSettingsPanel::CreateExtruderSettingRow(wxWindow *parent, wxSizer *s
         if (!tooltip.empty())
             combo->SetToolTip(tooltip);
 
-        combo->Bind(wxEVT_COMBOBOX, [this, opt_key, extruder_idx](wxCommandEvent &)
-                    { OnExtruderSettingChanged(opt_key, extruder_idx); });
+        combo->Bind(wxEVT_COMBOBOX,
+                    [this, opt_key](wxCommandEvent &) { OnExtruderSettingChanged(opt_key, m_selected_extruder); });
 
         value_sizer->Add(combo, 0, wxALIGN_CENTER_VERTICAL); // Fixed 16em width (matches main tabs)
         row_sizer->Add(value_sizer, 1, wxEXPAND);
@@ -4315,101 +4399,117 @@ void PrinterSettingsPanel::CreateExtruderSettingRow(wxWindow *parent, wxSizer *s
     {
         SettingUIElements ui_elem;
         ui_elem.control = value_ctrl;
+        ui_elem.control_y = value_ctrl_y;
         ui_elem.lock_icon = lock_icon;
         ui_elem.undo_icon = undo_icon;
         ui_elem.label_text = label_text;
         ui_elem.original_value = original_value;
         ui_elem.row_sizer = row_sizer;
         ui_elem.parent_sizer = sizer;
-        m_setting_controls[composite_key] = ui_elem;
-        NoteRowPlacement(composite_key);
+        m_setting_controls[opt_key] = ui_elem;
+        NoteRowPlacement(opt_key);
 
-        // Initial icon state - show dot for now
-        undo_icon->SetBitmap(*get_bmp_bundle("dot"));
+        // Undo mark click reverts the extruder setting (the mark starts as the dot)
+        undo_icon->SetOnClick(
+            RowIcons::Undo,
+            [this, opt_key]()
+            {
+                auto it = m_setting_controls.find(opt_key);
+                if (it == m_setting_controls.end())
+                    return;
 
-        // Bind undo icon click to revert extruder setting
-        undo_icon->Bind(wxEVT_LEFT_DOWN,
-                        [this, opt_key, extruder_idx, composite_key](wxMouseEvent &)
+                const ConfigOptionDef *def = print_config_def.get(opt_key);
+                if (!def)
+                    return;
+
+                const std::string &original = it->second.original_value;
+
+                // Restore control value based on type
+                switch (def->type)
+                {
+                case coBools:
+                    if (auto *cb = dynamic_cast<::CheckBox *>(it->second.control))
+                    {
+                        cb->SetValue(original == "1");
+                    }
+                    break;
+                case coFloats:
+                case coPercents:
+                    if (auto *text_input = dynamic_cast<::TextInput *>(it->second.control))
+                    {
+                        text_input->SetValue(from_u8(original));
+                    }
+                    break;
+                case coInts:
+                    if (auto *spin = dynamic_cast<SpinInput *>(it->second.control))
+                    {
+                        try
                         {
-                            auto it = m_setting_controls.find(composite_key);
-                            if (it == m_setting_controls.end())
-                                return;
-
-                            const ConfigOptionDef *def = print_config_def.get(opt_key);
-                            if (!def)
-                                return;
-
-                            const std::string &original = it->second.original_value;
-
-                            // Restore control value based on type
-                            switch (def->type)
+                            spin->SetValue(std::stoi(original));
+                        }
+                        catch (...)
+                        {
+                        }
+                    }
+                    break;
+                case coEnums:
+                    if (auto *combo = dynamic_cast<::ComboBox *>(it->second.control))
+                    {
+                        if (def->enum_def && def->enum_def->has_values())
+                        {
+                            const auto &values = def->enum_def->values();
+                            for (size_t idx = 0; idx < values.size(); ++idx)
                             {
-                            case coBools:
-                                if (auto *cb = dynamic_cast<::CheckBox *>(it->second.control))
+                                if (values[idx] == original)
                                 {
-                                    cb->SetValue(original == "1");
+                                    combo->SetSelection(static_cast<int>(idx));
+                                    break;
                                 }
-                                break;
-                            case coFloats:
-                            case coPercents:
-                                if (auto *text_input = dynamic_cast<::TextInput *>(it->second.control))
-                                {
-                                    text_input->SetValue(from_u8(original));
-                                }
-                                break;
-                            case coInts:
-                                if (auto *spin = dynamic_cast<SpinInput *>(it->second.control))
-                                {
-                                    try
-                                    {
-                                        spin->SetValue(std::stoi(original));
-                                    }
-                                    catch (...)
-                                    {
-                                    }
-                                }
-                                break;
-                            case coEnums:
-                                if (auto *combo = dynamic_cast<::ComboBox *>(it->second.control))
-                                {
-                                    if (def->enum_def && def->enum_def->has_values())
-                                    {
-                                        const auto &values = def->enum_def->values();
-                                        for (size_t idx = 0; idx < values.size(); ++idx)
-                                        {
-                                            if (values[idx] == original)
-                                            {
-                                                combo->SetSelection(static_cast<int>(idx));
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                                break;
-                            case coStrings:
-                                if (auto *text_input = dynamic_cast<::TextInput *>(it->second.control))
-                                {
-                                    text_input->SetValue(from_u8(original));
-                                }
-                                else if (auto *btn = dynamic_cast<wxButton *>(it->second.control))
-                                {
-                                    // Color button - restore color
-                                    if (!original.empty())
-                                        btn->SetBackgroundColour(wxColour(from_u8(original)));
-                                    else
-                                        btn->SetBackgroundColour(*wxWHITE);
-                                    btn->Refresh();
-                                }
-                                break;
-                            default:
-                                break;
                             }
+                        }
+                    }
+                    break;
+                case coStrings:
+                    if (auto *text_input = dynamic_cast<::TextInput *>(it->second.control))
+                    {
+                        text_input->SetValue(from_u8(original));
+                    }
+                    else if (auto *btn = dynamic_cast<wxButton *>(it->second.control))
+                    {
+                        // Color button - restore color
+                        if (!original.empty())
+                            btn->SetBackgroundColour(wxColour(from_u8(original)));
+                        else
+                            btn->SetBackgroundColour(*wxWHITE);
+                        btn->Refresh();
+                    }
+                    break;
+                case coPoints:
+                    // The original is "<x>x<y>"
+                    if (auto *x_field = dynamic_cast<wxTextCtrl *>(it->second.control);
+                        x_field != nullptr && it->second.control_y != nullptr)
+                    {
+                        const size_t sep = original.find('x');
+                        const double x = sep == std::string::npos ? 0. : std::atof(original.substr(0, sep).c_str());
+                        const double y = sep == std::string::npos ? 0. : std::atof(original.substr(sep + 1).c_str());
+                        x_field->ChangeValue(wxString::Format("%g", x));
+                        static_cast<wxTextCtrl *>(it->second.control_y)->ChangeValue(wxString::Format("%g", y));
+                    }
+                    break;
+                default:
+                    break;
+                }
 
-                            OnExtruderSettingChanged(opt_key, extruder_idx);
-                        });
+                OnExtruderSettingChanged(opt_key, m_selected_extruder);
+            });
     }
 
     sizer->Add(row_sizer, 0, wxEXPAND | wxTOP | wxBOTTOM, em / 4);
+}
+
+std::string PrinterSettingsPanel::ExtruderKey(const std::string &key) const
+{
+    return IsExtruderRowKey(key) ? key + "#" + std::to_string(m_selected_extruder) : key;
 }
 
 void PrinterSettingsPanel::OnExtruderSettingChanged(const std::string &opt_key, size_t extruder_idx)
@@ -4420,8 +4520,7 @@ void PrinterSettingsPanel::OnExtruderSettingChanged(const std::string &opt_key, 
     // RAII guard: sets m_disable_update=true now, restores on scope exit (even if exception thrown)
     DisableUpdateGuard guard(m_disable_update);
 
-    std::string composite_key = opt_key + "#" + std::to_string(extruder_idx);
-    auto it = m_setting_controls.find(composite_key);
+    auto it = m_setting_controls.find(opt_key);
     if (it == m_setting_controls.end())
         return;
 
@@ -4453,7 +4552,7 @@ void PrinterSettingsPanel::OnExtruderSettingChanged(const std::string &opt_key, 
             double new_value = 0;
             if (text_input->GetValue().ToDouble(&new_value))
             {
-                auto *opt = config.option<ConfigOptionFloats>(opt_key, true);
+                auto *opt = float_values(config, opt_key, true);
                 if (opt)
                 {
                     while (opt->values.size() <= extruder_idx)
@@ -4467,7 +4566,7 @@ void PrinterSettingsPanel::OnExtruderSettingChanged(const std::string &opt_key, 
             double new_value = 0;
             if (text->GetValue().ToDouble(&new_value))
             {
-                auto *opt = config.option<ConfigOptionFloats>(opt_key, true);
+                auto *opt = float_values(config, opt_key, true);
                 if (opt)
                 {
                     while (opt->values.size() <= extruder_idx)
@@ -4547,6 +4646,22 @@ void PrinterSettingsPanel::OnExtruderSettingChanged(const std::string &opt_key, 
         }
         break;
 
+    case coPoints:
+        if (auto *x_field = dynamic_cast<wxTextCtrl *>(it->second.control);
+            x_field != nullptr && it->second.control_y != nullptr)
+        {
+            double x = 0, y = 0;
+            x_field->GetValue().ToDouble(&x);
+            static_cast<wxTextCtrl *>(it->second.control_y)->GetValue().ToDouble(&y);
+            if (auto *opt = config.option<ConfigOptionPoints>(opt_key, true))
+            {
+                while (opt->values.size() <= extruder_idx)
+                    opt->values.push_back(Vec2d(0, 0));
+                opt->values[extruder_idx] = Vec2d(x, y);
+            }
+        }
+        break;
+
     default:
         break;
     }
@@ -4570,7 +4685,10 @@ void PrinterSettingsPanel::OnExtruderSettingChanged(const std::string &opt_key, 
     ApplyToggleRules();
 
     // Update undo UI for this setting
-    UpdateUndoUI(composite_key);
+    UpdateUndoUI(opt_key);
+    UpdateExtruderMarks();
+    if (opt_key == "extruder_colour")
+        UpdateExtruderSelector();
 
     // If nozzle_diameter changed, also update the top nozzle spinners
     if (opt_key == "nozzle_diameter")
@@ -4942,12 +5060,13 @@ void PrinterSettingsPanel::UpdateUndoUI(const std::string &opt_key)
     const std::string &original_value = it->second.original_value;
     std::string current_value;
 
-    // Check if this is an extruder-specific key (has # suffix)
-    size_t hash_pos = opt_key.find('#');
+    // A row of the Extruders page compares the selected extruder's entry
+    const std::string resolved = ExtruderKey(opt_key);
+    size_t hash_pos = resolved.find('#');
     if (hash_pos != std::string::npos)
     {
-        std::string base_key = opt_key.substr(0, hash_pos);
-        size_t extruder_idx = std::stoul(opt_key.substr(hash_pos + 1));
+        std::string base_key = resolved.substr(0, hash_pos);
+        size_t extruder_idx = std::stoul(resolved.substr(hash_pos + 1));
 
         const ConfigOptionDef *opt_def = print_config_def.get(base_key);
         if (opt_def && config.has(base_key))
@@ -4956,7 +5075,7 @@ void PrinterSettingsPanel::UpdateUndoUI(const std::string &opt_key)
             {
             case coFloats:
             case coPercents:
-                if (auto *opt = config.option<ConfigOptionFloats>(base_key))
+                if (auto *opt = float_values(config, base_key))
                 {
                     if (extruder_idx < opt->values.size())
                         current_value = into_u8(wxString::Format("%g", opt->values[extruder_idx]));
@@ -5019,21 +5138,11 @@ void PrinterSettingsPanel::UpdateUndoUI(const std::string &opt_key)
     // Check if value differs from original (for undo icon)
     bool is_modified = (current_value != original_value);
 
-    // Update undo icon
-    if (auto *bmp = dynamic_cast<wxStaticBitmap *>(it->second.undo_icon))
+    // Update the undo mark when its state changed, so an extruder switch repaints only rows that differ
+    if (it->second.undo_state != int(is_modified))
     {
-        if (is_modified)
-        {
-            bmp->SetBitmap(*get_bmp_bundle("undo"));
-            bmp->SetToolTip(_L("Click to revert to original value"));
-            bmp->SetCursor(wxCursor(wxCURSOR_HAND));
-        }
-        else
-        {
-            bmp->SetBitmap(*get_bmp_bundle("dot"));
-            bmp->SetToolTip(wxEmptyString);
-            bmp->SetCursor(wxNullCursor);
-        }
+        it->second.undo_state = int(is_modified);
+        set_undo(it->second.undo_icon, is_modified);
     }
 
     // Update lock icon (system preset comparison)
@@ -5054,8 +5163,8 @@ void PrinterSettingsPanel::UpdateUndoUI(const std::string &opt_key)
         std::string system_value;
         if (hash_pos != std::string::npos)
         {
-            std::string base_key = opt_key.substr(0, hash_pos);
-            size_t extruder_idx = std::stoul(opt_key.substr(hash_pos + 1));
+            std::string base_key = resolved.substr(0, hash_pos);
+            size_t extruder_idx = std::stoul(resolved.substr(hash_pos + 1));
             const ConfigOptionDef *opt_def = print_config_def.get(base_key);
             if (opt_def && system_preset->config.has(base_key))
             {
@@ -5063,7 +5172,7 @@ void PrinterSettingsPanel::UpdateUndoUI(const std::string &opt_key)
                 {
                 case coFloats:
                 case coPercents:
-                    if (auto *opt = system_preset->config.option<ConfigOptionFloats>(base_key))
+                    if (auto *opt = float_values(system_preset->config, base_key))
                     {
                         if (extruder_idx < opt->values.size())
                             system_value = into_u8(wxString::Format("%g", opt->values[extruder_idx]));
@@ -5102,22 +5211,14 @@ void PrinterSettingsPanel::UpdateUndoUI(const std::string &opt_key)
         differs_from_system = (current_value != system_value);
     }
 
-    if (auto *bmp = dynamic_cast<wxStaticBitmap *>(it->second.lock_icon))
+    if (it->second.lock_state != int(differs_from_system))
     {
-        if (differs_from_system)
-        {
-            bmp->SetBitmap(*get_bmp_bundle("lock_open"));
-            bmp->SetToolTip(_L("Value differs from system preset"));
-        }
-        else
-        {
-            bmp->SetBitmap(*get_bmp_bundle("lock_closed"));
-            bmp->SetToolTip(_L("Value is same as in the system preset"));
-        }
+        it->second.lock_state = int(differs_from_system);
+        set_lock(it->second.lock_icon, differs_from_system);
     }
 }
 
-void PrinterSettingsPanel::RefreshFromConfig()
+void PrinterSettingsPanel::RefreshFromConfig(bool extruder_rows_only)
 {
     // If we're already inside OnSettingChanged, don't refresh - this prevents the
     // circular callback: OnSettingChanged -> tab->update_dirty() -> RefreshFromConfig()
@@ -5130,42 +5231,49 @@ void PrinterSettingsPanel::RefreshFromConfig()
 
     const DynamicPrintConfig &config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
 
-    // Check if extruder count changed - rebuild sections if needed
-    auto *nozzle_opt = config.option<ConfigOptionFloats>("nozzle_diameter");
-    size_t new_count = nozzle_opt ? nozzle_opt->values.size() : 1;
-    if (new_count != m_extruders_count)
+    // An extruder switch changes neither the count nor the tabs, nor any row off the Extruders page
+    if (!extruder_rows_only)
     {
-        m_disable_update = false;
-        UpdateExtruderCount(new_count);
-        m_disable_update = true;
-    }
-
-    // Check if Single extruder MM tab visibility changed - rebuild if needed
-    bool semm_tab_should_show = ShouldShowSingleExtruderMM();
-    bool semm_tab_exists = false;
-    for (int i = 0; i < GetTabCount(); ++i)
-    {
-        if (GetTabName(i) == "single_extruder_mm")
+        // Check if extruder count changed - rebuild sections if needed
+        auto *nozzle_opt = config.option<ConfigOptionFloats>("nozzle_diameter");
+        size_t new_count = nozzle_opt ? nozzle_opt->values.size() : 1;
+        if (new_count != m_extruders_count)
         {
-            semm_tab_exists = true;
-            break;
+            m_disable_update = false;
+            UpdateExtruderCount(new_count);
+            m_disable_update = true;
         }
-    }
-    if (semm_tab_should_show != semm_tab_exists)
-    {
-        ScheduleRebuild();
-        return; // Let rebuild handle everything (guard destructor resets m_disable_update)
+
+        // Check if Single extruder MM tab visibility changed - rebuild if needed
+        bool semm_tab_should_show = ShouldShowSingleExtruderMM();
+        bool semm_tab_exists = false;
+        for (int i = 0; i < GetTabCount(); ++i)
+        {
+            if (GetTabName(i) == "single_extruder_mm")
+            {
+                semm_tab_exists = true;
+                break;
+            }
+        }
+        if (semm_tab_should_show != semm_tab_exists)
+        {
+            ScheduleRebuild();
+            return; // Let rebuild handle everything (guard destructor resets m_disable_update)
+        }
     }
 
     for (auto &[opt_key, ui_elem] : m_setting_controls)
     {
-        // Check if this is an extruder-specific setting (has # in the key)
-        size_t hash_pos = opt_key.find('#');
+        if (extruder_rows_only && !IsExtruderRowKey(opt_key))
+            continue;
+        // A row of the Extruders page reads the selected extruder's entry
+        const std::string resolved = ExtruderKey(opt_key);
+        size_t hash_pos = resolved.find('#');
         if (hash_pos != std::string::npos)
         {
             // Handle extruder-specific settings
-            std::string base_key = opt_key.substr(0, hash_pos);
-            size_t extruder_idx = std::stoul(opt_key.substr(hash_pos + 1));
+            std::string base_key = resolved.substr(0, hash_pos);
+            size_t extruder_idx = std::stoul(resolved.substr(hash_pos + 1));
 
             const ConfigOptionDef *opt_def = print_config_def.get(base_key);
             if (!opt_def || !config.has(base_key))
@@ -5187,7 +5295,7 @@ void PrinterSettingsPanel::RefreshFromConfig()
             case coPercents:
                 if (auto *text_input = dynamic_cast<::TextInput *>(ui_elem.control))
                 {
-                    auto *opt = config.option<ConfigOptionFloats>(base_key);
+                    auto *opt = float_values(config, base_key);
                     if (opt && extruder_idx < opt->values.size())
                     {
                         text_input->SetValue(wxString::Format("%g", opt->values[extruder_idx]));
@@ -5195,7 +5303,7 @@ void PrinterSettingsPanel::RefreshFromConfig()
                 }
                 else if (auto *text = dynamic_cast<wxTextCtrl *>(ui_elem.control))
                 {
-                    auto *opt = config.option<ConfigOptionFloats>(base_key);
+                    auto *opt = float_values(config, base_key);
                     if (opt && extruder_idx < opt->values.size())
                     {
                         text->SetValue(wxString::Format("%g", opt->values[extruder_idx]));
@@ -5271,6 +5379,19 @@ void PrinterSettingsPanel::RefreshFromConfig()
                                 }
                             }
                         }
+                    }
+                }
+                break;
+            case coPoints:
+                if (auto *x_field = dynamic_cast<wxTextCtrl *>(ui_elem.control);
+                    x_field != nullptr && ui_elem.control_y != nullptr)
+                {
+                    auto *opt = config.option<ConfigOptionPoints>(base_key);
+                    if (opt && extruder_idx < opt->values.size())
+                    {
+                        x_field->ChangeValue(wxString::Format("%g", opt->values[extruder_idx].x()));
+                        static_cast<wxTextCtrl *>(ui_elem.control_y)
+                            ->ChangeValue(wxString::Format("%g", opt->values[extruder_idx].y()));
                     }
                 }
                 break;
@@ -5358,10 +5479,24 @@ void PrinterSettingsPanel::RefreshFromConfig()
     }
 
     // Update machine limits panel visibility based on gcode_flavor
-    UpdateMachineLimitsVisibility();
+    if (!extruder_rows_only)
+        UpdateMachineLimitsVisibility();
 
     // Apply toggle logic to enable/disable dependent options
     ApplyToggleRules();
+
+    if (extruder_rows_only)
+    {
+        // A switch changes which cell is active, not the cells or their marks
+        if (m_extruder_bar != nullptr)
+            m_extruder_bar->SetSelection(int(m_selected_extruder));
+        UpdateExtruderBadge();
+        return;
+    }
+
+    // The Extruders strip: colours and the modified marks follow the config
+    UpdateExtruderSelector();
+    UpdateExtruderMarks();
 
     // Call SysColorsChanged on parent controls (TextInput, SpinInput, ComboBox)
     // These controls contain ThemedTextCtrl and handle their own color management via WM_CTLCOLOREDIT
@@ -5396,23 +5531,32 @@ void PrinterSettingsPanel::ResetOriginalValues()
 {
     const DynamicPrintConfig &config = wxGetApp().preset_bundle->printers.get_selected_preset().config;
     for (auto &[opt_key, ui_elem] : m_setting_controls)
+        ComputeOriginalValue(opt_key, ui_elem, config);
+    m_preserved_original_values.clear();
+}
+
+void PrinterSettingsPanel::ComputeOriginalValue(const std::string &opt_key, SettingUIElements &ui_elem,
+                                                const DynamicPrintConfig &config) const
+{
+    // A row of the Extruders page takes the selected extruder's entry
     {
-        size_t hash_pos = opt_key.find('#');
+        const std::string resolved = ExtruderKey(opt_key);
+        size_t hash_pos = resolved.find('#');
         if (hash_pos != std::string::npos)
         {
             // Extruder-specific key - recompute original from the vector option
-            std::string base_key = opt_key.substr(0, hash_pos);
-            size_t extruder_idx = std::stoul(opt_key.substr(hash_pos + 1));
+            std::string base_key = resolved.substr(0, hash_pos);
+            size_t extruder_idx = std::stoul(resolved.substr(hash_pos + 1));
 
             const ConfigOptionDef *opt_def = print_config_def.get(base_key);
             if (!opt_def || !config.has(base_key))
-                continue;
+                return;
 
             switch (opt_def->type)
             {
             case coFloats:
             case coPercents:
-                if (auto *opt = config.option<ConfigOptionFloats>(base_key))
+                if (auto *opt = float_values(config, base_key))
                 {
                     if (extruder_idx < opt->values.size())
                         ui_elem.original_value = into_u8(wxString::Format("%g", opt->values[extruder_idx]));
@@ -5467,12 +5611,36 @@ void PrinterSettingsPanel::ResetOriginalValues()
                 ui_elem.original_value = config.opt_serialize(opt_key);
         }
     }
-    m_preserved_original_values.clear();
 }
 
 void PrinterSettingsPanel::ApplyToggleState(const std::string &registry_key, bool enabled, const wxString &reason)
 {
-    ApplyToggleStateTo(m_setting_controls, registry_key, enabled, reason);
+    // The rules give a state per extruder; the Extruders page takes the selected extruder's
+    const size_t hash = registry_key.find('#');
+    if (hash != std::string::npos)
+    {
+        const std::string base = registry_key.substr(0, hash);
+        if (IsExtruderRowKey(base))
+        {
+            if (std::stoul(registry_key.substr(hash + 1)) == m_selected_extruder)
+                ApplyToggleStateIfChanged(base, enabled, reason);
+            return;
+        }
+    }
+    ApplyToggleStateIfChanged(registry_key, enabled, reason);
+}
+
+void PrinterSettingsPanel::ApplyToggleStateIfChanged(const std::string &key, bool enabled, const wxString &reason)
+{
+    // The rules run after every change and every switch; a row whose state and reason stay the same
+    // keeps its tooltips as they are
+    auto it = m_setting_controls.find(key);
+    if (it == m_setting_controls.end())
+        return;
+    if (it->second.toggle_state == int(enabled) && it->second.disabled_reason == (enabled ? wxString() : reason))
+        return;
+    ApplyToggleStateTo(m_setting_controls, key, enabled, reason);
+    it->second.toggle_state = int(enabled);
 }
 
 void PrinterSettingsPanel::UpdateMachineLimitsUsageChoices()
@@ -5518,17 +5686,17 @@ void PrinterSettingsPanel::UpdateMachineLimitsUsageChoices()
 void PrinterSettingsPanel::msw_rescale()
 {
     // Update icon sizes and rescale controls for DPI scaling
-    wxSize icon_size = GetScaledIconSizeWx();
     for (auto &[opt_key, ui_elem] : m_setting_controls)
     {
-        if (ui_elem.lock_icon)
-            ui_elem.lock_icon->SetMinSize(icon_size);
-        if (ui_elem.undo_icon)
-            ui_elem.undo_icon->SetMinSize(icon_size);
+        // The lock and undo marks share one window
+        rescale_icons(ui_elem.lock_icon);
         // Rescale SpinInput controls so internal buttons reposition correctly
         if (auto *spin = dynamic_cast<SpinInputBase *>(ui_elem.control))
             spin->Rescale();
     }
+    // The selector's row height follows the em unit
+    if (m_extruder_bar != nullptr)
+        m_extruder_bar->UpdateAppearance();
 
     TabbedSettingsPanel::msw_rescale();
 }
@@ -5566,6 +5734,9 @@ void PrinterSettingsPanel::sys_color_changed()
         else if (auto *checkbox = dynamic_cast<::CheckBox *>(ui_elem.control))
             checkbox->sys_color_changed();
 
+        // The icons are set again in the new theme's colours whatever their state
+        ui_elem.undo_state = -1;
+        ui_elem.lock_state = -1;
         UpdateUndoUI(opt_key);
     }
 
@@ -5579,9 +5750,246 @@ void PrinterSettingsPanel::UpdateRowVisibility()
     {
         if (ui.row_sizer && ui.parent_sizer)
         {
-            bool vis = is_sidebar_key_visible(key);
+            // A row of the Extruders page has one pin for every extruder
+            bool vis = is_sidebar_key_visible(PinKey(key));
             ui.parent_sizer->Show(ui.row_sizer, vis);
         }
+    }
+}
+
+void PrinterSettingsPanel::MigrateExtruderPins()
+{
+    // Each extruder once had its own pins on this page; a row now has one, Extruder 1's ("key#0").
+    // The other extruders' stored pins ("key#1" and up) are deleted quietly, once per start, the
+    // machine limits' "#1" (their stealth-mode values, not extruders) untouched: not rows of this page
+    static bool s_done = false;
+    if (s_done)
+        return;
+    s_done = true;
+    AppConfig *config = get_app_config();
+    if (!config->has_section("sidebar_visibility"))
+        return;
+    std::vector<std::string> stale;
+    for (const auto &[name, value] : config->get_section("sidebar_visibility"))
+    {
+        const size_t hash = name.rfind('#');
+        if (hash == std::string::npos || hash + 1 >= name.size() || name.compare(hash + 1, std::string::npos, "0") == 0)
+            continue;
+        if (name.find_first_not_of("0123456789", hash + 1) != std::string::npos)
+            continue;
+        if (m_extruder_row_keys.count(name.substr(0, hash)) != 0)
+            stale.push_back(name);
+    }
+    if (stale.empty())
+        return;
+    for (const std::string &name : stale)
+        config->erase("sidebar_visibility", name);
+    config->save();
+    BOOST_LOG_TRIVIAL(info) << "Sidebar: " << stale.size()
+                            << " per-extruder pins of the Extruders page removed; Extruder 1's pin decides each row";
+}
+
+std::string PrinterSettingsPanel::PinKey(const std::string &key) const
+{
+    // A row of the Extruders page is pinned or not for every extruder: one stored pin, Extruder 1's
+    return IsExtruderRowKey(key) ? key + "#0" : key;
+}
+
+std::vector<std::string> PrinterSettingsPanel::PinWriteKeys(const std::string &key) const
+{
+    return {PinKey(key)};
+}
+
+void PrinterSettingsPanel::BuildExtruderSelector(wxPanel *content)
+{
+    const int em = wxGetApp().em_unit();
+    m_extruder_bar = new CategoryBar(content, []() { return SidebarColors::Background(); });
+    m_extruder_bar->SetMaxPerRow(EXTRUDERS_PER_ROW);
+    m_extruder_bar->EnableKeyboard(true);
+    m_extruder_bar->SetOnChanged([this](int index) { SelectExtruder(size_t(index)); });
+
+    // First in the page, and first in its tab order
+    auto *bar_sizer = new wxBoxSizer(wxVERTICAL);
+    bar_sizer->Add(m_extruder_bar, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, em / 4);
+    content->GetSizer()->Insert(0, bar_sizer, 0, wxEXPAND);
+    for (wxWindow *child : content->GetChildren())
+        if (child != m_extruder_bar)
+        {
+            m_extruder_bar->MoveBeforeInTabOrder(child);
+            break;
+        }
+    // Shown while the page shows any row, like the page's other widgets that are not rows
+    m_auxiliary_rows.emplace_back(bar_sizer, content->GetSizer());
+
+    UpdateExtruderSelector();
+    UpdateExtruderMarks();
+}
+
+void PrinterSettingsPanel::UpdateExtruderSelector()
+{
+    if (m_extruder_tab_index < 0)
+        return;
+    if (m_extruder_bar != nullptr)
+    {
+        const std::vector<wxColour> swatches = ExtruderSwatches();
+        std::vector<CategoryBar::Item> items;
+        for (size_t e = 0; e < m_extruders_count; ++e)
+        {
+            CategoryBar::Item item;
+            item.title = wxString::Format(_L("Extruder %zu"), e + 1);
+            item.text = wxString::Format("%zu", e + 1);
+            item.swatch = swatches[e];
+            items.push_back(std::move(item));
+        }
+        m_extruder_bar->SetItems(std::move(items));
+        m_extruder_bar->SetSelection(int(m_selected_extruder));
+        UpdateExtruderMarks();
+    }
+    UpdateExtruderBadge();
+}
+
+// One colour per extruder, the one the plater shows it in: the extruder colour where set, else
+// its filament's; invalid where neither is
+std::vector<wxColour> PrinterSettingsPanel::ExtruderSwatches() const
+{
+    std::vector<std::string> colours;
+    if (GetPlater() != nullptr)
+        colours = GetPlater()->get_extruder_color_strings_from_plater_config();
+    std::vector<wxColour> swatches(m_extruders_count);
+    for (size_t e = 0; e < m_extruders_count && e < colours.size(); ++e)
+        if (!colours[e].empty())
+            swatches[e] = wxColour(from_u8(colours[e]));
+    return swatches;
+}
+
+void PrinterSettingsPanel::UpdateExtruderSwatches()
+{
+    if (m_extruder_bar != nullptr)
+        m_extruder_bar->SetSwatches(ExtruderSwatches());
+}
+
+void PrinterSettingsPanel::UpdateExtruderBadge()
+{
+    // The section says which extruder its rows belong to, whatever is scrolled out of view
+    if (CollapsibleSection *section = GetTabSection(m_extruder_tab_index))
+    {
+        if (m_extruders_count > 1)
+        {
+            section->SetBadgeText(wxString::Format("%zu / %zu", m_selected_extruder + 1, m_extruders_count));
+            section->SetBadgeVisible(true);
+        }
+        else
+            section->SetBadgeVisible(false);
+    }
+}
+
+void PrinterSettingsPanel::UpdateExtruderMarks()
+{
+    if (m_extruder_bar == nullptr)
+        return;
+    // A cell is marked while any value of its extruder differs from the saved preset
+    const DynamicPrintConfig &edited = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+    const DynamicPrintConfig &saved = wxGetApp().preset_bundle->printers.get_selected_preset().config;
+    std::vector<bool> marks(m_extruders_count, false);
+    for (const std::string &key : m_extruder_row_keys)
+    {
+        const auto *now = dynamic_cast<const ConfigOptionVectorBase *>(edited.option(key));
+        const auto *was = dynamic_cast<const ConfigOptionVectorBase *>(saved.option(key));
+        if (now == nullptr || was == nullptr)
+            continue;
+        const std::vector<std::string> now_values = now->vserialize();
+        const std::vector<std::string> was_values = was->vserialize();
+        for (size_t e = 0; e < m_extruders_count; ++e)
+            if (e >= now_values.size() || e >= was_values.size() || now_values[e] != was_values[e])
+                marks[e] = true;
+    }
+    m_extruder_bar->SetMarks(std::move(marks));
+}
+
+void PrinterSettingsPanel::RebindExtruder(size_t idx)
+{
+    m_selected_extruder = idx;
+    // No freeze: the switch only writes values into existing controls, all repainted in the one
+    // paint after this event, and freezing the panel walks every one of its windows twice
+    const DynamicPrintConfig &saved = wxGetApp().preset_bundle->printers.get_selected_preset().config;
+    for (const std::string &key : m_extruder_row_keys)
+        if (auto it = m_setting_controls.find(key); it != m_setting_controls.end())
+            ComputeOriginalValue(key, it->second, saved);
+    // The page's values, its undo and lock marks, the rules, the active cell; the pins are the same
+    // for every extruder, so no row shows or hides
+    RefreshFromConfig(true);
+}
+
+void PrinterSettingsPanel::SelectExtruder(size_t idx)
+{
+    if (m_extruders_count == 0)
+        return;
+    idx = std::min(idx, m_extruders_count - 1);
+    if (idx == m_selected_extruder)
+    {
+        if (m_extruder_bar != nullptr)
+            m_extruder_bar->SetSelection(int(idx));
+        return;
+    }
+    // A value typed into the page and not yet committed belongs to the extruder it was typed for
+    if (wxWindow *focused = wxWindow::FindFocus();
+        focused != nullptr && IsDescendant(focused) && focused != m_extruder_bar && GetPlater() != nullptr)
+        GetPlater()->sidebar().CommitFocusedField();
+
+    GuiBudget::Span span("printer.extruder_switch");
+    get_app_config()->set("sidebar_expanded", "printer/extruder_selected", std::to_string(idx));
+    RebindExtruder(idx);
+}
+
+std::vector<TabbedSettingsPanel::RowPlacement> PrinterSettingsPanel::RegistryPlacements() const
+{
+    // The Extruders page stands for every extruder: the dump writes it once per index, in the
+    // "extruder_<index>" pages the stacked sections had, numbered in one sequence with the rest
+    std::vector<RowPlacement> out;
+    int order = 0;
+    bool expanded = false;
+    for (const RowPlacement &row : m_row_placements)
+    {
+        if (!IsExtruderRowKey(row.key))
+        {
+            out.push_back({row.key, row.page, row.group, order++});
+            continue;
+        }
+        if (expanded)
+            continue;
+        expanded = true;
+        for (size_t e = 0; e < std::max<size_t>(1, m_extruders_count); ++e)
+            for (const RowPlacement &page_row : m_row_placements)
+                if (IsExtruderRowKey(page_row.key))
+                    out.push_back({page_row.key + "#" + std::to_string(e), "extruder_" + std::to_string(e),
+                                   page_row.group, order++});
+    }
+    return out;
+}
+
+void PrinterSettingsPanel::BeforeRegistryRow(const RowPlacement &row)
+{
+    // A row of the Extruders page is read with its own extruder selected, so its shown and enabled
+    // state are that extruder's
+    const size_t hash = row.key.find('#');
+    if (hash == std::string::npos || !IsExtruderRowKey(row.key.substr(0, hash)))
+        return;
+    const size_t idx = std::stoul(row.key.substr(hash + 1));
+    if (idx == m_selected_extruder)
+        return;
+    if (!m_dump_restore_extruder)
+        m_dump_restore_extruder = m_selected_extruder;
+    RebindExtruder(idx);
+    UpdateSidebarVisibility();
+}
+
+void PrinterSettingsPanel::AfterRegistryRows()
+{
+    if (m_dump_restore_extruder)
+    {
+        RebindExtruder(*m_dump_restore_extruder);
+        UpdateSidebarVisibility();
+        m_dump_restore_extruder.reset();
     }
 }
 
@@ -5731,8 +6139,8 @@ void FilamentSettingsPanel::CreateSettingRow(wxWindow *parent, wxSizer *sizer, c
         return; // Option not found
 
     const ConfigOptionDef *opt_def = ctx.opt_def;
-    wxStaticBitmap *lock_icon = ctx.lock_icon;
-    wxStaticBitmap *undo_icon = ctx.undo_icon;
+    RowIcons *lock_icon = ctx.lock_icon;
+    RowIcons *undo_icon = ctx.undo_icon;
     wxBoxSizer *row_sizer = ctx.row_sizer;
     wxString tooltip = ctx.tooltip;
 
@@ -6112,95 +6520,95 @@ void FilamentSettingsPanel::CreateSettingRow(wxWindow *parent, wxSizer *sizer, c
 
         UpdateUndoUI(opt_key);
 
-        undo_icon->Bind(wxEVT_LEFT_DOWN,
-                        [this, opt_key](wxMouseEvent &)
-                        {
-                            auto it = m_setting_controls.find(opt_key);
-                            if (it == m_setting_controls.end())
-                                return;
+        undo_icon->SetOnClick(RowIcons::Undo,
+                              [this, opt_key]()
+                              {
+                                  auto it = m_setting_controls.find(opt_key);
+                                  if (it == m_setting_controls.end())
+                                      return;
 
-                            const ConfigOptionDef *def = print_config_def.get(opt_key);
-                            if (!def)
-                                return;
+                                  const ConfigOptionDef *def = print_config_def.get(opt_key);
+                                  if (!def)
+                                      return;
 
-                            switch (def->type)
-                            {
-                            case coBool:
-                            case coBools:
-                                if (auto *cb = dynamic_cast<::CheckBox *>(it->second.control))
-                                {
-                                    cb->SetValue(it->second.original_value == "1");
-                                }
-                                break;
-                            case coInt:
-                            case coInts:
-                                if (auto *spin = dynamic_cast<SpinInput *>(it->second.control))
-                                {
-                                    spin->SetValue(std::stoi(it->second.original_value));
-                                }
-                                break;
-                            case coEnum:
-                                if (auto *combo = dynamic_cast<::ComboBox *>(it->second.control))
-                                {
-                                    if (def->enum_def && def->enum_def->has_values())
-                                    {
-                                        const auto &values = def->enum_def->values();
-                                        for (size_t idx = 0; idx < values.size(); ++idx)
-                                        {
-                                            if (values[idx] == it->second.original_value)
-                                            {
-                                                combo->SetSelection(static_cast<int>(idx));
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                                break;
-                            default:
-                                if (opt_key == "filament_colour")
-                                {
-                                    // Only restore the panel visual; the OnSettingChanged call
-                                    // below reads it back and performs the single commit.
-                                    if (auto *panel = dynamic_cast<wxPanel *>(it->second.control))
-                                    {
-                                        wxColour clr(from_u8(it->second.original_value));
-                                        if (clr.IsOk())
-                                        {
-                                            panel->SetBackgroundColour(clr);
-                                            panel->Refresh();
-                                        }
-                                    }
-                                }
-                                else if (auto *combo = dynamic_cast<::ComboBox *>(it->second.control))
-                                {
-                                    // select_open string: revert dropdown selection
-                                    if (def->enum_def && def->enum_def->has_values())
-                                    {
-                                        const auto &values = def->enum_def->values();
-                                        for (size_t idx = 0; idx < values.size(); ++idx)
-                                        {
-                                            if (values[idx] == it->second.original_value)
-                                            {
-                                                combo->SetSelection(static_cast<int>(idx));
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                                else if (auto *text_input = dynamic_cast<::TextInput *>(it->second.control))
-                                {
-                                    text_input->SetValue(from_u8(it->second.original_value));
-                                }
-                                else if (auto *text = dynamic_cast<wxTextCtrl *>(it->second.control))
-                                {
-                                    text->SetValue(from_u8(it->second.original_value));
-                                }
-                                break;
-                            }
+                                  switch (def->type)
+                                  {
+                                  case coBool:
+                                  case coBools:
+                                      if (auto *cb = dynamic_cast<::CheckBox *>(it->second.control))
+                                      {
+                                          cb->SetValue(it->second.original_value == "1");
+                                      }
+                                      break;
+                                  case coInt:
+                                  case coInts:
+                                      if (auto *spin = dynamic_cast<SpinInput *>(it->second.control))
+                                      {
+                                          spin->SetValue(std::stoi(it->second.original_value));
+                                      }
+                                      break;
+                                  case coEnum:
+                                      if (auto *combo = dynamic_cast<::ComboBox *>(it->second.control))
+                                      {
+                                          if (def->enum_def && def->enum_def->has_values())
+                                          {
+                                              const auto &values = def->enum_def->values();
+                                              for (size_t idx = 0; idx < values.size(); ++idx)
+                                              {
+                                                  if (values[idx] == it->second.original_value)
+                                                  {
+                                                      combo->SetSelection(static_cast<int>(idx));
+                                                      break;
+                                                  }
+                                              }
+                                          }
+                                      }
+                                      break;
+                                  default:
+                                      if (opt_key == "filament_colour")
+                                      {
+                                          // Only restore the panel visual; the OnSettingChanged call
+                                          // below reads it back and performs the single commit.
+                                          if (auto *panel = dynamic_cast<wxPanel *>(it->second.control))
+                                          {
+                                              wxColour clr(from_u8(it->second.original_value));
+                                              if (clr.IsOk())
+                                              {
+                                                  panel->SetBackgroundColour(clr);
+                                                  panel->Refresh();
+                                              }
+                                          }
+                                      }
+                                      else if (auto *combo = dynamic_cast<::ComboBox *>(it->second.control))
+                                      {
+                                          // select_open string: revert dropdown selection
+                                          if (def->enum_def && def->enum_def->has_values())
+                                          {
+                                              const auto &values = def->enum_def->values();
+                                              for (size_t idx = 0; idx < values.size(); ++idx)
+                                              {
+                                                  if (values[idx] == it->second.original_value)
+                                                  {
+                                                      combo->SetSelection(static_cast<int>(idx));
+                                                      break;
+                                                  }
+                                              }
+                                          }
+                                      }
+                                      else if (auto *text_input = dynamic_cast<::TextInput *>(it->second.control))
+                                      {
+                                          text_input->SetValue(from_u8(it->second.original_value));
+                                      }
+                                      else if (auto *text = dynamic_cast<wxTextCtrl *>(it->second.control))
+                                      {
+                                          text->SetValue(from_u8(it->second.original_value));
+                                      }
+                                      break;
+                                  }
 
-                            OnSettingChanged(opt_key);
-                            UpdateUndoUI(opt_key);
-                        });
+                                  OnSettingChanged(opt_key);
+                                  UpdateUndoUI(opt_key);
+                              });
     }
 
     sizer->Add(row_sizer, 0, wxEXPAND | wxTOP | wxBOTTOM, em / 4);
@@ -6234,16 +6642,8 @@ void FilamentSettingsPanel::CreateMultilineSettingRow(wxWindow *parent, wxSizer 
     // Set background color using unified accessor
     wxColour bg_color = SidebarColors::Background();
 
-    auto *lock_icon = new wxStaticBitmap(parent, wxID_ANY, *get_bmp_bundle("lock_closed"));
-    lock_icon->SetMinSize(GetScaledIconSizeWx());
-    lock_icon->SetBackgroundColour(bg_color);
-    lock_icon->SetToolTip(_L("Value is same as in the system preset"));
-    header_sizer->Add(lock_icon, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, GetIconMargin());
-
-    auto *undo_icon = new wxStaticBitmap(parent, wxID_ANY, *get_bmp_bundle("dot"));
-    undo_icon->SetMinSize(GetScaledIconSizeWx());
-    undo_icon->SetBackgroundColour(bg_color);
-    header_sizer->Add(undo_icon, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, GetIconMargin());
+    // The lock and undo marks, in one window
+    RowIcons *icons = AddRowIcons(parent, header_sizer, std::string());
 
     wxString label_with_colon = label + ":";
     auto *label_text = new wxStaticText(parent, wxID_ANY, label_with_colon);
@@ -6283,8 +6683,8 @@ void FilamentSettingsPanel::CreateMultilineSettingRow(wxWindow *parent, wxSizer 
     // Store UI elements
     SettingUIElements ui_elem;
     ui_elem.control = text;
-    ui_elem.lock_icon = lock_icon;
-    ui_elem.undo_icon = undo_icon;
+    ui_elem.lock_icon = icons;
+    ui_elem.undo_icon = icons;
     ui_elem.label_text = label_text;
     ui_elem.original_value = original_value;
     m_setting_controls[opt_key] = ui_elem;
@@ -6292,22 +6692,22 @@ void FilamentSettingsPanel::CreateMultilineSettingRow(wxWindow *parent, wxSizer 
 
     UpdateUndoUI(opt_key);
 
-    // Bind undo icon click
-    undo_icon->Bind(wxEVT_LEFT_DOWN,
-                    [this, opt_key](wxMouseEvent &)
-                    {
-                        auto it = m_setting_controls.find(opt_key);
-                        if (it == m_setting_controls.end())
-                            return;
+    // Undo mark click
+    icons->SetOnClick(RowIcons::Undo,
+                      [this, opt_key]()
+                      {
+                          auto it = m_setting_controls.find(opt_key);
+                          if (it == m_setting_controls.end())
+                              return;
 
-                        if (auto *txt = dynamic_cast<wxTextCtrl *>(it->second.control))
-                        {
-                            txt->SetValue(from_u8(it->second.original_value));
-                        }
+                          if (auto *txt = dynamic_cast<wxTextCtrl *>(it->second.control))
+                          {
+                              txt->SetValue(from_u8(it->second.original_value));
+                          }
 
-                        OnSettingChanged(opt_key);
-                        UpdateUndoUI(opt_key);
-                    });
+                          OnSettingChanged(opt_key);
+                          UpdateUndoUI(opt_key);
+                      });
 
     sizer->Add(container_sizer, 0, wxEXPAND | wxTOP | wxBOTTOM, em / 4);
 }
@@ -6331,20 +6731,10 @@ void FilamentSettingsPanel::CreateNullableSettingRow(wxWindow *parent, wxSizer *
     // Set background color using unified accessor
     wxColour bg_color = SidebarColors::Background();
 
-    // Pin checkbox leads the row so overrides pin/hide like normal rows
-    AddPinCheckbox(parent, left_sizer, opt_key);
-
-    // Lock and undo icons first (same order as regular settings)
-    auto *lock_icon = new wxStaticBitmap(parent, wxID_ANY, *get_bmp_bundle("lock_closed"));
-    lock_icon->SetMinSize(GetScaledIconSizeWx());
-    lock_icon->SetBackgroundColour(bg_color);
-    lock_icon->SetToolTip(_L("Value is same as in the system preset"));
-    left_sizer->Add(lock_icon, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, GetIconMargin());
-
-    auto *undo_icon = new wxStaticBitmap(parent, wxID_ANY, *get_bmp_bundle("dot"));
-    undo_icon->SetMinSize(GetScaledIconSizeWx());
-    undo_icon->SetBackgroundColour(bg_color);
-    left_sizer->Add(undo_icon, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, GetIconMargin());
+    // The pin leads the row so overrides pin/hide like normal rows, then the lock and undo marks (same
+    // order as regular settings), in one window
+    RowIcons *lock_icon = AddRowIcons(parent, left_sizer, opt_key);
+    RowIcons *undo_icon = lock_icon;
 
     // Enable checkbox after icons (the key difference from CreateSettingRow)
     auto *enable_checkbox = new ::CheckBox(parent);
@@ -6622,47 +7012,47 @@ void FilamentSettingsPanel::CreateNullableSettingRow(wxWindow *parent, wxSizer *
 
         UpdateUndoUI(opt_key);
 
-        // Bind undo icon click - nullable settings need special handling for nil state
-        undo_icon->Bind(wxEVT_LEFT_DOWN,
-                        [this, opt_key, enable_checkbox](wxMouseEvent &)
-                        {
-                            auto it = m_setting_controls.find(opt_key);
-                            if (it == m_setting_controls.end())
-                                return;
+        // Undo mark click - nullable settings need special handling for nil state
+        undo_icon->SetOnClick(RowIcons::Undo,
+                              [this, opt_key, enable_checkbox]()
+                              {
+                                  auto it = m_setting_controls.find(opt_key);
+                                  if (it == m_setting_controls.end())
+                                      return;
 
-                            const std::string &original = it->second.original_value;
-                            bool original_was_nil = (original == "nil" || original.empty());
+                                  const std::string &original = it->second.original_value;
+                                  bool original_was_nil = (original == "nil" || original.empty());
 
-                            if (original_was_nil)
-                            {
-                                // Original was nil - trigger unchecked state via OnNullableSettingChanged
-                                enable_checkbox->SetValue(false);
-                                OnNullableSettingChanged(opt_key, false);
-                            }
-                            else
-                            {
-                                // Original was a real value - enable and restore
-                                enable_checkbox->SetValue(true);
+                                  if (original_was_nil)
+                                  {
+                                      // Original was nil - trigger unchecked state via OnNullableSettingChanged
+                                      enable_checkbox->SetValue(false);
+                                      OnNullableSettingChanged(opt_key, false);
+                                  }
+                                  else
+                                  {
+                                      // Original was a real value - enable and restore
+                                      enable_checkbox->SetValue(true);
 
-                                // Restore the value to control
-                                if (auto *text = dynamic_cast<wxTextCtrl *>(it->second.control))
-                                {
-                                    text->SetValue(from_u8(original));
-                                }
-                                else if (auto *cb = dynamic_cast<::CheckBox *>(it->second.control))
-                                {
-                                    cb->SetValue(original == "1");
-                                }
-                                else if (auto *text_input = dynamic_cast<::TextInput *>(it->second.control))
-                                {
-                                    text_input->SetValue(from_u8(original));
-                                }
+                                      // Restore the value to control
+                                      if (auto *text = dynamic_cast<wxTextCtrl *>(it->second.control))
+                                      {
+                                          text->SetValue(from_u8(original));
+                                      }
+                                      else if (auto *cb = dynamic_cast<::CheckBox *>(it->second.control))
+                                      {
+                                          cb->SetValue(original == "1");
+                                      }
+                                      else if (auto *text_input = dynamic_cast<::TextInput *>(it->second.control))
+                                      {
+                                          text_input->SetValue(from_u8(original));
+                                      }
 
-                                OnNullableSettingChanged(opt_key, true);
-                            }
+                                      OnNullableSettingChanged(opt_key, true);
+                                  }
 
-                            UpdateUndoUI(opt_key);
-                        });
+                                  UpdateUndoUI(opt_key);
+                              });
     }
 
     // Bind enable checkbox
@@ -7522,13 +7912,10 @@ void FilamentSettingsPanel::ApplyToggleState(const std::string &registry_key, bo
 void FilamentSettingsPanel::msw_rescale()
 {
     // Update icon sizes and rescale controls for DPI scaling
-    wxSize icon_size = GetScaledIconSizeWx();
     for (auto &[opt_key, ui_elem] : m_setting_controls)
     {
-        if (ui_elem.lock_icon)
-            ui_elem.lock_icon->SetMinSize(icon_size);
-        if (ui_elem.undo_icon)
-            ui_elem.undo_icon->SetMinSize(icon_size);
+        // The lock and undo marks share one window
+        rescale_icons(ui_elem.lock_icon);
         // Rescale SpinInput controls so internal buttons reposition correctly
         if (auto *spin = dynamic_cast<SpinInputBase *>(ui_elem.control))
             spin->Rescale();
@@ -7949,6 +8336,30 @@ private:
     std::function<void(int)> m_on_tab_changed;
 };
 
+// The sidebar's outer scroll, which holds every section at full height in the accordion view: its
+// virtual height is traced ("sidebar.scroll.content_height") and checked against the window
+// coordinate range, as every ScrollablePanel's content is
+class SidebarScrolledWindow : public wxScrolledWindow
+{
+public:
+    explicit SidebarScrolledWindow(wxWindow *parent) : wxScrolledWindow(parent) {}
+
+protected:
+    void DoSetVirtualSize(int x, int y) override
+    {
+        wxScrolledWindow::DoSetVirtualSize(x, y);
+        if (y != m_reportedHeight)
+        {
+            m_reportedHeight = y;
+            GuiBudget::content_height("sidebar.scroll", y, m_overflowing);
+        }
+    }
+
+private:
+    int m_reportedHeight{-1};
+    bool m_overflowing{false};
+};
+
 Sidebar::Sidebar(Plater *parent)
     : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL)
     , m_plater(parent)
@@ -8014,7 +8425,7 @@ void Sidebar::BuildUI()
     m_main_sizer->Add(m_tab_bar, 0, wxEXPAND);
 
     // Scrolled panel for sections
-    m_scrolled_panel = new wxScrolledWindow(this);
+    m_scrolled_panel = new SidebarScrolledWindow(this);
     m_scrolled_panel->SetScrollRate(0, 5);
     m_scrolled_panel->ShowScrollbars(wxSHOW_SB_NEVER, wxSHOW_SB_NEVER);
 
@@ -8216,6 +8627,8 @@ void Sidebar::ApplyTabVisibility()
     // Hide the non-bold unified label when the bold tabbed label is shown (and vice versa)
     if (m_nozzle_unified_label)
         m_nozzle_unified_label->Show(!show_pinned_labels);
+    // The rows' chevron stands beside whichever title is shown
+    UpdateExtruderRowsView();
 
     // A shown or hidden label changes the pinned block's minimum height, and wx keeps the cached
     // best sizes of every parent until a child invalidates them; without this the sections lay
@@ -8327,37 +8740,20 @@ void Sidebar::BindDeadSpaceHandlers(wxWindow *root)
     {
         // Bind to container types (wxPanel, wxScrolledWindow) and also to "deadspace" widgets
         // that cover visual area but aren't input controls. In the sidebar, group interiors are
-        // FlatStaticBox (wxStaticBox), labels are wxStaticText, and icons are wxStaticBitmap.
-        // Unlike the main Tab where OG_CustomCtrl (wxPanel) covers the entire group area,
+        // FlatStaticBox (wxStaticBox), labels are wxStaticText, and icons are wxStaticBitmap or a row's
+        // RowIcons. Unlike the main Tab where OG_CustomCtrl (wxPanel) covers the entire group area,
         // the sidebar's FlatStaticBox inherits from wxStaticBox -> wxControl -> wxWindow (not wxPanel),
         // so without this, clicks between rows within a group would go unhandled.
         bool isContainer = win->IsKindOf(CLASSINFO(wxPanel)) || win->IsKindOf(CLASSINFO(wxScrolledWindow));
         bool isDeadSpace = win->IsKindOf(CLASSINFO(wxStaticBox)) || win->IsKindOf(CLASSINFO(wxStaticText)) ||
-                           win->IsKindOf(CLASSINFO(wxStaticBitmap));
+                           win->IsKindOf(CLASSINFO(wxStaticBitmap)) || dynamic_cast<RowIcons *>(win) != nullptr;
 
         if (isContainer || isDeadSpace)
         {
             win->Bind(wxEVT_LEFT_DOWN,
                       [this](wxMouseEvent &evt)
                       {
-                          wxWindow *focused = wxWindow::FindFocus();
-
-                          // If a text input has focus, move focus away to commit the value
-                          if (focused &&
-                              (focused->IsKindOf(CLASSINFO(wxTextCtrl)) || focused->IsKindOf(CLASSINFO(wxSpinCtrl)) ||
-                               focused->IsKindOf(CLASSINFO(wxSpinCtrlDouble))))
-                          {
-                              // Try object list first (it's a proper focusable DataViewCtrl)
-                              if (m_object_list)
-                              {
-                                  m_object_list->SetFocus();
-                              }
-                              else
-                              {
-                                  // Fallback: navigate forward to move focus
-                                  focused->Navigate(wxNavigationKeyEvent::IsForward);
-                              }
-                          }
+                          CommitFocusedField();
                           evt.Skip(); // Always let the event continue
                       });
         }
@@ -8458,17 +8854,59 @@ void Sidebar::CreatePrinterSection()
 
     pinned_sizer->Add(combo_sizer, 0, wxEXPAND | wxALL, em / 2);
 
+    // A title of the nozzle/filament rows: the collapse chevron (shown above
+    // MAX_VISIBLE_EXTRUDER_ROWS extruders) and the label, both toggling the rows
+    auto make_rows_title = [this](wxStaticText *label, wxStaticBitmap **chevron)
+    {
+        *chevron = new wxStaticBitmap(m_printer_content, wxID_ANY,
+                                      *get_bmp_bundle("chevron_right", EXTRUDER_ROWS_CHEVRON_SIZE));
+        (*chevron)->SetBackgroundColour(SidebarColors::Background());
+        (*chevron)->Hide();
+        auto *title = new wxBoxSizer(wxHORIZONTAL);
+        title->Add(*chevron, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, wxGetApp().em_unit() / 4);
+        title->Add(label, 0, wxALIGN_CENTER_VERTICAL);
+        for (wxWindow *window : {static_cast<wxWindow *>(*chevron), static_cast<wxWindow *>(label)})
+            window->Bind(wxEVT_LEFT_UP,
+                         [this](wxMouseEvent &evt)
+                         {
+                             if (m_printer_nozzle_row_sizers.size() > MAX_VISIBLE_EXTRUDER_ROWS)
+                                 ToggleExtruderRows();
+                             evt.Skip();
+                         });
+        return title;
+    };
+
     // Compact label for nozzle/filament rows, shown only on the Objects tab in tabbed mode
     m_nozzle_pinned_label = new wxStaticText(m_printer_content, wxID_ANY,
                                              _L("Nozzle diameter / Filament per extruder:"));
     m_nozzle_pinned_label->SetFont(wxGetApp().bold_font());
     m_nozzle_pinned_label->SetForegroundColour(SidebarColors::Foreground());
     m_nozzle_pinned_label->Hide();
-    pinned_sizer->Add(m_nozzle_pinned_label, 0, wxLEFT | wxTOP, em / 2);
+    pinned_sizer->Add(make_rows_title(m_nozzle_pinned_label, &m_nozzle_pinned_chevron), 0, wxLEFT | wxTOP, em / 2);
 
     // Filament combos for each extruder (quick selection without needing to go to Filaments section)
     m_printer_filament_sizer = new wxBoxSizer(wxVERTICAL);
     pinned_sizer->Add(m_printer_filament_sizer, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, em / 2);
+
+    // The same title, non-bold, shown where the bold one is not (unified mode, the Printer tab)
+    m_nozzle_unified_label = new wxStaticText(m_printer_content, wxID_ANY,
+                                              _L("Nozzle diameter / Filament per extruder:"));
+    m_nozzle_unified_label->SetForegroundColour(SidebarColors::Foreground());
+    m_printer_filament_sizer->Add(make_rows_title(m_nozzle_unified_label, &m_nozzle_unified_chevron), 0, wxBOTTOM,
+                                  em / 4);
+
+    // The rows, in a viewport that scrolls while collapsed; a wheel turn at its top or bottom goes on
+    // to the sidebar
+    m_extruder_rows = new ScrollablePanel(m_printer_content, wxID_ANY);
+    m_extruder_rows->SetBackgroundColour(SidebarColors::Background());
+    m_extruder_rows->GetContentPanel()->SetBackgroundColour(SidebarColors::Background());
+    m_extruder_rows->GetContentPanel()->SetForegroundColour(SidebarColors::Foreground());
+    m_extruder_rows->SetTrackColour(SidebarColors::Background());
+    m_extruder_rows->SetWheelPassesAtEnds(true);
+    m_extruder_rows_sizer = new wxBoxSizer(wxVERTICAL);
+    m_extruder_rows->SetContentSizer(m_extruder_rows_sizer);
+    m_printer_filament_sizer->Add(m_extruder_rows, 0, wxEXPAND);
+    m_extruder_rows_expanded = get_app_config()->get("sidebar_expanded", "plater/extruder_rows") == "1";
 
     m_printer_content->SetSizer(pinned_sizer);
     m_printer_section->SetPinnedContent(m_printer_content);
@@ -8675,9 +9113,7 @@ void Sidebar::CreateObjectsSection()
                 const auto *nozzle_diameter = dynamic_cast<const ConfigOptionFloats *>(
                     wxGetApp().preset_bundle->printers.get_edited_preset().config.option("nozzle_diameter"));
                 if (nozzle_diameter)
-                {
-                    m_object_list->update_objects_list_extruder_column(nozzle_diameter->values.size());
-                }
+                    extruders_count_changed(nozzle_diameter->values.size());
             }
 
 #ifdef _WIN32
@@ -8842,7 +9278,7 @@ void Sidebar::remove_unused_filament_combos(size_t current_count)
 
 void Sidebar::init_printer_filament_combo(PlaterPresetComboBox **combo, int extr_idx)
 {
-    *combo = new PlaterPresetComboBox(m_printer_content, Preset::TYPE_FILAMENT);
+    *combo = new PlaterPresetComboBox(m_extruder_rows->GetContentPanel(), Preset::TYPE_FILAMENT);
     (*combo)->SetMinSize(wxSize(1, -1)); // Allow combo to shrink
     (*combo)->set_extruder_idx(extr_idx);
     (*combo)->SetForegroundColour(SidebarColors::Foreground());
@@ -8851,6 +9287,15 @@ void Sidebar::init_printer_filament_combo(PlaterPresetComboBox **combo, int extr
     // Hide the edit button - this is just for quick selection
     if ((*combo)->edit_btn)
         (*combo)->edit_btn->Hide();
+
+    // A preset combo keeps the wheel from its parents; this one hands it to the rows viewport, and
+    // past the viewport's ends to the sidebar, so the rows scroll wherever the pointer is
+    (*combo)->Bind(wxEVT_MOUSEWHEEL,
+                   [this](wxMouseEvent &evt)
+                   {
+                       if (!m_extruder_rows->GetEventHandler()->ProcessEvent(evt))
+                           m_scrolled_panel->GetEventHandler()->ProcessEvent(evt);
+                   });
 }
 
 void Sidebar::UpdatePrinterFilamentCombos()
@@ -8891,207 +9336,192 @@ void Sidebar::UpdatePrinterFilamentCombos()
 
     wxColour bg_color = SidebarColors::Background();
 
-    // Clear and rebuild if count changed
-    if (m_printer_filament_combos.size() != extruder_count)
+    // A count change removes the rows past the new count and adds rows for new extruders; the other
+    // rows stay as they are
+    while (m_printer_nozzle_row_sizers.size() > extruder_count)
     {
-        // Clear existing
-        m_printer_filament_sizer->Clear(true); // true = delete windows
-        m_printer_nozzle_lock_icons.clear();
-        m_printer_nozzle_undo_icons.clear();
-        m_printer_nozzle_original_values.clear();
-        m_printer_nozzle_spins.clear();
-        m_printer_filament_combos.clear();
+        wxBoxSizer *row = m_printer_nozzle_row_sizers.back();
+        row->Clear(true);
+        m_extruder_rows_sizer->Remove(row);
+        m_printer_nozzle_row_sizers.pop_back();
+        m_printer_nozzle_icons.pop_back();
+        m_printer_nozzle_numbers.pop_back();
+        m_printer_nozzle_spins.pop_back();
+        m_printer_filament_combos.pop_back();
+        m_printer_filament_save_buttons.pop_back();
+    }
+    for (size_t i = m_printer_nozzle_row_sizers.size(); i < extruder_count; ++i)
+    {
+        wxWindow *parent = m_extruder_rows->GetContentPanel();
+        // Create horizontal sizer for this row
+        auto *row_sizer = new wxBoxSizer(wxHORIZONTAL);
 
-        // Add header label (non-bold, shown in unified mode; hidden when bold tabbed label is visible)
-        m_nozzle_unified_label = new wxStaticText(m_printer_content, wxID_ANY,
-                                                  _L("Nozzle diameter / Filament per extruder:"));
-        m_nozzle_unified_label->SetForegroundColour(SidebarColors::Foreground());
-        // Hide if tabbed mode Objects tab is active (bold label replaces it)
-        if (m_tabbed_mode && m_tab_bar && m_tab_bar->GetActiveTab() == 0)
-            m_nozzle_unified_label->Hide();
-        m_printer_filament_sizer->Add(m_nozzle_unified_label, 0, wxBOTTOM, em / 4);
+        double nozzle_value = 0.4;
+        if (nozzle_diameter && i < nozzle_diameter->values.size())
+            nozzle_value = nozzle_diameter->values[i];
 
-        // Add nozzle spin + filament combo rows
-        for (size_t i = 0; i < extruder_count; ++i)
-        {
-            // Create horizontal sizer for this row
-            auto *row_sizer = new wxBoxSizer(wxHORIZONTAL);
+        // The lock (the value against the system preset) and the undo mark (against the saved
+        // preset) in one window, flush left with their gaps after them
+        auto *icons = new RowIcons(parent, false, true, true);
+        icons->SetBackgroundColour(bg_color);
+        icons->SetLeadingMargin(false);
+        m_printer_nozzle_icons.push_back(icons);
+        row_sizer->Add(icons, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, GetIconMargin() * 2);
 
-            // Get current and original nozzle diameter values
-            double nozzle_value = 0.4;
-            if (nozzle_diameter && i < nozzle_diameter->values.size())
-                nozzle_value = nozzle_diameter->values[i];
+        // The extruder's number, right-aligned in the width of the widest so the spins line up
+        auto *number = new wxStaticText(parent, wxID_ANY, wxString::Format("%zu", i + 1), wxDefaultPosition,
+                                        wxSize(parent->GetTextExtent(wxString::Format("%zu", MAX_EXTRUDERS)).x, -1),
+                                        wxALIGN_RIGHT | wxST_NO_AUTORESIZE);
+        number->SetForegroundColour(SidebarColors::Foreground());
+        number->SetToolTip(wxString::Format(_L("Extruder %zu"), i + 1));
+        m_printer_nozzle_numbers.push_back(number);
+        row_sizer->Add(number, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, em / 2);
 
-            double original_value = nozzle_value;
-            if (i < original_nozzle_values.size())
-                original_value = original_nozzle_values[i];
-            m_printer_nozzle_original_values.push_back(original_value);
+        // Undo click handler
+        icons->SetOnClick(RowIcons::Undo,
+                          [this, i]()
+                          {
+                              if (i >= m_printer_nozzle_spins.size() || i >= m_printer_nozzle_original_values.size())
+                                  return;
 
-            // Create lock icon
-            auto *lock_icon = new wxStaticBitmap(m_printer_content, wxID_ANY, *get_bmp_bundle("lock_closed"));
-            lock_icon->SetMinSize(GetScaledIconSizeWx());
-            lock_icon->SetBackgroundColour(bg_color);
-            lock_icon->SetToolTip(_L("Value is same as in the system preset"));
-            m_printer_nozzle_lock_icons.push_back(lock_icon);
-            row_sizer->Add(lock_icon, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, GetIconMargin());
+                              double original_value = m_printer_nozzle_original_values[i];
+                              m_printer_nozzle_spins[i]->SetValue(original_value);
 
-            // Create undo icon
-            auto *undo_icon = new wxStaticBitmap(m_printer_content, wxID_ANY, *get_bmp_bundle("dot"));
-            undo_icon->SetMinSize(GetScaledIconSizeWx());
-            undo_icon->SetBackgroundColour(bg_color);
-            m_printer_nozzle_undo_icons.push_back(undo_icon);
-            row_sizer->Add(undo_icon, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, GetIconMargin() * 2);
+                              // Update printer config
+                              auto &printer_config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+                              auto *nozzles = printer_config.option<ConfigOptionFloats>("nozzle_diameter");
+                              if (nozzles && i < nozzles->values.size())
+                              {
+                                  nozzles->values[i] = original_value;
 
-            // Undo click handler
-            undo_icon->Bind(wxEVT_LEFT_DOWN,
-                            [this, i](wxMouseEvent &)
-                            {
-                                if (i >= m_printer_nozzle_spins.size() || i >= m_printer_nozzle_original_values.size())
-                                    return;
+                                  // Sync to print preset
+                                  auto &print_config = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+                                  auto *print_nozzles =
+                                      print_config.option<ConfigOptionFloats>("print_nozzle_diameters", true);
+                                  if (print_nozzles && i < print_nozzles->values.size())
+                                      print_nozzles->values[i] = original_value;
 
-                                double original_value = m_printer_nozzle_original_values[i];
-                                m_printer_nozzle_spins[i]->SetValue(original_value);
+                                  // Update tabs UI
+                                  Tab *printer_tab = wxGetApp().get_tab(Preset::TYPE_PRINTER);
+                                  if (printer_tab)
+                                  {
+                                      printer_tab->reload_config();
+                                      printer_tab->update_dirty();
+                                  }
+                                  Tab *print_tab = wxGetApp().get_tab(Preset::TYPE_PRINT);
+                                  if (print_tab)
+                                  {
+                                      print_tab->reload_config();
+                                      print_tab->update_dirty();
+                                  }
+                              }
 
-                                // Update printer config
-                                auto &printer_config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
-                                auto *nozzles = printer_config.option<ConfigOptionFloats>("nozzle_diameter");
-                                if (nozzles && i < nozzles->values.size())
-                                {
-                                    nozzles->values[i] = original_value;
+                              update_nozzle_undo_ui(i);
 
-                                    // Sync to print preset
-                                    auto &print_config = wxGetApp().preset_bundle->prints.get_edited_preset().config;
-                                    auto *print_nozzles =
-                                        print_config.option<ConfigOptionFloats>("print_nozzle_diameters", true);
-                                    if (print_nozzles && i < print_nozzles->values.size())
-                                        print_nozzles->values[i] = original_value;
+                              // Also update the accordion panel's nozzle field and undo UI
+                              if (m_printer_settings_panel)
+                                  m_printer_settings_panel->RefreshFromConfig();
+                          });
 
-                                    // Update tabs UI
-                                    Tab *printer_tab = wxGetApp().get_tab(Preset::TYPE_PRINTER);
-                                    if (printer_tab)
-                                    {
-                                        printer_tab->reload_config();
-                                        printer_tab->update_dirty();
-                                    }
-                                    Tab *print_tab = wxGetApp().get_tab(Preset::TYPE_PRINT);
-                                    if (print_tab)
-                                    {
-                                        print_tab->reload_config();
-                                        print_tab->update_dirty();
-                                    }
-                                }
+        // Create nozzle diameter spin control (width and height scaled with DPI)
+        int em = wxGetApp().em_unit();
+        int spin_width = int(5.5 * em);
+        int spin_height = int(2.4 * em); // Proper height for spin control
+        auto *spin = new SpinInputDouble(parent, wxString::Format("%.1f", nozzle_value), "", wxDefaultPosition,
+                                         wxSize(spin_width, spin_height), 0, 0.1, 2.0, nozzle_value, 0.10);
+        spin->SetDigits(1);
+        m_printer_nozzle_spins.push_back(spin);
 
-                                update_nozzle_undo_ui(i);
+        // Event handler for nozzle diameter change
+        spin->Bind(wxEVT_SPINCTRL,
+                   [this, i](wxCommandEvent &)
+                   {
+                       if (i >= m_printer_nozzle_spins.size())
+                           return;
 
-                                // Also update the accordion panel's nozzle field and undo UI
-                                if (m_printer_settings_panel)
-                                    m_printer_settings_panel->RefreshFromConfig();
-                            });
+                       double new_value = m_printer_nozzle_spins[i]->GetValue();
 
-            // Create nozzle diameter spin control (width and height scaled with DPI)
-            int em = wxGetApp().em_unit();
-            int spin_width = int(5.5 * em);
-            int spin_height = int(2.4 * em); // Proper height for spin control
-            auto *spin = new SpinInputDouble(m_printer_content, wxString::Format("%.1f", nozzle_value), "",
-                                             wxDefaultPosition, wxSize(spin_width, spin_height), 0, 0.1, 2.0,
-                                             nozzle_value, 0.10);
-            spin->SetDigits(1);
-            m_printer_nozzle_spins.push_back(spin);
-
-            // Event handler for nozzle diameter change
-            spin->Bind(wxEVT_SPINCTRL,
-                       [this, i](wxCommandEvent &)
+                       // Update printer config
+                       auto &printer_config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
+                       auto *nozzles = printer_config.option<ConfigOptionFloats>("nozzle_diameter");
+                       if (nozzles && i < nozzles->values.size())
                        {
-                           if (i >= m_printer_nozzle_spins.size())
-                               return;
+                           nozzles->values[i] = new_value;
 
-                           double new_value = m_printer_nozzle_spins[i]->GetValue();
-
-                           // Update printer config
-                           auto &printer_config = wxGetApp().preset_bundle->printers.get_edited_preset().config;
-                           auto *nozzles = printer_config.option<ConfigOptionFloats>("nozzle_diameter");
-                           if (nozzles && i < nozzles->values.size())
+                           // Sync to print preset's print_nozzle_diameters
+                           auto &print_config = wxGetApp().preset_bundle->prints.get_edited_preset().config;
+                           auto *print_nozzles = print_config.option<ConfigOptionFloats>("print_nozzle_diameters",
+                                                                                         true);
+                           if (print_nozzles)
                            {
-                               nozzles->values[i] = new_value;
-
-                               // Sync to print preset's print_nozzle_diameters
-                               auto &print_config = wxGetApp().preset_bundle->prints.get_edited_preset().config;
-                               auto *print_nozzles = print_config.option<ConfigOptionFloats>("print_nozzle_diameters",
-                                                                                             true);
-                               if (print_nozzles)
-                               {
-                                   while (print_nozzles->values.size() < nozzles->values.size())
-                                       print_nozzles->values.push_back(nozzles->values[print_nozzles->values.size()]);
-                                   if (i < print_nozzles->values.size())
-                                       print_nozzles->values[i] = new_value;
-                               }
-
-                               // Update tabs UI
-                               Tab *printer_tab = wxGetApp().get_tab(Preset::TYPE_PRINTER);
-                               if (printer_tab)
-                               {
-                                   printer_tab->reload_config();
-                                   printer_tab->update_dirty();
-                               }
-                               Tab *print_tab = wxGetApp().get_tab(Preset::TYPE_PRINT);
-                               if (print_tab)
-                               {
-                                   print_tab->reload_config();
-                                   print_tab->update_dirty();
-                               }
+                               while (print_nozzles->values.size() < nozzles->values.size())
+                                   print_nozzles->values.push_back(nozzles->values[print_nozzles->values.size()]);
+                               if (i < print_nozzles->values.size())
+                                   print_nozzles->values[i] = new_value;
                            }
 
-                           update_nozzle_undo_ui(i);
+                           // Update tabs UI
+                           Tab *printer_tab = wxGetApp().get_tab(Preset::TYPE_PRINTER);
+                           if (printer_tab)
+                           {
+                               printer_tab->reload_config();
+                               printer_tab->update_dirty();
+                           }
+                           Tab *print_tab = wxGetApp().get_tab(Preset::TYPE_PRINT);
+                           if (print_tab)
+                           {
+                               print_tab->reload_config();
+                               print_tab->update_dirty();
+                           }
+                       }
 
-                           // Also update the accordion panel's nozzle field and undo UI
-                           if (m_printer_settings_panel)
-                               m_printer_settings_panel->RefreshFromConfig();
-                       });
+                       update_nozzle_undo_ui(i);
 
-            row_sizer->Add(spin, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, em / 2);
+                       // Also update the accordion panel's nozzle field and undo UI
+                       if (m_printer_settings_panel)
+                           m_printer_settings_panel->RefreshFromConfig();
+                   });
 
-            // Create filament combo
-            PlaterPresetComboBox *combo = nullptr;
-            init_printer_filament_combo(&combo, static_cast<int>(i));
-            m_printer_filament_combos.push_back(combo);
-            row_sizer->Add(combo, 1, wxEXPAND | wxALIGN_CENTER_VERTICAL | wxRIGHT, em / 4);
+        row_sizer->Add(spin, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, em / 2);
 
-            auto *btn_save = new ScalableButton(m_printer_content, wxID_ANY, "save");
-            btn_save->SetToolTip(_L("Save current settings to preset"));
-            btn_save->Bind(wxEVT_BUTTON,
-                           [](wxCommandEvent &) { wxGetApp().get_tab(Preset::TYPE_FILAMENT)->save_preset(); });
-            row_sizer->Add(btn_save, 0, wxALIGN_CENTER_VERTICAL);
+        // Create filament combo
+        PlaterPresetComboBox *combo = nullptr;
+        init_printer_filament_combo(&combo, static_cast<int>(i));
+        m_printer_filament_combos.push_back(combo);
+        row_sizer->Add(combo, 1, wxEXPAND | wxALIGN_CENTER_VERTICAL | wxRIGHT, em / 4);
 
-            m_printer_filament_sizer->Add(row_sizer, 0, wxEXPAND | wxBOTTOM, em / 4);
+        auto *btn_save = new ScalableButton(parent, wxID_ANY, "save");
+        btn_save->SetToolTip(_L("Save current settings to preset"));
+        btn_save->Bind(wxEVT_BUTTON,
+                       [](wxCommandEvent &) { wxGetApp().get_tab(Preset::TYPE_FILAMENT)->save_preset(); });
+        m_printer_filament_save_buttons.push_back(btn_save);
+        row_sizer->Add(btn_save, 0, wxALIGN_CENTER_VERTICAL);
 
-            // Initialize undo UI state
-            update_nozzle_undo_ui(i);
-        }
+        m_extruder_rows_sizer->Add(row_sizer, 0, wxEXPAND | wxBOTTOM, em / 4);
+        m_printer_nozzle_row_sizers.push_back(row_sizer);
     }
-    else
+
+    // Update original values from current parent preset
+    m_printer_nozzle_original_values.clear();
+    for (size_t i = 0; i < extruder_count; ++i)
     {
-        // Update original values from current parent preset
-        m_printer_nozzle_original_values.clear();
-        for (size_t i = 0; i < extruder_count; ++i)
-        {
-            double original_value = 0.4;
-            if (i < original_nozzle_values.size())
-                original_value = original_nozzle_values[i];
-            m_printer_nozzle_original_values.push_back(original_value);
-        }
-
-        // Just update existing spin control values
-        for (size_t i = 0; i < m_printer_nozzle_spins.size() && i < extruder_count; ++i)
-        {
-            if (m_printer_nozzle_spins[i] && nozzle_diameter && i < nozzle_diameter->values.size())
-            {
-                m_printer_nozzle_spins[i]->SetValue(nozzle_diameter->values[i]);
-            }
-        }
-
-        // Update all undo UI states
-        update_all_nozzle_undo_ui();
+        double original_value = 0.4;
+        if (i < original_nozzle_values.size())
+            original_value = original_nozzle_values[i];
+        m_printer_nozzle_original_values.push_back(original_value);
     }
+
+    // Just update existing spin control values
+    for (size_t i = 0; i < m_printer_nozzle_spins.size() && i < extruder_count; ++i)
+    {
+        if (m_printer_nozzle_spins[i] && nozzle_diameter && i < nozzle_diameter->values.size())
+        {
+            m_printer_nozzle_spins[i]->SetValue(nozzle_diameter->values[i]);
+        }
+    }
+
+    // Update all undo UI states
+    update_all_nozzle_undo_ui();
 
     // Update all combo selections
     for (auto *combo : m_printer_filament_combos)
@@ -9100,37 +9530,74 @@ void Sidebar::UpdatePrinterFilamentCombos()
             combo->update();
     }
 
-    // The rebuilt rows change the block's minimum height; clear the cached best sizes up to the
-    // sidebar so the next layout measures the new rows.
+    // Added or removed rows change the block's minimum height; clear the cached best sizes up to
+    // the sidebar so the next layout measures the new rows.
+    UpdateExtruderRowsView();
     m_printer_content->InvalidateBestSize();
     m_printer_content->Layout();
+    // A row added or removed while the viewport keeps its height sends it no size event
+    m_extruder_rows->UpdateScrollbar();
+}
+
+void Sidebar::UpdateExtruderRowsView()
+{
+    if (m_extruder_rows == nullptr)
+        return;
+    const size_t rows = m_printer_nozzle_row_sizers.size();
+    const bool collapsible = rows > MAX_VISIBLE_EXTRUDER_ROWS;
+    // Every row is as tall as the first, its gap below included
+    const int row_height = rows > 0 ? m_printer_nozzle_row_sizers.front()->GetMinSize().y + wxGetApp().em_unit() / 4
+                                    : 0;
+    const int height = collapsible && !m_extruder_rows_expanded ? int(MAX_VISIBLE_EXTRUDER_ROWS) * row_height
+                                                                : m_extruder_rows_sizer->GetMinSize().y;
+    m_extruder_rows->SetMinSize(wxSize(-1, height));
+    m_extruder_rows->InvalidateBestSize();
+
+    const wxBitmapBundle &chevron = *get_bmp_bundle(m_extruder_rows_expanded ? "chevron_down" : "chevron_right",
+                                                    EXTRUDER_ROWS_CHEVRON_SIZE);
+    for (auto [chevron_window, label] : {std::pair(m_nozzle_pinned_chevron, m_nozzle_pinned_label),
+                                         std::pair(m_nozzle_unified_chevron, m_nozzle_unified_label)})
+    {
+        if (chevron_window == nullptr || label == nullptr)
+            continue;
+        chevron_window->SetBitmap(chevron);
+        chevron_window->Show(collapsible && label->IsShown());
+        const wxCursor cursor = collapsible ? wxCursor(wxCURSOR_HAND) : wxNullCursor;
+        chevron_window->SetCursor(cursor);
+        label->SetCursor(cursor);
+    }
+}
+
+void Sidebar::ToggleExtruderRows()
+{
+    m_extruder_rows_expanded = !m_extruder_rows_expanded;
+    get_app_config()->set("sidebar_expanded", "plater/extruder_rows", m_extruder_rows_expanded ? "1" : "0");
+    Freeze();
+    UpdateExtruderRowsView();
+    m_printer_content->InvalidateBestSize();
+    m_printer_content->Layout();
+    m_scrolled_panel->FitInside();
+    m_scrolled_panel->Layout();
+    Layout();
+    m_extruder_rows->UpdateScrollbar();
+    Thaw();
 }
 
 void Sidebar::update_nozzle_undo_ui(size_t idx)
 {
-    if (idx >= m_printer_nozzle_spins.size() || idx >= m_printer_nozzle_lock_icons.size() ||
-        idx >= m_printer_nozzle_undo_icons.size() || idx >= m_printer_nozzle_original_values.size())
+    if (idx >= m_printer_nozzle_spins.size() || idx >= m_printer_nozzle_icons.size() ||
+        idx >= m_printer_nozzle_original_values.size())
         return;
 
     auto *spin = m_printer_nozzle_spins[idx];
-    auto *lock_icon = m_printer_nozzle_lock_icons[idx];
-    auto *undo_icon = m_printer_nozzle_undo_icons[idx];
-    double original = m_printer_nozzle_original_values[idx];
-
-    if (!spin || !lock_icon || !undo_icon)
+    RowIcons *icons = m_printer_nozzle_icons[idx];
+    if (!spin || !icons)
         return;
 
-    double current = spin->GetValue();
-    bool is_modified = std::abs(current - original) > 0.001;
-
-    // Update lock icon: lock_closed when unchanged, lock_open when modified
-    lock_icon->SetBitmap(*get_bmp_bundle(is_modified ? "lock_open" : "lock_closed"));
-    lock_icon->SetToolTip(is_modified ? _L("Value differs from system preset")
-                                      : _L("Value is same as in system preset"));
-
-    // Update undo icon: dot when unchanged, undo arrow when modified
-    undo_icon->SetBitmap(*get_bmp_bundle(is_modified ? "undo" : "dot"));
-    undo_icon->SetToolTip(is_modified ? _L("Click to revert to original value") : wxString(""));
+    // Both marks against the saved value: lock_open and the undo arrow while it differs
+    const bool is_modified = std::abs(spin->GetValue() - m_printer_nozzle_original_values[idx]) > 0.001;
+    set_lock(icons, is_modified);
+    set_undo(icons, is_modified);
 }
 
 void Sidebar::update_all_nozzle_undo_ui()
@@ -9148,21 +9615,37 @@ void Sidebar::set_extruders_count(size_t count)
     // changes
     if (m_plater != nullptr)
         m_plater->update_filament_colors_in_full_config();
+    // The selector may have been built before the colour list followed
+    if (m_printer_settings_panel)
+        m_printer_settings_panel->UpdateExtruderSwatches();
     // Update the printer section's filament combos when extruder count changes
     UpdatePrinterFilamentCombos();
-    // Update the ObjectList extruder column visibility
-    if (m_object_list)
-    {
-        m_object_list->update_objects_list_extruder_column(count);
-    }
+    extruders_count_changed(count);
 }
 
-void Sidebar::update_objects_list_extruder_column(size_t count)
+// The one place an extruder-count change fans out (the Printer tab's count, a printer switch, a
+// project load, start-up): assignments above the count go to default first, then the object list's
+// column, the Overrides panel's extruder row and the role extruders' spinners follow the count
+void Sidebar::extruders_count_changed(size_t count)
+{
+    if (m_plater != nullptr)
+        m_plater->reset_extruder_assignments_above(count);
+    if (m_object_list)
+        m_object_list->update_objects_list_extruder_column(count);
+    if (m_object_settings)
+        m_object_settings->on_extruders_changed();
+    if (m_process_content != nullptr && m_process_content->settings_panel() != nullptr)
+        m_process_content->settings_panel()->UpdateExtruderRoleRanges();
+    if (Tab *tab = wxGetApp().get_tab(Preset::TYPE_PRINT))
+        tab->update_extruder_role_ranges();
+}
+
+void Sidebar::update_extruder_colors()
 {
     if (m_object_list)
-    {
-        m_object_list->update_objects_list_extruder_column(count);
-    }
+        m_object_list->update_extruder_colors();
+    if (m_printer_settings_panel)
+        m_printer_settings_panel->UpdateExtruderSwatches();
 }
 
 void Sidebar::update_presets(Preset::Type preset_type)
@@ -9179,9 +9662,7 @@ void Sidebar::update_presets(Preset::Type preset_type)
             const auto *nozzle_diameter = dynamic_cast<const ConfigOptionFloats *>(
                 wxGetApp().preset_bundle->printers.get_edited_preset().config.option("nozzle_diameter"));
             if (nozzle_diameter)
-            {
-                m_object_list->update_objects_list_extruder_column(nozzle_diameter->values.size());
-            }
+                extruders_count_changed(nozzle_diameter->values.size());
         }
         if (m_printer_settings_panel)
         {
@@ -9699,6 +10180,10 @@ bool PrintSettingsPanel::LookupRegistryRow(const std::string &registry_key, Regi
 
 bool PrinterSettingsPanel::LookupRegistryRow(const std::string &registry_key, RegistryRowInfo &out) const
 {
+    // A row of the Extruders page answers for the extruder the dump selected (BeforeRegistryRow)
+    const size_t hash = registry_key.find('#');
+    if (hash != std::string::npos && IsExtruderRowKey(registry_key.substr(0, hash)))
+        return lookup_registry_row(m_setting_controls, registry_key.substr(0, hash), out);
     return lookup_registry_row(m_setting_controls, registry_key, out);
 }
 
@@ -9740,6 +10225,55 @@ void Sidebar::dump_settings_registry(const std::string &dir)
     }
     SetEditVisibilityMode(edit_before);
     SetTabbedMode(tabbed_before);
+}
+
+#ifdef PREFLIGHT_TEST_HOOKS
+wxStaticBoxSizer *Sidebar::create_probe_group_box(wxWindow *parent, const wxString &label)
+{
+    return m_printer_settings_panel != nullptr ? m_printer_settings_panel->CreateDetachedGroupBox(parent, label)
+                                               : nullptr;
+}
+#endif
+
+void Sidebar::CommitFocusedField()
+{
+    wxWindow *focused = wxWindow::FindFocus();
+
+    // If a text input has focus, move focus away to commit the value
+    if (focused && (focused->IsKindOf(CLASSINFO(wxTextCtrl)) || focused->IsKindOf(CLASSINFO(wxSpinCtrl)) ||
+                    focused->IsKindOf(CLASSINFO(wxSpinCtrlDouble))))
+    {
+        // The object list takes the focus while it is on screen; a tab that hides it (the tabbed
+        // sidebar's Print, Filament and Printer tabs) gives it to the sidebar itself, not to a child
+        // field, so the keyboard stays on something visible
+        if (m_object_list && m_object_list->IsShownOnScreen())
+            m_object_list->SetFocus();
+        else
+            SetFocusIgnoringChildren();
+    }
+}
+
+size_t Sidebar::printer_extruders_count() const
+{
+    return m_printer_settings_panel != nullptr ? m_printer_settings_panel->GetExtrudersCount() : 1;
+}
+
+void Sidebar::select_printer_extruder(size_t idx)
+{
+    if (m_printer_settings_panel != nullptr)
+        m_printer_settings_panel->SelectExtruder(idx);
+}
+
+void Sidebar::set_printer_extruders_count(int count)
+{
+    if (m_printer_settings_panel != nullptr)
+        m_printer_settings_panel->SetExtruderCount(count);
+}
+
+void Sidebar::select_sidebar_tab(int index)
+{
+    if (m_tabbed_mode && m_tab_bar != nullptr)
+        m_tab_bar->SetActiveTab(index);
 }
 
 void Sidebar::update_sidebar_visibility()
@@ -9838,18 +10372,13 @@ void Sidebar::msw_rescale()
     if (m_object_layers)
         m_object_layers->msw_rescale();
 
-    // Update nozzle icon sizes for DPI scaling
-    wxSize icon_size = GetScaledIconSizeWx();
-    for (auto *icon : m_printer_nozzle_lock_icons)
-    {
-        if (icon)
-            icon->SetMinSize(icon_size);
-    }
-    for (auto *icon : m_printer_nozzle_undo_icons)
-    {
-        if (icon)
-            icon->SetMinSize(icon_size);
-    }
+    // Update nozzle icon sizes and the number column for DPI scaling
+    for (RowIcons *icons : m_printer_nozzle_icons)
+        rescale_icons(icons);
+    for (wxStaticText *number : m_printer_nozzle_numbers)
+        number->SetMinSize(wxSize(number->GetParent()->GetTextExtent(wxString::Format("%zu", MAX_EXTRUDERS)).x, -1));
+    if (m_extruder_rows != nullptr)
+        m_extruder_rows->msw_rescale();
 
     // Update nozzle spin control sizes for DPI scaling
     int spin_width = int(5.5 * em);
@@ -9878,6 +10407,8 @@ void Sidebar::msw_rescale()
 
     // ScalableButton doesn't have msw_rescale, only sys_color_changed
 
+    // The rows viewport's height follows the rescaled rows
+    UpdateExtruderRowsView();
     Layout();
 }
 
@@ -10041,24 +10572,28 @@ void Sidebar::sys_color_changed()
         if (spin)
             spin->SysColorsChanged();
     }
-    for (auto *icon : m_printer_nozzle_lock_icons)
+    for (RowIcons *icons : m_printer_nozzle_icons)
     {
-        if (icon)
-        {
-            icon->SetBackgroundColour(bg_color);
-            icon->Refresh();
-        }
+        icons->SetBackgroundColour(bg_color);
+        icons->Refresh();
     }
-    for (auto *icon : m_printer_nozzle_undo_icons)
+    for (wxStaticText *number : m_printer_nozzle_numbers)
+        number->SetForegroundColour(fg_color);
+    if (m_extruder_rows != nullptr)
     {
-        if (icon)
-        {
-            icon->SetBackgroundColour(bg_color);
-            icon->Refresh();
-        }
+        // Its own handler gives it the input background; the rows sit on the sidebar's
+        m_extruder_rows->sys_color_changed();
+        m_extruder_rows->SetBackgroundColour(bg_color);
+        m_extruder_rows->GetContentPanel()->SetBackgroundColour(bg_color);
+        m_extruder_rows->GetContentPanel()->SetForegroundColour(fg_color);
+        m_extruder_rows->SetTrackColour(bg_color);
     }
-    // Refresh undo UI to update icon bitmaps for new theme
+    for (wxStaticBitmap *chevron : {m_nozzle_pinned_chevron, m_nozzle_unified_chevron})
+        if (chevron != nullptr)
+            chevron->SetBackgroundColour(bg_color);
+    // Refresh undo UI and the chevrons to update icon bitmaps for new theme
     update_all_nozzle_undo_ui();
+    UpdateExtruderRowsView();
 
     // Update ScalableButton icons
     if (m_btn_save_printer)
@@ -10070,20 +10605,9 @@ void Sidebar::sys_color_changed()
     if (m_btn_save_print)
         m_btn_save_print->sys_color_changed();
 
-    // Update dynamic labels in printer section
-    if (m_printer_filament_sizer && m_printer_content)
-    {
-        // Use unified color accessor
-        wxColour label_color = SidebarColors::Foreground();
-        for (wxSizerItem *item : m_printer_filament_sizer->GetChildren())
-        {
-            if (item && item->GetWindow())
-            {
-                if (wxStaticText *label = dynamic_cast<wxStaticText *>(item->GetWindow()))
-                    label->SetForegroundColour(label_color);
-            }
-        }
-    }
+    // The nozzle/filament rows' title
+    if (m_nozzle_unified_label)
+        m_nozzle_unified_label->SetForegroundColour(SidebarColors::Foreground());
 
     if (m_object_list)
         m_object_list->sys_color_changed();

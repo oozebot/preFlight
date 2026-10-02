@@ -19,9 +19,7 @@
 #include <boost/dll/runtime_symbol_info.hpp>
 
 #include "luminary/core/Prelude.hpp"
-#if !PREFLIGHT_OPENGL_ES
 #include <boost/algorithm/string/split.hpp>
-#endif // !PREFLIGHT_OPENGL_ES
 #include "luminary/config/model/Config.hpp"
 #include "luminary/geometry/transform/Geometry.hpp"
 #include "luminary/model/scene/Model.hpp"

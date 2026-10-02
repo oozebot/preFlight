@@ -1,5 +1,44 @@
 # preFlight Changelog
 
+## v1.4.1 - A maintenance/continuation release for v1.4.0
+
+### Preview Performance Boost
+- If you have a decent GPU, try cranking up lighting to Full (shadows + AO) and Supersampling to 2x under Preferences > Performance!
+- Large previews now pan, zoom and orbit smoothly and at any layer range. The Preview draws only the toolpaths the camera can see
+  - On a 31 million segment test print, frames that took 170 to 670 ms now take 27 to 98 ms, and a step of the layer slider went from over 1 second to about 50 ms
+- The window stays responsive while a large preview loads. The longest freeze on that same print went from 15 seconds to under 1
+  - The progress bar keeps moving to 100% instead of pausing at 84%, and Cancel works the whole way
+- Full lighting with 2x supersampling renders more than 3 times faster
+
+### Sidebar with Multiple Extruders
+- The Printer panel now shows a single Extruders section with a numbered selector strip instead of stacking sections per extruder
+  - Each cell shows the extruder's filament color, and a dot to represent differences from the saved preset
+  - Pinned setting now applies to every extruder
+- With more than 3 extruders, the nozzle diameter and filament rows fold into a numbered 3-row list that scrolls. Click the chevron on the title to show them all
+- Printers are now limited to 24 extruders. A project, config or G-code file with more loads with the first 24 and a warning
+- Lowering the extruder count resets everything assigned to a removed extruder (objects, parts, height ranges and the print's own extruder settings) to its default. Previously these all printed with extruder 1
+- The Overrides panel opens and switches categories without a pause. The first open on an 8-extruder printer took 2+ seconds
+- Fixed a crash on Windows with many extruders, most often on displays scaled above 100%. The Sidebar now uses a fraction of the window resources it did
+
+### Bug Fixes / Other tweaks
+- Fixed preFlight not starting on Windows 11 with Smart App Control turned on ("Bad Image", tbbmalloc_proxy.dll) (#291)
+  - preFlight now falls back to the Windows heap whenever tbbmalloc can't be loaded, and Help > System Info shows which allocator is in use
+- Fixed MSAA having no effect, which left edges jagged and layer-line moire worse than in v1.3 (#289)
+  - New preference "Smooth layer lines" (Preferences > Performance, on by default) filters the remaining moire in the Preview
+  - An MSAA level the display doesn't offer steps down to the highest one it does instead of turning MSAA off
+  - Render settings that crash a session are lowered one step at the next start, with a notification
+- Fixed spiral vase prints missing a band of layers where a section thinner than two beads interrupted the spiral. The spiral now continues through thin sections and ramps down wherever it ends
+- Undo and redo now step through edits only. Selecting objects no longer adds undo steps
+- Edit menu items such as Undo, Redo, Delete All and Paste are greyed out when unavailable
+- Fixed menu clicks reaching whatever was under the menu, and an object added from the bed's right-click menu orbiting the camera on its first drag
+- Fixed Sidebar section headers not collapsing when clicked on macOS
+- Projects saved by other slicers now load their color changes, tool changes, pauses, custom G-code, height range modifiers, wipe tower position and combined XY shrinkage compensation
+- The Speed and Actual speed legends in the Preview now use ten evenly spaced ranges, so a color shows how fast a move is rather than how many moves share its speed (#282)
+- With dynamic overhang speeds on, walls now print at exactly the speeds entered. Supported walls and the overhang speed settings were rounded, so 25 mm/s printed as 26 mm/s
+- The NVIDIA Threaded Optimization workaround now covers preFlight-console.exe and preFlight-gcodeviewer.exe
+- The width warning breadcrumb now reports the width to three decimals
+
+
 ## v1.4.0
 
 ### RIP Slic3r! Long live Luminary!

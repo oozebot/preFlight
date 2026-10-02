@@ -10,11 +10,7 @@
 #include "DSKY/GUI/OpenGLManager.hpp"
 #include "luminary/model/scene/Model.hpp"
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 #include <wx/utils.h>
 
@@ -171,13 +167,11 @@ void GLGizmoScale3D::on_render()
 
     update_render_data();
 
-#if !PREFLIGHT_OPENGL_ES
     if (!OpenGLManager::get_gl_info().is_core_profile())
     {
         const float scale = m_imgui->get_style_scaling();
         glsafe(::glLineWidth((m_hover_id != -1) ? 2.0f * scale : 1.5f * scale));
     }
-#endif // !PREFLIGHT_OPENGL_ES
 
     const float grabber_mean_size =
         (float) ((m_bounding_box.size().x() + m_bounding_box.size().y() + m_bounding_box.size().z()) / 3.0);
@@ -185,30 +179,22 @@ void GLGizmoScale3D::on_render()
     if (m_hover_id == -1)
     {
         // draw connections
-#if PREFLIGHT_OPENGL_ES
-        GLShaderProgram *shader = m_parent.get_shader("dashed_lines");
-#else
         GLShaderProgram *shader = OpenGLManager::get_gl_info().is_core_profile()
                                       ? m_parent.get_shader("dashed_thick_lines")
                                       : m_parent.get_shader("flat");
-#endif // PREFLIGHT_OPENGL_ES
         if (shader != nullptr)
         {
             shader->start_using();
             const Camera &camera = m_parent.get_camera();
             shader->set_uniform("view_model_matrix", camera.get_view_matrix() * m_grabbers_transform);
             shader->set_uniform("projection_matrix", camera.get_projection_matrix());
-#if !PREFLIGHT_OPENGL_ES
             if (OpenGLManager::get_gl_info().is_core_profile())
             {
-#endif // !PREFLIGHT_OPENGL_ES
                 const std::array<int, 4> &viewport = camera.get_viewport();
                 shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
                 shader->set_uniform("width", 0.25f);
                 shader->set_uniform("gap_size", 0.0f);
-#if !PREFLIGHT_OPENGL_ES
             }
-#endif // !PREFLIGHT_OPENGL_ES
             if (m_grabbers[0].enabled && m_grabbers[1].enabled)
                 render_grabbers_connection(0, 1, m_grabbers[0].color);
             if (m_grabbers[2].enabled && m_grabbers[3].enabled)
@@ -228,30 +214,22 @@ void GLGizmoScale3D::on_render()
     else if ((m_hover_id == 0 || m_hover_id == 1) && m_grabbers[0].enabled && m_grabbers[1].enabled)
     {
         // draw connections
-#if PREFLIGHT_OPENGL_ES
-        GLShaderProgram *shader = m_parent.get_shader("dashed_lines");
-#else
         GLShaderProgram *shader = OpenGLManager::get_gl_info().is_core_profile()
                                       ? m_parent.get_shader("dashed_thick_lines")
                                       : m_parent.get_shader("flat");
-#endif // PREFLIGHT_OPENGL_ES
         if (shader != nullptr)
         {
             shader->start_using();
             const Camera &camera = m_parent.get_camera();
             shader->set_uniform("view_model_matrix", camera.get_view_matrix() * m_grabbers_transform);
             shader->set_uniform("projection_matrix", camera.get_projection_matrix());
-#if !PREFLIGHT_OPENGL_ES
             if (OpenGLManager::get_gl_info().is_core_profile())
             {
-#endif // !PREFLIGHT_OPENGL_ES
                 const std::array<int, 4> &viewport = camera.get_viewport();
                 shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
                 shader->set_uniform("width", 0.25f);
                 shader->set_uniform("gap_size", 0.0f);
-#if !PREFLIGHT_OPENGL_ES
             }
-#endif // !PREFLIGHT_OPENGL_ES
             render_grabbers_connection(0, 1, m_grabbers[0].color);
             shader->stop_using();
         }
@@ -269,30 +247,22 @@ void GLGizmoScale3D::on_render()
     else if ((m_hover_id == 2 || m_hover_id == 3) && m_grabbers[2].enabled && m_grabbers[3].enabled)
     {
         // draw connections
-#if PREFLIGHT_OPENGL_ES
-        GLShaderProgram *shader = m_parent.get_shader("dashed_lines");
-#else
         GLShaderProgram *shader = OpenGLManager::get_gl_info().is_core_profile()
                                       ? m_parent.get_shader("dashed_thick_lines")
                                       : m_parent.get_shader("flat");
-#endif // PREFLIGHT_OPENGL_ES
         if (shader != nullptr)
         {
             shader->start_using();
             const Camera &camera = m_parent.get_camera();
             shader->set_uniform("view_model_matrix", camera.get_view_matrix() * m_grabbers_transform);
             shader->set_uniform("projection_matrix", camera.get_projection_matrix());
-#if !PREFLIGHT_OPENGL_ES
             if (OpenGLManager::get_gl_info().is_core_profile())
             {
-#endif // !PREFLIGHT_OPENGL_ES
                 const std::array<int, 4> &viewport = camera.get_viewport();
                 shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
                 shader->set_uniform("width", 0.25f);
                 shader->set_uniform("gap_size", 0.0f);
-#if !PREFLIGHT_OPENGL_ES
             }
-#endif // !PREFLIGHT_OPENGL_ES
             render_grabbers_connection(2, 3, m_grabbers[2].color);
             shader->stop_using();
         }
@@ -310,30 +280,22 @@ void GLGizmoScale3D::on_render()
     else if ((m_hover_id == 4 || m_hover_id == 5) && m_grabbers[4].enabled && m_grabbers[5].enabled)
     {
         // draw connections
-#if PREFLIGHT_OPENGL_ES
-        GLShaderProgram *shader = m_parent.get_shader("dashed_lines");
-#else
         GLShaderProgram *shader = OpenGLManager::get_gl_info().is_core_profile()
                                       ? m_parent.get_shader("dashed_thick_lines")
                                       : m_parent.get_shader("flat");
-#endif // PREFLIGHT_OPENGL_ES
         if (shader != nullptr)
         {
             shader->start_using();
             const Camera &camera = m_parent.get_camera();
             shader->set_uniform("view_model_matrix", camera.get_view_matrix() * m_grabbers_transform);
             shader->set_uniform("projection_matrix", camera.get_projection_matrix());
-#if !PREFLIGHT_OPENGL_ES
             if (OpenGLManager::get_gl_info().is_core_profile())
             {
-#endif // !PREFLIGHT_OPENGL_ES
                 const std::array<int, 4> &viewport = camera.get_viewport();
                 shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
                 shader->set_uniform("width", 0.25f);
                 shader->set_uniform("gap_size", 0.0f);
-#if !PREFLIGHT_OPENGL_ES
             }
-#endif // !PREFLIGHT_OPENGL_ES
             render_grabbers_connection(4, 5, m_grabbers[4].color);
             shader->stop_using();
         }
@@ -351,30 +313,22 @@ void GLGizmoScale3D::on_render()
     else if (m_hover_id >= 6)
     {
         // draw connections
-#if PREFLIGHT_OPENGL_ES
-        GLShaderProgram *shader = m_parent.get_shader("dashed_lines");
-#else
         GLShaderProgram *shader = OpenGLManager::get_gl_info().is_core_profile()
                                       ? m_parent.get_shader("dashed_thick_lines")
                                       : m_parent.get_shader("flat");
-#endif // PREFLIGHT_OPENGL_ES
         if (shader != nullptr)
         {
             shader->start_using();
             const Camera &camera = m_parent.get_camera();
             shader->set_uniform("view_model_matrix", camera.get_view_matrix() * m_grabbers_transform);
             shader->set_uniform("projection_matrix", camera.get_projection_matrix());
-#if !PREFLIGHT_OPENGL_ES
             if (OpenGLManager::get_gl_info().is_core_profile())
             {
-#endif // !PREFLIGHT_OPENGL_ES
                 const std::array<int, 4> &viewport = camera.get_viewport();
                 shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
                 shader->set_uniform("width", 0.25f);
                 shader->set_uniform("gap_size", 0.0f);
-#if !PREFLIGHT_OPENGL_ES
             }
-#endif // !PREFLIGHT_OPENGL_ES
             render_grabbers_connection(6, 7, m_drag_color);
             render_grabbers_connection(7, 8, m_drag_color);
             render_grabbers_connection(8, 9, m_drag_color);

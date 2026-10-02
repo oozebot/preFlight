@@ -393,7 +393,7 @@ Luminary::PrintEstimatedStatistics::ETimeMode convert(const ETimeMode &mode)
 }
 
 GCodeInputData convert(const Luminary::GCodeProcessorResult &result, const std::vector<std::string> &str_tool_colors,
-                       const std::vector<std::string> &str_color_print_colors, const Viewer &viewer,
+                       const std::vector<std::string> &str_color_print_colors,
                        std::function<void(float)> progress_callback)
 {
     GCodeInputData ret;

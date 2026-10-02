@@ -21,6 +21,7 @@
 #include "luminary/core/I18N.hpp"
 
 #include "3mf.hpp"
+#include "ThreeMfAuxParts.hpp"
 
 #include <limits>
 #include <stdexcept>
@@ -402,6 +403,16 @@ static std::vector<ColorMixingRecipe> parse_color_mixing_palette(const std::stri
     }
     return palette;
 }
+
+namespace
+{
+// Thrown when an auxiliary part holds a value the model cannot take; the part is reported and nothing from it is
+// applied.
+struct aux_part_rejected : std::runtime_error
+{
+    using std::runtime_error::runtime_error;
+};
+} // namespace
 
 // Base class with error messages management
 class _3MF_Base
@@ -898,6 +909,25 @@ bool _3MF_Importer::_load_model_from_file(const std::string &filename, Model &mo
         return false;
     }
 
+    // Each auxiliary part kind is read from one entry: the one with the own prefix, otherwise the first one with
+    // another writer's prefix. The other entries of that kind are counted and left unread.
+    std::vector<std::string> entry_names(num_entries);
+    for (mz_uint i = 0; i < num_entries; ++i)
+    {
+        if (mz_zip_reader_file_stat(&archive, i, &stat))
+        {
+            entry_names[i] = stat.m_filename;
+            std::replace(entry_names[i].begin(), entry_names[i].end(), '\\', '/');
+        }
+    }
+    const AuxPartSelection aux_parts = select_aux_parts(entry_names);
+    if (aux_parts.duplicates > 0)
+    {
+        for (unsigned d = 0; d < aux_parts.duplicates; ++d)
+            DBG_COUNT_LOAD("THREEMF_AUX_PART_DUPLICATE");
+        add_error(std::to_string(aux_parts.duplicates) + " duplicate auxiliary archive part(s) left unread");
+    }
+
     // we then loop again the entries to read other files stored in the archive
     for (mz_uint i = 0; i < num_entries; ++i)
     {
@@ -905,6 +935,17 @@ bool _3MF_Importer::_load_model_from_file(const std::string &filename, Model &mo
         {
             std::string name(stat.m_filename);
             std::replace(name.begin(), name.end(), '\\', '/');
+
+            AuxPartKind aux_kind = AuxPartKind::None;
+            for (size_t k = 0; k < aux_parts.chosen.size(); ++k)
+            {
+                if (aux_parts.chosen[k] == int(i))
+                {
+                    aux_kind = static_cast<AuxPartKind>(k + 1);
+                    if (aux_parts.foreign[k])
+                        DBG_COUNT_LOAD("THREEMF_AUX_PART_FOREIGN");
+                }
+            }
 
             // A broken auxiliary part is reported and skipped; only the model part is fatal.
             try
@@ -914,12 +955,12 @@ bool _3MF_Importer::_load_model_from_file(const std::string &filename, Model &mo
                     // extract the layer heights profile file
                     _extract_layer_heights_profile_config_from_archive(archive, stat);
                 }
-                else if (boost::algorithm::iequals(name, CUT_INFORMATION_FILE))
+                else if (aux_kind == AuxPartKind::CutInformation)
                 {
                     // extract the cut information file
                     _extract_cut_information_from_archive(archive, stat, config_substitutions);
                 }
-                else if (boost::algorithm::iequals(name, LAYER_CONFIG_RANGES_FILE))
+                else if (aux_kind == AuxPartKind::LayerConfigRanges)
                 {
                     // extract the layer config ranges file
                     _extract_layer_config_ranges_from_archive(archive, stat, config_substitutions);
@@ -929,12 +970,12 @@ bool _3MF_Importer::_load_model_from_file(const std::string &filename, Model &mo
                     // extract the print config file
                     _extract_print_config_from_archive(archive, stat, config, config_substitutions, filename);
                 }
-                else if (boost::algorithm::iequals(name, CUSTOM_GCODE_PER_PRINT_Z_FILE))
+                else if (aux_kind == AuxPartKind::CustomGCodePerPrintZ)
                 {
                     // extract the custom G-code per print Z file
                     _extract_custom_gcode_per_print_z_from_archive(archive, stat);
                 }
-                else if (boost::algorithm::iequals(name, WIPE_TOWER_INFORMATION_FILE))
+                else if (aux_kind == AuxPartKind::WipeTowerInformation)
                 {
                     // extract wipe tower information file
                     _extract_wipe_tower_information_from_archive(archive, stat, model);
@@ -953,6 +994,11 @@ bool _3MF_Importer::_load_model_from_file(const std::string &filename, Model &mo
                 {
                     _extract_embossed_svg_shape_file(name, archive, stat);
                 }
+            }
+            catch (const aux_part_rejected &e)
+            {
+                DBG_COUNT_LOAD("THREEMF_AUX_PART_REJECTED");
+                add_error("Rejected archive part " + name + ": " + e.what());
             }
             catch (const std::exception &e)
             {
@@ -1359,6 +1405,8 @@ void _3MF_Importer::_extract_cut_information_from_archive(mz_zip_archive &archiv
         pt::ptree objects_tree;
         pt::read_xml(iss, objects_tree);
 
+        // Parsed locally and merged once the whole part parsed, so a part that fails applies nothing
+        IdToCutObjectInfoMap cut_object_infos;
         for (const auto &object : objects_tree.get_child("objects"))
         {
             pt::ptree object_tree = object.second;
@@ -1369,8 +1417,8 @@ void _3MF_Importer::_extract_cut_information_from_archive(mz_zip_archive &archiv
                 continue;
             }
 
-            IdToCutObjectInfoMap::iterator object_item = m_cut_object_infos.find(obj_idx);
-            if (object_item != m_cut_object_infos.end())
+            IdToCutObjectInfoMap::iterator object_item = cut_object_infos.find(obj_idx);
+            if (object_item != cut_object_infos.end())
             {
                 add_error("Found duplicated cut_object_id");
                 continue;
@@ -1400,14 +1448,20 @@ void _3MF_Importer::_extract_cut_information_from_archive(mz_zip_archive &archiv
                                                               connector_tree.get<int>("<xmlattr>.type"),
                                                               connector_tree.get<float>("<xmlattr>.r_tolerance"),
                                                               connector_tree.get<float>("<xmlattr>.h_tolerance")};
+                        // The type is cast to CutConnectorType when the part is applied
+                        if (connector.type < int(CutConnectorType::Plug) ||
+                            connector.type > int(CutConnectorType::Undef))
+                            throw aux_part_rejected("connector type " + std::to_string(connector.type) +
+                                                    " is out of range");
                         connectors.emplace_back(connector);
                     }
                 }
             }
 
             CutObjectInfo cut_info{cut_id, connectors};
-            m_cut_object_infos.insert({obj_idx, cut_info});
+            cut_object_infos.insert({obj_idx, cut_info});
         }
+        m_cut_object_infos.merge(cut_object_infos);
     }
 }
 
@@ -1440,6 +1494,23 @@ void _3MF_Importer::_extract_print_config_from_archive(mz_zip_archive &archive, 
                                        << "\"";
             post_process->values.clear();
             m_post_process_stripped = true;
+        }
+
+        // Where a print goes is the reader's own physical printer: host settings in a project's
+        // printer config are dropped, so a project can never create or select a printer to send to
+        bool host_settings_dropped = false;
+        for (const char *key : {"print_host", "printhost_apikey", "printhost_cafile"})
+            if (auto *host_setting = config.opt<ConfigOptionString>(key);
+                host_setting != nullptr && !host_setting->value.empty())
+            {
+                host_setting->value.clear();
+                host_settings_dropped = true;
+            }
+        if (host_settings_dropped)
+        {
+            BOOST_LOG_TRIVIAL(warning) << "Security: dropped the printer host settings of 3MF file \""
+                                       << archive_filename << "\"";
+            DBG_COUNT_LOAD("PROJECT_HOST_SETTINGS_STRIPPED");
         }
 
         // Preprocessing scripts are Python file paths - flag for trust dialog in the UI.
@@ -1575,6 +1646,8 @@ void _3MF_Importer::_extract_layer_config_ranges_from_archive(mz_zip_archive &ar
         pt::ptree objects_tree;
         pt::read_xml(iss, objects_tree);
 
+        // Parsed locally and merged once the whole part parsed, so a part that fails applies no range
+        IdToLayerConfigRangesMap layer_config_ranges;
         for (const auto &object : objects_tree.get_child("objects"))
         {
             pt::ptree object_tree = object.second;
@@ -1585,8 +1658,8 @@ void _3MF_Importer::_extract_layer_config_ranges_from_archive(mz_zip_archive &ar
                 continue;
             }
 
-            IdToLayerConfigRangesMap::iterator object_item = m_layer_config_ranges.find(obj_idx);
-            if (object_item != m_layer_config_ranges.end())
+            IdToLayerConfigRangesMap::iterator object_item = layer_config_ranges.find(obj_idx);
+            if (object_item != layer_config_ranges.end())
             {
                 add_error("Found duplicated layer config range");
                 continue;
@@ -1618,8 +1691,9 @@ void _3MF_Importer::_extract_layer_config_ranges_from_archive(mz_zip_archive &ar
             }
 
             if (!config_ranges.empty())
-                m_layer_config_ranges.insert({obj_idx, std::move(config_ranges)});
+                layer_config_ranges.insert({obj_idx, std::move(config_ranges)});
         }
+        m_layer_config_ranges.merge(layer_config_ranges);
     }
 }
 
@@ -1727,10 +1801,13 @@ void _3MF_Importer::_extract_custom_gcode_per_print_z_from_archive(::mz_zip_arch
         pt::ptree main_tree;
         pt::read_xml(iss, main_tree);
 
-        if (main_tree.front().first != "custom_gcodes_per_print_z")
+        // A document with no element has no front()
+        if (main_tree.empty() || main_tree.front().first != "custom_gcodes_per_print_z")
             return;
 
-        for (CustomGCode::Info &info : m_model->get_custom_gcode_per_print_z_vector())
+        // Filled locally and assigned once the whole part parsed, so a part that fails leaves the model untouched
+        std::vector<CustomGCode::Info> gcodes_per_bed = m_model->get_custom_gcode_per_print_z_vector();
+        for (CustomGCode::Info &info : gcodes_per_bed)
             info.gcodes.clear();
 
         for (const auto &bed_block : main_tree)
@@ -1746,7 +1823,9 @@ void _3MF_Importer::_extract_custom_gcode_per_print_z_from_archive(::mz_zip_arch
             {
                 // Probably an old project with no bed_idx info. Imagine that we saw 0.
             }
-            if (bed_idx >= int(m_model->get_custom_gcode_per_print_z_vector().size()))
+            if (bed_idx < 0)
+                throw aux_part_rejected("bed_idx " + std::to_string(bed_idx) + " is out of range");
+            if (bed_idx >= int(gcodes_per_bed.size()))
                 continue;
 
             pt::ptree code_tree = bed_block.second;
@@ -1757,10 +1836,11 @@ void _3MF_Importer::_extract_custom_gcode_per_print_z_from_archive(::mz_zip_arch
                 {
                     pt::ptree tree = code.second;
                     std::string mode = tree.get<std::string>("<xmlattr>.value");
-                    m_model->get_custom_gcode_per_print_z_vector()[bed_idx].mode =
-                        mode == CustomGCode::SingleExtruderMode  ? CustomGCode::Mode::SingleExtruder
-                        : mode == CustomGCode::MultiAsSingleMode ? CustomGCode::Mode::MultiAsSingle
-                                                                 : CustomGCode::Mode::MultiExtruder;
+                    gcodes_per_bed[bed_idx].mode = mode == CustomGCode::SingleExtruderMode
+                                                       ? CustomGCode::Mode::SingleExtruder
+                                                   : mode == CustomGCode::MultiAsSingleMode
+                                                       ? CustomGCode::Mode::MultiAsSingle
+                                                       : CustomGCode::Mode::MultiExtruder;
                 }
                 if (code.first != "code")
                     continue;
@@ -1787,13 +1867,19 @@ void _3MF_Importer::_extract_custom_gcode_per_print_z_from_archive(::mz_zip_arch
                 }
                 else
                 {
-                    type = static_cast<CustomGCode::Type>(tree.get<int>("<xmlattr>.type"));
+                    const int type_value = tree.get<int>("<xmlattr>.type");
+                    if (type_value < int(CustomGCode::ColorChange) || type_value > int(CustomGCode::Custom))
+                        throw aux_part_rejected("type " + std::to_string(type_value) + " is out of range");
+                    type = static_cast<CustomGCode::Type>(type_value);
                     extra = tree.get<std::string>("<xmlattr>.extra");
                 }
-                m_model->get_custom_gcode_per_print_z_vector()[bed_idx].gcodes.push_back(
-                    CustomGCode::Item{print_z, type, extruder, color, extra});
+                // A tool change names a 1-based extruder; other items may hold 0
+                if (extruder < 0 || (type == CustomGCode::ToolChange && extruder < 1))
+                    throw aux_part_rejected("extruder " + std::to_string(extruder) + " is out of range");
+                gcodes_per_bed[bed_idx].gcodes.push_back(CustomGCode::Item{print_z, type, extruder, color, extra});
             }
         }
+        m_model->get_custom_gcode_per_print_z_vector() = std::move(gcodes_per_bed);
     }
 }
 
@@ -1817,6 +1903,8 @@ void _3MF_Importer::_extract_wipe_tower_information_from_archive(::mz_zip_archiv
         pt::ptree main_tree;
         pt::read_xml(iss, main_tree);
 
+        // Applied to a copy and assigned once every block parsed, so a part that fails leaves the model untouched
+        std::vector<ModelWipeTower> towers = model.get_wipe_tower_vector();
         for (const auto &bed_block : main_tree)
         {
             if (bed_block.first != "wipe_tower_information")
@@ -1832,21 +1920,24 @@ void _3MF_Importer::_extract_wipe_tower_information_from_archive(::mz_zip_archiv
                 {
                     // Probably an old project with no bed_idx info - pretend that we saw 0.
                 }
-                if (bed_idx >= int(m_model->get_wipe_tower_vector().size()))
+                if (bed_idx < 0)
+                    throw aux_part_rejected("bed_idx " + std::to_string(bed_idx) + " is out of range");
+                if (bed_idx >= int(towers.size()))
                     continue;
                 double pos_x = bed_block.second.get<double>("<xmlattr>.position_x");
                 double pos_y = bed_block.second.get<double>("<xmlattr>.position_y");
                 double rot_deg = bed_block.second.get<double>("<xmlattr>.rotation_deg");
-                model.get_wipe_tower_vector()[bed_idx].position = Vec2d(pos_x, pos_y);
-                model.get_wipe_tower_vector()[bed_idx].rotation = rot_deg;
+                towers[bed_idx].position = Vec2d(pos_x, pos_y);
+                towers[bed_idx].rotation = rot_deg;
             }
             catch (const boost::property_tree::ptree_bad_path &)
             {
-                // Handles missing node or attribute.
+                // A missing node or attribute skips the whole part through the caller's handler
                 add_error("Error while reading wipe tower information.");
-                return;
+                throw;
             }
         }
+        model.get_wipe_tower_vector() = towers;
     }
 }
 

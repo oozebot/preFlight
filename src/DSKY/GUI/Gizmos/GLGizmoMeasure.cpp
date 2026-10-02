@@ -22,11 +22,7 @@
 
 #include <numeric>
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 #include <tbb/parallel_for.h>
 
@@ -1434,17 +1430,11 @@ void GLGizmoMeasure::render_dimensioning()
 
         const Transform3d ss_to_ndc_matrix = TransformHelper::ndc_to_ss_matrix_inverse(viewport);
 
-#if !PREFLIGHT_OPENGL_ES
         if (OpenGLManager::get_gl_info().is_core_profile())
         {
-#endif // !PREFLIGHT_OPENGL_ES
             shader->stop_using();
 
-#if PREFLIGHT_OPENGL_ES
-            shader = m_parent.get_shader("dashed_lines");
-#else
-        shader = m_parent.get_shader("dashed_thick_lines");
-#endif // PREFLIGHT_OPENGL_ES
+            shader = m_parent.get_shader("dashed_thick_lines");
             if (shader == nullptr)
                 return;
 
@@ -1453,11 +1443,9 @@ void GLGizmoMeasure::render_dimensioning()
             shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
             shader->set_uniform("width", 1.0f);
             shader->set_uniform("gap_size", 0.0f);
-#if !PREFLIGHT_OPENGL_ES
         }
         else
             glsafe(::glLineWidth(2.0f * m_imgui->get_style_scaling()));
-#endif // !PREFLIGHT_OPENGL_ES
 
         // stem
         shader->set_uniform("view_model_matrix",
@@ -1469,10 +1457,8 @@ void GLGizmoMeasure::render_dimensioning()
         m_dimensioning.line.set_color(ColorRGBA::WHITE());
         m_dimensioning.line.render();
 
-#if !PREFLIGHT_OPENGL_ES
         if (OpenGLManager::get_gl_info().is_core_profile())
         {
-#endif // !PREFLIGHT_OPENGL_ES
             shader->stop_using();
 
             shader = m_parent.get_shader("flat");
@@ -1480,11 +1466,9 @@ void GLGizmoMeasure::render_dimensioning()
                 return;
 
             shader->start_using();
-#if !PREFLIGHT_OPENGL_ES
         }
         else
             glsafe(::glLineWidth(1.0f * m_imgui->get_style_scaling()));
-#endif // !PREFLIGHT_OPENGL_ES
 
         // arrow 1
         shader->set_uniform("view_model_matrix",
@@ -1779,17 +1763,11 @@ void GLGizmoMeasure::render_dimensioning()
         }
 
         const Camera &camera = m_parent.get_camera();
-#if !PREFLIGHT_OPENGL_ES
         if (OpenGLManager::get_gl_info().is_core_profile())
         {
-#endif // !PREFLIGHT_OPENGL_ES
             shader->stop_using();
 
-#if PREFLIGHT_OPENGL_ES
-            shader = m_parent.get_shader("dashed_lines");
-#else
-        shader = m_parent.get_shader("dashed_thick_lines");
-#endif // PREFLIGHT_OPENGL_ES
+            shader = m_parent.get_shader("dashed_thick_lines");
             if (shader == nullptr)
                 return;
 
@@ -1799,21 +1777,17 @@ void GLGizmoMeasure::render_dimensioning()
             shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
             shader->set_uniform("width", 1.0f);
             shader->set_uniform("gap_size", 0.0f);
-#if !PREFLIGHT_OPENGL_ES
         }
         else
             glsafe(::glLineWidth(2.0f * m_imgui->get_style_scaling()));
-#endif // !PREFLIGHT_OPENGL_ES
 
         // arc
         shader->set_uniform("projection_matrix", camera.get_projection_matrix());
         shader->set_uniform("view_model_matrix", camera.get_view_matrix() * Geometry::translation_transform(center));
         m_dimensioning.arc.render();
 
-#if !PREFLIGHT_OPENGL_ES
         if (OpenGLManager::get_gl_info().is_core_profile())
         {
-#endif // !PREFLIGHT_OPENGL_ES
             shader->stop_using();
 
             shader = m_parent.get_shader("flat");
@@ -1821,11 +1795,9 @@ void GLGizmoMeasure::render_dimensioning()
                 return;
 
             shader->start_using();
-#if !PREFLIGHT_OPENGL_ES
         }
         else
             glsafe(::glLineWidth(1.0f * m_imgui->get_style_scaling()));
-#endif // !PREFLIGHT_OPENGL_ES
 
         // arrows
         auto render_arrow =

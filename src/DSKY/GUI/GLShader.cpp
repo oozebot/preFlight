@@ -6,11 +6,7 @@
 ///|/ preFlight is based on PrusaSlicer and released under AGPLv3 or higher
 ///|/
 #include <boost/nowide/fstream.hpp>
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 #include <boost/log/trivial.hpp>
 #include <cassert>
 #include <algorithm>

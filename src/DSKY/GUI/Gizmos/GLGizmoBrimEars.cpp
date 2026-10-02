@@ -6,11 +6,7 @@
 ///|/
 // Ported from OrcaSlicer (originally from BambuStudio)
 #include "GLGizmoBrimEars.hpp"
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 #include "DSKY/GUI/3DScene.hpp"
 #include "DSKY/GUI/GLCanvas3D.hpp"
 #include "DSKY/GUI/Camera.hpp"

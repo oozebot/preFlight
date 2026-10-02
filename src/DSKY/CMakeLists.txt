@@ -42,6 +42,10 @@ set(PREFLIGHT_GUI_SOURCES
     GUI/GLShadersManager.cpp
     GUI/ScenePasses.hpp
     GUI/ScenePasses.cpp
+    GUI/RenderDiagnostics.hpp
+    GUI/RenderDiagnostics.cpp
+    GUI/RenderCrashGuard.hpp
+    GUI/RenderCrashGuard.cpp
     GUI/GLShader.cpp
     GUI/GLShader.hpp    
     GUI/EventTypes.hpp
@@ -145,6 +149,8 @@ set(PREFLIGHT_GUI_SOURCES
     GUI/GUI_Preview.hpp
     GUI/GUI_App.cpp
     GUI/GUI_App.hpp
+    GUI/GuiBudget.cpp
+    GUI/GuiBudget.hpp
     GUI/DarkMode.cpp
     GUI/DarkMode.hpp
     GUI/GUI_Utils.cpp
@@ -359,10 +365,18 @@ set(PREFLIGHT_GUI_SOURCES
     GUI/Widgets/StaticBox.hpp
     GUI/Widgets/FlatStaticBox.cpp
     GUI/Widgets/FlatStaticBox.hpp
+    GUI/Widgets/CategoryBar.cpp
+    GUI/Widgets/CategoryBar.hpp
     GUI/Widgets/CollapsibleSection.cpp
     GUI/Widgets/CollapsibleSection.hpp
+    GUI/Widgets/GdiCache.cpp
+    GUI/Widgets/GdiCache.hpp
     GUI/Widgets/LabeledBorderPanel.cpp
     GUI/Widgets/LabeledBorderPanel.hpp
+    GUI/Widgets/RedrawLock.cpp
+    GUI/Widgets/RedrawLock.hpp
+    GUI/Widgets/RowIcons.cpp
+    GUI/Widgets/RowIcons.hpp
     GUI/Widgets/SpinInput.cpp
     GUI/Widgets/SpinInput.hpp
     GUI/Widgets/SwitchButton.cpp
@@ -465,6 +479,12 @@ else() # Linux
     list(APPEND PREFLIGHT_GUI_SOURCES
             GUI/WebViewPlatformUtilsLinux.cpp
     )
+endif ()
+
+# The GUI test hooks, in debug builds only (PREFLIGHT_TEST_HOOKS)
+if (PREFLIGHT_TEST_HOOKS)
+    list(APPEND PREFLIGHT_GUI_SOURCES GUI/GuiTestHooks.cpp GUI/GuiTestHooks.hpp GUI/RenderPassTimer.cpp
+                                      GUI/RenderPassTimer.hpp)
 endif ()
 
 add_library(dsky STATIC ${PREFLIGHT_GUI_SOURCES})

@@ -108,6 +108,8 @@ class Preview : public wxPanel
 
     bool m_loaded{false};
     bool m_preview_gpu_loaded{false};
+    // The loaded result's moves were kept because a slice was in flight: the next load frees them
+    bool m_preview_release_deferred{false};
     // Bed whose result the GPU holds; another bed's freed result cannot be shown from memory.
     int m_preview_gpu_bed{-1};
     int m_last_layer_pos{-1};
@@ -149,6 +151,11 @@ public:
 
     void load_print(bool keep_z_range = false);
     void reload_print();
+    // The tool palette and the color print palette (filament colors, then the color changes) a G-code load of the
+    // active bed's result is given, as color strings
+    void get_color_strings(std::vector<std::string> &tool_colors, std::vector<std::string> &color_print_colors);
+    // The times the last release of a loaded result's moves took on its worker thread: the frees, the heap compaction
+    static void last_release_times(float &free_ms, float &heapmin_ms);
 
     void msw_rescale();
 
@@ -166,6 +173,13 @@ public:
     void set_keep_current_preview_type(bool value) { m_keep_current_preview_type = value; }
 
     void set_layers_slider_values_range(int bottom, int top);
+
+#ifdef PREFLIGHT_TEST_HOOKS
+    // The moves slider's thumbs set to these positions as a drag sets them, followed by the drag's thumb move handler
+    void test_set_moves_slider_span(int lower_pos, int higher_pos);
+    // The moves slider's thumb positions and its first and last positions
+    void test_moves_slider_positions(int &lower_pos, int &higher_pos, int &min_pos, int &max_pos) const;
+#endif
 
 private:
     bool init(wxWindow *parent, Bed3D &bed, Model *model);
@@ -201,4 +215,3 @@ private:
 };
 
 } // namespace DSKY
-

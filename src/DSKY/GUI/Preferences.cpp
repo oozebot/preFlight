@@ -31,6 +31,9 @@
 #include "GLCanvas3D.hpp"
 #include "ConfigWizard.hpp"
 #include "Search.hpp"
+#include "GUI_Init.hpp"
+#include "OpenGLManager.hpp"
+#include "RenderDiagnostics.hpp"
 
 #include "Widgets/ScrollablePanel.hpp"
 #include "Widgets/SpinInput.hpp"
@@ -147,6 +150,180 @@ namespace DSKY
 {
 using namespace Luminary;
 
+// The Performance tab's keys: its rows write AppConfig and apply as they change
+static const char *const s_performance_keys[] = {"canvas_lighting_quality", "canvas_msaa",
+                                                 "canvas_ssaa_scale",       "toolpath_prefilter",
+                                                 "preview_detail",          "cpu_max_slicing_threads",
+                                                 "cpu_pcores_only",         "cpu_nvidia_disable_threaded_opt"};
+
+// Whether this process started with the P-core preference on: the worker pool keeps the size it started
+// with, so turning the preference off only reaches every core after a restart
+static bool pcores_only_at_launch()
+{
+    static const bool at_launch = get_app_config()->get_bool("cpu_pcores_only");
+    return at_launch;
+}
+
+// The thread cap and the P-core preference as AppConfig holds them, applied together
+static void apply_cpu_preferences()
+{
+    const AppConfig *config = get_app_config();
+    const int cap = std::atoi(config->get("cpu_max_slicing_threads").c_str());
+    Luminary::apply_cpu_policy(cap > 0 ? std::size_t(cap) : 0, config->get_bool("cpu_pcores_only"));
+}
+
+// A render fallback reason (a stable English key from the canvas) as the user reads it; an unknown key as is
+static wxString render_reason_text(const std::string &reason)
+{
+    if (reason.empty())
+        return wxString();
+    if (reason == "clipping plane active")
+        return _L("clipping plane active");
+    if (reason == "painting tool open")
+        return _L("painting tool open");
+    if (reason == "multiple bed overview")
+        return _L("multiple bed overview");
+    if (reason == "nothing to shade")
+        return _L("nothing to shade");
+    if (reason == "not supported by this OpenGL driver")
+        return _L("not supported by this OpenGL driver");
+    if (reason == "viewport too small")
+        return _L("viewport too small");
+    if (reason == "software renderer")
+        return _L("software renderer");
+    if (reason == "limited by the GPU's maximum texture size")
+        return _L("limited by the GPU's maximum texture size");
+    const std::string shader_prefix = "shader ";
+    const std::string shader_suffix = " failed to compile";
+    if (reason.size() > shader_prefix.size() + shader_suffix.size() && reason.rfind(shader_prefix, 0) == 0 &&
+        reason.compare(reason.size() - shader_suffix.size(), shader_suffix.size(), shader_suffix) == 0)
+        return format_wxstr(_L("shader %1% failed to compile"),
+                            reason.substr(shader_prefix.size(),
+                                          reason.size() - shader_prefix.size() - shader_suffix.size()));
+    // A target allocation failure: the cause the user can act on, the size and details stay in System Info
+    if (reason.find("out of GPU memory") != std::string::npos)
+        return _L("out of GPU memory");
+    if (reason.rfind("render target could not be created", 0) == 0 ||
+        reason.rfind("render targets could not be created", 0) == 0)
+        return _L("render target could not be created");
+    return from_u8(reason);
+}
+
+// "In effect: <value>", with the reason in parentheses when there is one
+static wxString in_effect_text(const wxString &value, const wxString &reason)
+{
+    return reason.empty() ? format_wxstr(_L("In effect: %1%"), value)
+                          : format_wxstr(_L("In effect: %1% (%2%)"), value, reason);
+}
+
+// The MSAA preference as a request before the platform adjusts it: -1 Auto, 0 off, else samples
+static int msaa_preference(const AppConfig *config, bool force_auto)
+{
+    const std::string value = config->get("canvas_msaa");
+    if (force_auto)
+        return -1;
+    if (value == "0")
+        return 0;
+    if (value == "2" || value == "4" || value == "8" || value == "16")
+        return std::atoi(value.c_str());
+    return -1;
+}
+
+// A line under a render row, filled by refresh_in_effect_lines() with what the last frame used
+static Line in_effect_line(wxStaticText **text)
+{
+    Line line{"", ""};
+    line.widget = [text](wxWindow *parent)
+    {
+        // Never empty: the line is laid out with the height of one line of text
+        *text = new wxStaticText(parent, wxID_ANY, " ");
+        (*text)->SetFont(wxGetApp().small_font());
+        (*text)->SetForegroundColour(UIColors::SecondaryText());
+        auto *sizer = new wxBoxSizer(wxHORIZONTAL);
+        sizer->Add(*text);
+        return sizer;
+    };
+    return line;
+}
+
+void PreferencesDialog::refresh_in_effect_lines()
+{
+    if (m_lighting_in_effect == nullptr || m_msaa_in_effect == nullptr || m_ssaa_in_effect == nullptr)
+        return;
+    Plater *plater = wxGetApp().plater();
+    GLCanvas3D *canvas = plater != nullptr ? plater->get_current_canvas3D() : nullptr;
+    const RenderFrameInfo *frame = canvas == nullptr
+                                       ? nullptr
+                                       : RenderDiagnostics::last_frame(
+                                             canvas->canvas_role() == GLCanvas3D::CanvasRole::Preview ? "Preview"
+                                                                                                      : "Prepare");
+    wxString lighting;
+    wxString msaa;
+    wxString ssaa;
+    if (frame != nullptr)
+    {
+        const wxString tier = frame->lighting_effective == "Full"       ? _L("Full")
+                              : frame->lighting_effective == "Enhanced" ? _L("Enhanced")
+                              : frame->lighting_effective == "Basic"    ? _L("Basic")
+                                                                        : from_u8(frame->lighting_effective);
+        lighting = in_effect_text(tier, render_reason_text(frame->lighting_reason));
+
+        // MSAA: the samples the 3D scene was drawn with, and why they differ from the preference
+        const AppConfig *config = get_app_config();
+        const bool force_auto = wxGetApp().init_params != nullptr && wxGetApp().init_params->opengl_aa;
+        const int running = OpenGLManager::msaa_requested();
+        const int preference = msaa_preference(config, force_auto);
+        wxString msaa_reason;
+        if (OpenGLManager::resolve_msaa_request(config, force_auto, false) != running)
+            msaa_reason = _L("change applies after preFlight restarts");
+        else if (frame->msaa_scene <= 1 && frame->msaa_window > 1 && frame->ssaa_effective > 1.0)
+            msaa_reason = _L("replaced by supersampling");
+        else if (preference < 0 && running == 0)
+            msaa_reason = _L("software renderer");
+        else if ((preference < 0 && running == 2) || (preference > 4 && running == 4))
+            msaa_reason = _L("limited over Remote Desktop");
+        else if (running != 0 && frame->msaa_window <= 1)
+            msaa_reason = _L("not available on this display");
+        else if (running > 0 && frame->msaa_window < running)
+            msaa_reason = _L("limited to the display's maximum");
+        msaa = in_effect_text(frame->msaa_scene > 1 ? wxString::Format("%dx", frame->msaa_scene) : _L("Off"),
+                              msaa_reason);
+
+        ssaa = in_effect_text(frame->ssaa_effective > 1.0 ? wxString::Format("%.3gx", frame->ssaa_effective)
+                                                          : _L("Off"),
+                              render_reason_text(frame->ssaa_reason));
+    }
+
+    bool changed = false;
+    for (const auto &[text, label] : {std::pair<wxStaticText *, wxString>{m_lighting_in_effect, lighting},
+                                      std::pair<wxStaticText *, wxString>{m_msaa_in_effect, msaa},
+                                      std::pair<wxStaticText *, wxString>{m_ssaa_in_effect, ssaa}})
+    {
+        // The dialog's theming resets every text's colour, so it is set again here
+        text->SetFont(wxGetApp().small_font());
+        text->SetForegroundColour(UIColors::SecondaryText());
+        const wxString shown = label.empty() ? wxString(" ") : label;
+        if (text->GetLabelText() != shown)
+        {
+            text->SetLabelText(shown);
+            changed = true;
+        }
+    }
+    if (changed && m_optgroup_cpu && m_optgroup_cpu->custom_ctrl)
+        m_optgroup_cpu->custom_ctrl->Refresh();
+}
+
+void PreferencesDialog::schedule_in_effect_refresh()
+{
+    if (m_lighting_in_effect == nullptr)
+        return;
+    if (auto *canvas = wxGetApp().plater() ? wxGetApp().plater()->get_current_canvas3D() : nullptr)
+        canvas->request_extra_frame();
+    // A few refreshes over a second: the next frame, and a Full tier that compiles its shaders first
+    m_in_effect_ticks = 4;
+    m_in_effect_timer.start(250);
+}
+
 PreferencesDialog::PreferencesDialog(wxWindow *parent)
     : DPIDialog(parent, wxID_ANY, _L("Preferences"), wxDefaultPosition, wxDefaultSize,
                 wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER)
@@ -183,6 +360,13 @@ PreferencesDialog::PreferencesDialog(wxWindow *parent)
     SetSize(sz);
 
     m_highlighter.set_timer_owner(this, 0);
+    m_in_effect_timer.setCallback(
+        [this]()
+        {
+            refresh_in_effect_lines();
+            if (--m_in_effect_ticks <= 0)
+                m_in_effect_timer.stop();
+        });
 
 #ifdef _WIN32
     // Only apply dark mode if the window handle is valid (prevents GCodeViewer hang)
@@ -200,9 +384,89 @@ static void update_color(wxColourPickerCtrl *color_pckr, const wxColour &color)
     }
 }
 
+void PreferencesDialog::refresh_performance_fields()
+{
+    if (!m_optgroup_cpu)
+        return;
+    const AppConfig *app_config = get_app_config();
+    auto set_enum = [this](const char *key, const t_config_enum_values &map, const std::string &value, int fallback)
+    {
+        auto it = map.find(value);
+        if (Field *field = m_optgroup_cpu->get_field(key))
+            field->set_value(boost::any(it != map.end() ? it->second : fallback), false);
+    };
+    set_enum("cpu_max_slicing_threads", s_keys_map_CpuMaxThreadsMode, app_config->get("cpu_max_slicing_threads"),
+             CpuMaxThreadsAuto);
+    const std::string lighting = app_config->get("canvas_lighting_quality");
+    if (Field *field = m_optgroup_cpu->get_field("canvas_lighting_quality"))
+        field->set_value(boost::any(int(lighting == "basic"      ? CanvasLightingBasic
+                                        : lighting == "enhanced" ? CanvasLightingEnhanced
+                                        : lighting == "full"     ? CanvasLightingFull
+                                                                 : CanvasLightingAuto)),
+                         false);
+    set_enum("canvas_msaa", s_keys_map_CanvasMsaaMode, app_config->get("canvas_msaa"), CanvasMsaaAuto);
+    set_enum("canvas_ssaa_scale", s_keys_map_CanvasSsaaMode, app_config->get("canvas_ssaa_scale"), CanvasSsaaOff);
+    set_enum("preview_detail", s_keys_map_PreviewDetailLevel, app_config->get("preview_detail"), PreviewDetail10M);
+    for (const char *key : {"toolpath_prefilter", "cpu_pcores_only", "cpu_nvidia_disable_threaded_opt"})
+        if (Field *field = m_optgroup_cpu->get_field(key))
+            field->set_value(boost::any(app_config->get_bool(key)), false);
+}
+
+void PreferencesDialog::restore_performance_snapshot()
+{
+    AppConfig *app_config = get_app_config();
+    std::vector<std::string> changed;
+    for (const auto &[key, value] : m_perf_restart_originals)
+        if (app_config->get(key) != value)
+        {
+            app_config->set(key, value);
+            changed.push_back(key);
+        }
+    if (changed.empty())
+        return;
+    auto was_changed = [&changed](const char *key)
+    {
+        return std::find(changed.begin(), changed.end(), key) != changed.end();
+    };
+    if (was_changed("cpu_max_slicing_threads") || was_changed("cpu_pcores_only"))
+        apply_cpu_preferences();
+    if (was_changed("cpu_nvidia_disable_threaded_opt"))
+    {
+        const bool on = app_config->get_bool("cpu_nvidia_disable_threaded_opt");
+        const bool written = Luminary::set_nvidia_threaded_optimization(on);
+        app_config->set("cpu_nvidia_profile_revision", on && written ? Luminary::NVIDIA_PROFILE_REVISION : "");
+    }
+    if (was_changed("canvas_lighting_quality"))
+        wxGetApp().request_phong_shaders();
+    // The editor re-processed with the value Cancel undoes, so it re-processes with the restored one; the G-code
+    // viewer reloads only on OK
+    if (was_changed("preview_detail") && wxGetApp().is_editor() && wxGetApp().plater() != nullptr)
+        wxGetApp().plater()->preview_detail_changed();
+    if (auto *canvas = wxGetApp().plater() ? wxGetApp().plater()->get_current_canvas3D() : nullptr)
+        canvas->request_extra_frame();
+    refresh_performance_fields();
+}
+
 void PreferencesDialog::show(const std::string &highlight_opt_key /*= std::string()*/,
                              const std::string &tab_name /*= std::string()*/)
 {
+    // The NVIDIA checkbox shows the driver profile, which the NVIDIA Control Panel changes too; AppConfig follows
+    // it. When the driver cannot be read, the checkbox shows AppConfig.
+    if (m_optgroup_cpu && m_optgroup_cpu->get_field("cpu_nvidia_disable_threaded_opt") != nullptr)
+        if (const std::optional<bool> disabled = Luminary::nvidia_threaded_optimization_disabled())
+            get_app_config()->set("cpu_nvidia_disable_threaded_opt", *disabled ? "1" : "0");
+
+    // The Performance tab applies as it changes, so its values at this opening are what Cancel restores and
+    // what OK compares against; the fields show AppConfig, not a value an earlier opening left in them
+    m_perf_restart_originals.clear();
+    for (const char *key : s_performance_keys)
+        m_perf_restart_originals[key] = get_app_config()->get(key);
+    refresh_performance_fields();
+    refresh_in_effect_lines();
+    schedule_in_effect_refresh();
+    m_recreate_GUI = false;
+    m_restart_required = false;
+
     int selected_tab = 0;
     for (; selected_tab < int(tabs->GetPageCount()); selected_tab++)
         if (tabs->GetPageText(selected_tab) == _(tab_name))
@@ -382,13 +646,6 @@ void PreferencesDialog::build()
     SetFont(font);
 
     auto app_config = get_app_config();
-
-    // Restart-bound performance settings write through to AppConfig on change, so
-    // their pre-dialog values are captured here; accept() diffs against them to
-    // trigger the restart flow or restore them when the user declines.
-    m_perf_restart_originals.clear();
-    for (const char *key : {"canvas_msaa", "cpu_max_slicing_threads", "cpu_pcores_only"})
-        m_perf_restart_originals[key] = app_config->get(key);
 
     // The owner-drawn Notebook paints its own tab strip from the theme palette, so the
     // tabs follow the active theme on every platform (native wxNotebook tabs ignore our colours).
@@ -824,14 +1081,17 @@ void PreferencesDialog::build()
 
         // create_downloader_path_sizer();
         create_settings_font_widget();
+    }
 
-        // CPU tab: thread cap (stability trade) plus P-core preference on hybrid Intel (can also improve
-        // slicing speed by avoiding E-cores stalling parallel synchronization points).
+    // Performance tab, in the editor and the G-code viewer. Both have the render rows and Preview Detail; the
+    // editor also has the CPU rows (thread cap, and the P-core preference on CPUs with performance and efficient
+    // cores) and the NVIDIA row.
+    {
         m_optgroup_cpu = create_options_tab(L("Performance"), tabs);
         // Write through directly to AppConfig + live-apply on each change. This matches the pattern
         // used by "use_custom_toolbar_size" in the GUI tab and bypasses the m_values staging map, which
         // for whatever reason was not persisting these two keys in practice.
-        m_optgroup_cpu->on_change = [](t_config_option_key opt_key, boost::any value)
+        m_optgroup_cpu->on_change = [this](t_config_option_key opt_key, boost::any value)
         {
             auto *app_config = get_app_config();
             if (opt_key == "canvas_lighting_quality")
@@ -849,11 +1109,11 @@ void PreferencesDialog::build()
                     app_config->set(opt_key, it->second);
                     // Request shader compilation for the next render pass (needs GL context)
                     if (it->second == "enhanced" || it->second == "auto" || it->second == "full")
-                    {
                         wxGetApp().request_phong_shaders();
-                        if (auto *canvas = wxGetApp().plater() ? wxGetApp().plater()->get_current_canvas3D() : nullptr)
-                            canvas->request_extra_frame();
-                    }
+                    // Every tier, Basic included, shows on the next frame
+                    if (auto *canvas = wxGetApp().plater() ? wxGetApp().plater()->get_current_canvas3D() : nullptr)
+                        canvas->request_extra_frame();
+                    schedule_in_effect_refresh();
                 }
                 return;
             }
@@ -866,7 +1126,11 @@ void PreferencesDialog::build()
                 };
                 auto it = msaa_keys.find(val_int);
                 if (it != msaa_keys.end())
+                {
                     app_config->set(opt_key, it->second);
+                    // The line says the change waits for a restart
+                    schedule_in_effect_refresh();
+                }
                 return;
             }
             if (opt_key == "canvas_ssaa_scale")
@@ -883,7 +1147,16 @@ void PreferencesDialog::build()
                     app_config->set(opt_key, it->second);
                     if (auto *canvas = wxGetApp().plater() ? wxGetApp().plater()->get_current_canvas3D() : nullptr)
                         canvas->request_extra_frame();
+                    schedule_in_effect_refresh();
                 }
+                return;
+            }
+            if (opt_key == "toolpath_prefilter")
+            {
+                app_config->set(opt_key, boost::any_cast<bool>(value) ? "1" : "0");
+                // The canvas reads the key every frame
+                if (auto *canvas = wxGetApp().plater() ? wxGetApp().plater()->get_current_canvas3D() : nullptr)
+                    canvas->request_extra_frame();
                 return;
             }
             if (opt_key == "preview_detail")
@@ -894,8 +1167,14 @@ void PreferencesDialog::build()
                     {PreviewDetail20M, "20000000"}, {PreviewDetailFull, "0"},
                 };
                 auto it = detail_keys.find(val_int);
-                if (it != detail_keys.end())
+                if (it != detail_keys.end() && app_config->get(opt_key) != it->second)
+                {
                     app_config->set(opt_key, it->second);
+                    // The editor re-processes now; the G-code viewer reloads its file when the dialog closes with
+                    // OK, since a reload blocks the window
+                    if (wxGetApp().is_editor() && wxGetApp().plater() != nullptr)
+                        wxGetApp().plater()->preview_detail_changed();
+                }
                 return;
             }
             if (opt_key == "cpu_max_slicing_threads")
@@ -906,17 +1185,7 @@ void PreferencesDialog::build()
                     if (item.second == val_int)
                     {
                         app_config->set(opt_key, item.first);
-                        int max_threads = atoi(item.first.c_str());
-                        if (max_threads > 0)
-                        {
-                            Luminary::thread_count = static_cast<std::size_t>(max_threads);
-                            Luminary::enforce_thread_count(static_cast<std::size_t>(max_threads));
-                        }
-                        else
-                        {
-                            Luminary::thread_count.reset();
-                            Luminary::enforce_thread_count(0);
-                        }
+                        apply_cpu_preferences();
                         return;
                     }
                 }
@@ -926,10 +1195,7 @@ void PreferencesDialog::build()
             {
                 const bool on = boost::any_cast<bool>(value);
                 app_config->set(opt_key, on ? "1" : "0");
-                if (on)
-                    Luminary::apply_pcore_only_affinity();
-                else
-                    Luminary::restore_full_cpu_affinity();
+                apply_cpu_preferences();
                 return;
             }
             if (opt_key == "cpu_nvidia_disable_threaded_opt")
@@ -939,11 +1205,21 @@ void PreferencesDialog::build()
                 // Writes the NVIDIA per-app profile setting; takes effect on the next preFlight launch.
                 // If the driver refuses or silently ignores the write, users can follow the manual
                 // instructions printed directly below the checkbox.
-                (void) Luminary::set_nvidia_threaded_optimization(on);
+                const bool written = Luminary::set_nvidia_threaded_optimization(on);
+                // Marks a successful enable as current so startup does not rewrite it; a failed enable is retried
+                // at the next launch.
+                app_config->set("cpu_nvidia_profile_revision", on && written ? Luminary::NVIDIA_PROFILE_REVISION : "");
+                if (!written)
+                    MessageDialog(this,
+                                  _L("The NVIDIA driver did not accept the change. Apply it by hand with the steps "
+                                     "below the checkbox."),
+                                  wxString(PREFLIGHT_APP_NAME), wxICON_WARNING | wxOK)
+                        .ShowModal();
                 return;
             }
         };
 
+        if (is_editor)
         {
             // Resolve the stored AppConfig value to an enum id. If the stored string does not match
             // any dropdown entry (custom CLI value, corrupted config), fall back to Auto.
@@ -968,20 +1244,30 @@ void PreferencesDialog::build()
                                                    {"16", "16"},
                                                    {"24", "24"},
                                                    {"32", "32"}});
-        }
 
 #ifdef PREFLIGHT_CPU_AFFINITY_SUPPORTED
-        const bool hybrid = Luminary::has_hybrid_cpu_topology();
-        append_bool_option(m_optgroup_cpu, "cpu_pcores_only",
-                           hybrid ? L("Prefer Performance cores")
-                                  : L("Prefer Performance cores (not available: no hybrid cores detected)"),
-                           L("On Intel hybrid CPUs (12th gen and later), restricts preFlight to the Performance cores "
-                             "only. This can improve slicing speed by avoiding the slower Efficient cores at parallel "
-                             "synchronization points, and also helps on CPUs that crash under heavy mixed-core load."),
-                           app_config->get_bool("cpu_pcores_only"));
+            const bool hybrid = Luminary::has_hybrid_cpu_topology();
+            append_bool_option(
+                m_optgroup_cpu, "cpu_pcores_only",
+                hybrid ? L("Prefer Performance cores")
+                       : L("Prefer Performance cores (not available: no hybrid cores detected)"),
+#ifdef __linux__
+                // Linux lists the core types only for Intel CPUs
+                L("On CPUs with performance and efficient cores, for example Intel 12th gen and later, restricts "
+                  "preFlight to the performance cores. This can improve slicing speed by avoiding the slower "
+                  "efficient cores at parallel synchronization points, and also helps on CPUs that crash under "
+                  "heavy mixed-core load. On Linux the core types are detected on Intel CPUs only."),
+#else
+                L("On CPUs with performance and efficient cores, for example Intel 12th gen and later, restricts "
+                  "preFlight to the performance cores. This can improve slicing speed by avoiding the slower "
+                  "efficient cores at parallel synchronization points, and also helps on CPUs that crash under "
+                  "heavy mixed-core load."),
+#endif
+                app_config->get_bool("cpu_pcores_only"));
 #endif // PREFLIGHT_CPU_AFFINITY_SUPPORTED
 
-        m_optgroup_cpu->append_separator();
+            m_optgroup_cpu->append_separator();
+        }
 
         {
             const std::string current = app_config->get("canvas_lighting_quality");
@@ -1005,6 +1291,7 @@ void PreferencesDialog::build()
                  {"basic", L("Basic")},
                  {"enhanced", L("Enhanced")},
                  {"full", L("Full (shadows + AO)")}});
+            m_optgroup_cpu->append_line(in_effect_line(&m_lighting_in_effect));
         }
 
         {
@@ -1016,9 +1303,9 @@ void PreferencesDialog::build()
 
             append_enum_option<CanvasMsaaMode>(
                 m_optgroup_cpu, "canvas_msaa", L("Anti-aliasing (MSAA)"),
-                L("Controls multi-sample anti-aliasing for smooth edges. Auto tries the highest "
-                  "level your GPU supports. Higher values give smoother edges but use more GPU memory. "
-                  "Requires application restart to take effect."),
+                L("Multi-sample anti-aliasing smooths the edges of objects and toolpaths. Auto uses up to 8x. "
+                  "Higher values use more GPU memory. While supersampling is enabled it replaces MSAA for the "
+                  "3D scene. Changing this setting restarts preFlight."),
                 new ConfigOptionEnum<CanvasMsaaMode>(current_mode),
                 {{"auto", L("Auto (detect GPU)")},
                  {"0", L("Off")},
@@ -1026,6 +1313,7 @@ void PreferencesDialog::build()
                  {"4", L("4x")},
                  {"8", L("8x")},
                  {"16", L("16x")}});
+            m_optgroup_cpu->append_line(in_effect_line(&m_msaa_in_effect));
         }
 
         {
@@ -1038,13 +1326,19 @@ void PreferencesDialog::build()
 
             append_enum_option<CanvasSsaaMode>(
                 m_optgroup_cpu, "canvas_ssaa_scale", L("Supersampling (SSAA)"),
-                L("Renders the 3D scene at a higher resolution and downsamples it, reducing the "
-                  "aliasing bands visible in dense G-code previews. Sharper than MSAA but "
-                  "considerably more demanding; intended for powerful GPUs. While enabled it "
-                  "supersedes MSAA for the scene. Takes effect immediately."),
+                L("Renders the 3D scene at a higher resolution and averages it down. This smooths shading and fine "
+                  "detail, such as distant layer lines, as well as edges. Costs up to 4x the GPU time and memory. "
+                  "While enabled it replaces MSAA for the 3D scene. Takes effect immediately."),
                 new ConfigOptionEnum<CanvasSsaaMode>(current_mode),
                 {{"off", L("Off")}, {"1.5", L("1.5x")}, {"2", L("2x")}});
+            m_optgroup_cpu->append_line(in_effect_line(&m_ssaa_in_effect));
         }
+
+        append_bool_option(m_optgroup_cpu, "toolpath_prefilter", L("Smooth layer lines"),
+                           L("Filters the shading of wall layers that are only a few pixels tall, so layer lines in "
+                             "the preview do not flicker or form moire patterns. Costs GPU time in side and "
+                             "isometric views, most on slower GPUs. Takes effect immediately."),
+                           app_config->get_bool("toolpath_prefilter"));
 
         // Preview detail level
         {
@@ -1056,41 +1350,41 @@ void PreferencesDialog::build()
 
             append_enum_option<PreviewDetailLevel>(
                 m_optgroup_cpu, "preview_detail", L("Preview Detail"),
-                L("Controls how much detail is computed for the G-code preview on large prints. "
-                  "Lower values reduce memory usage and speed up slicing at the cost of less detailed "
-                  "preview data. Does not affect print output, G-code, or time estimation."),
+                L("Limits the G-code moves the preview computes in full detail. Above the limit, the "
+                  "acceleration and deceleration points used by the speed view are skipped, which saves memory "
+                  "and processing time on large prints. Does not affect print output, G-code or time estimation. "
+                  "Changing it re-processes the current G-code."),
                 new ConfigOptionEnum<PreviewDetailLevel>(current_level),
                 {{"1000000",
 #if defined(__linux__) && defined(__aarch64__)
-                  L("1M segments (default)")
+                  L("1M moves (default)")
 #else
-                  L("1M segments")
+                  L("1M moves")
 #endif
                  },
-                 {"5000000", L("5M segments")},
+                 {"5000000", L("5M moves")},
                  {"10000000",
 #if defined(__linux__) && defined(__aarch64__)
-                  L("10M segments")
+                  L("10M moves")
 #else
-                  L("10M segments (default)")
+                  L("10M moves (default)")
 #endif
                  },
-                 {"20000000", L("20M segments")},
+                 {"20000000", L("20M moves")},
                  {"0", L("Full (no limit)")}});
         }
 
-        // NVIDIA GPU: optional per-app driver profile fix. Only shown when an NVIDIA driver is
+        // NVIDIA GPU: optional per-app driver profile fix. Only shown in the editor when an NVIDIA driver is
         // actually present on the machine, so AMD/Intel users don't see an irrelevant option.
-        const bool has_nvidia = Luminary::nvidia_driver_available();
-        if (has_nvidia)
+        if (is_editor && Luminary::nvidia_driver_available())
         {
             m_optgroup_cpu->append_separator();
             append_bool_option(m_optgroup_cpu, "cpu_nvidia_disable_threaded_opt",
                                L("Disable NVIDIA OpenGL Threaded Optimization"),
                                L("Writes a per-application NVIDIA driver profile for preFlight.exe that turns off "
                                  "OpenGL Threaded Optimization. This is the other common cause of slicing crashes "
-                                 "on Windows. Takes effect on the next preFlight launch. Unchecking restores the "
-                                 "driver default."),
+                                 "on Windows. Takes effect on the next preFlight launch. Unchecking removes the "
+                                 "setting from the profile, so the driver's global setting applies again."),
                                false);
 
             Line nvidia_instructions{"", ""};
@@ -1121,25 +1415,7 @@ void PreferencesDialog::build()
         // Re-enable change events on enum dropdowns. Choice::set_selection() (called during BUILD)
         // sets m_disable_change_event = true and never clears it, so without this call the dropdown's
         // on_change never fires. This mirrors the explicit set_value pattern notify_release uses.
-        {
-            const std::string current = app_config->get("cpu_max_slicing_threads");
-            auto it = s_keys_map_CpuMaxThreadsMode.find(current);
-            int val_int = it != s_keys_map_CpuMaxThreadsMode.end() ? it->second : CpuMaxThreadsAuto;
-            if (Field *field = m_optgroup_cpu->get_field("cpu_max_slicing_threads"))
-                field->set_value(boost::any(val_int), false);
-        }
-        {
-            const std::string current = app_config->get("canvas_lighting_quality");
-            int val_int = CanvasLightingAuto;
-            if (current == "basic")
-                val_int = CanvasLightingBasic;
-            else if (current == "enhanced")
-                val_int = CanvasLightingEnhanced;
-            else if (current == "full")
-                val_int = CanvasLightingFull;
-            if (Field *field = m_optgroup_cpu->get_field("canvas_lighting_quality"))
-                field->set_value(boost::any(val_int), false);
-        }
+        refresh_performance_fields();
         {
             const std::string current = app_config->get("canvas_mouse_scheme");
             int val_int = CanvasMouseSchemeDefault;
@@ -1149,34 +1425,11 @@ void PreferencesDialog::build()
             if (Field *field = m_optgroup_camera->get_field("canvas_mouse_scheme"))
                 field->set_value(boost::any(val_int), false);
         }
-        {
-            const std::string current = app_config->get("canvas_msaa");
-            auto it = s_keys_map_CanvasMsaaMode.find(current);
-            int val_int = it != s_keys_map_CanvasMsaaMode.end() ? it->second : CanvasMsaaAuto;
-            if (Field *field = m_optgroup_cpu->get_field("canvas_msaa"))
-                field->set_value(boost::any(val_int), false);
-        }
-        {
-            const std::string current = app_config->get("canvas_ssaa_scale");
-            auto it = s_keys_map_CanvasSsaaMode.find(current);
-            int val_int = it != s_keys_map_CanvasSsaaMode.end() ? it->second : CanvasSsaaOff;
-            if (Field *field = m_optgroup_cpu->get_field("canvas_ssaa_scale"))
-                field->set_value(boost::any(val_int), false);
-        }
+    }
 
-        {
-            const std::string current = app_config->get("preview_detail");
-            auto it = s_keys_map_PreviewDetailLevel.find(current);
-            int val_int = it != s_keys_map_PreviewDetailLevel.end() ? it->second : PreviewDetail10M;
-            if (Field *field = m_optgroup_cpu->get_field("preview_detail"))
-                field->set_value(boost::any(val_int), false);
-        }
-
-        if (has_nvidia)
-        {
-            if (Field *field = m_optgroup_cpu->get_field("cpu_nvidia_disable_threaded_opt"))
-                field->set_value(boost::any(app_config->get_bool("cpu_nvidia_disable_threaded_opt")), false);
-        }
+    if (is_editor)
+    {
+        (void) pcores_only_at_launch();
 
 #ifdef PREFLIGHT_CPU_AFFINITY_SUPPORTED
         if (!Luminary::has_hybrid_cpu_topology())
@@ -1749,8 +2002,8 @@ void PreferencesDialog::accept(wxEvent &)
         }
     }
 
-    // MSAA lives in the GL canvas pixel format, so recreating the GUI (same flow
-    // as a theme change) is what actually applies it.
+    // MSAA lives in the GL canvas pixel format, which is fixed once the shared context exists, so it
+    // takes a new process: GUI_App restarts rather than recreating the windows.
     const bool msaa_changed = m_perf_restart_originals.count("canvas_msaa") != 0 &&
                               get_app_config()->get("canvas_msaa") != m_perf_restart_originals["canvas_msaa"];
 
@@ -1766,28 +2019,29 @@ void PreferencesDialog::accept(wxEvent &)
         if (dialog.ShowModal() == wxID_YES)
         {
             m_recreate_GUI = true;
+            m_restart_required = msaa_changed;
         }
         else
         {
             for (const std::string &option : options_to_recreate_GUI)
                 m_values.erase(option);
             if (msaa_changed)
+            {
                 get_app_config()->set("canvas_msaa", m_perf_restart_originals["canvas_msaa"]);
+                refresh_performance_fields();
+            }
         }
     }
 
-    // The CPU thread cap and core affinity apply once at process start, before the
-    // TBB workers exist; recreating the GUI cannot re-apply them, so a declined or
-    // accepted change here only takes effect on the next launch.
-    for (const char *key : {"cpu_max_slicing_threads", "cpu_pcores_only"})
+    // The thread cap and the P-core preference applied as they changed. The one part that waits for a
+    // restart: in a process that started with P-cores only, the worker pool was sized for them, so turning
+    // the preference off reaches every core only in the next process.
+    if (pcores_only_at_launch() && !get_app_config()->get_bool("cpu_pcores_only") &&
+        m_perf_restart_originals["cpu_pcores_only"] != get_app_config()->get("cpu_pcores_only"))
     {
-        if (m_perf_restart_originals.count(key) != 0 && get_app_config()->get(key) != m_perf_restart_originals[key])
-        {
-            MessageDialog dialog(nullptr, _L("This change will take effect the next time you start the application."),
-                                 wxString(PREFLIGHT_APP_NAME), wxICON_INFORMATION | wxOK);
-            dialog.ShowModal();
-            break;
-        }
+        MessageDialog dialog(nullptr, _L("This change will take effect the next time you start the application."),
+                             wxString(PREFLIGHT_APP_NAME), wxICON_INFORMATION | wxOK);
+        dialog.ShowModal();
     }
 
     auto app_config = get_app_config();
@@ -1809,10 +2063,24 @@ void PreferencesDialog::accept(wxEvent &)
 
     // Label colors and mode palette are hardcoded
 
+    // The G-code viewer reloads its file with a changed Preview Detail once the dialog is gone; a restart or
+    // a recreated window has no file to reload
+    const bool reload_gcode = !wxGetApp().is_editor() && !m_recreate_GUI &&
+                              m_perf_restart_originals.count("preview_detail") != 0 &&
+                              get_app_config()->get("preview_detail") != m_perf_restart_originals["preview_detail"];
+
     EndModal(wxID_OK);
 
     wxGetApp().update_ui_from_settings();
     clear_cache();
+
+    if (reload_gcode)
+        wxGetApp().CallAfter(
+            []()
+            {
+                if (wxGetApp().plater() != nullptr)
+                    wxGetApp().plater()->preview_detail_changed();
+            });
 }
 
 void PreferencesDialog::revert(wxEvent &)
@@ -1878,6 +2146,8 @@ void PreferencesDialog::revert(wxEvent &)
         }
     }
 
+    restore_performance_snapshot();
+
     clear_cache();
     EndModal(wxID_CANCEL);
 }
@@ -1899,6 +2169,8 @@ void PreferencesDialog::on_sys_color_changed()
 #ifdef _WIN32
     wxGetApp().UpdateDlgDarkUI(this);
 #endif
+    // The "In effect" lines keep the secondary text colour of the new palette
+    refresh_in_effect_lines();
 }
 
 void PreferencesDialog::layout()

@@ -198,18 +198,17 @@ endif ()
 
 target_link_libraries(preFlight PRIVATE luminary libcereal stb_image)
 
-# The proxy patches the CRT heap only when it is loaded statically (its DllMain checks the
-# load reason), so it must be linked into the shim executables; preFlight.dll is loaded via
-# LoadLibrary and a proxy imported there never engages. The /INCLUDE forces the otherwise
-# unreferenced proxy symbol so the linker keeps the import.
+# The shim executables do not import the proxy. PREFLIGHT_TBBMALLOC_PROXY makes each shim load
+# tbbmalloc_proxy.dll from its own directory at start-up and engage the replacement; when the DLL
+# cannot be loaded or refuses, the process runs on the C runtime allocator instead of failing to
+# start. The library lookup only locates the deps install directory for the DLL copy below.
 function(preflight_link_tbbmalloc_proxy target)
     if (WIN32 AND PREFLIGHT_TBBMALLOC_PROXY)
         # The deps build installs the shared malloc libraries into the isolated
         # tbbmalloc-proxy/ prefix subdirectory (see deps/+TBBMallocProxy).
         find_library(TBBMALLOC_PROXY_LIBRARY NAMES tbbmalloc_proxy
                      PATH_SUFFIXES tbbmalloc-proxy/lib REQUIRED)
-        target_link_libraries(${target} PRIVATE ${TBBMALLOC_PROXY_LIBRARY})
-        target_link_options(${target} PRIVATE "/INCLUDE:__TBB_malloc_proxy")
+        target_compile_definitions(${target} PRIVATE PREFLIGHT_TBBMALLOC_PROXY)
     endif ()
 endfunction()
 
@@ -292,8 +291,8 @@ if (WIN32)
     preflight_link_tbbmalloc_proxy(preFlight_app_gcodeviewer)
 
     if (PREFLIGHT_TBBMALLOC_PROXY)
-        # The executables import tbbmalloc_proxy.dll, so it and its tbbmalloc.dll must
-        # sit next to them. All three shims share one output directory; copy once.
+        # The shims load tbbmalloc_proxy.dll from their own directory, so it and its
+        # tbbmalloc.dll must sit next to them. All three shims share one output directory; copy once.
         get_filename_component(_tbbmalloc_proxy_libdir "${TBBMALLOC_PROXY_LIBRARY}" DIRECTORY)
         find_file(TBBMALLOC_DLL NAMES tbbmalloc.dll
                   HINTS "${_tbbmalloc_proxy_libdir}/../bin" "${_tbbmalloc_proxy_libdir}" REQUIRED)

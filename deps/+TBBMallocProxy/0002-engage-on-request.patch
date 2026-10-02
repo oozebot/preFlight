@@ -1,0 +1,68 @@
+--- a/src/tbbmalloc_proxy/proxy.cpp
++++ b/src/tbbmalloc_proxy/proxy.cpp
+@@ -809,6 +809,35 @@
+     }
+ }
+ 
++// Runs the replacement once. Returns 1 when ucrtbase.dll received it, 0 when it was skipped
++// (a precheck refused it or ucrtbase.dll is not loaded), -1 when TBB_MALLOC_DISABLE_REPLACEMENT
++// is set. Later calls return the first result and change nothing. Not thread-safe: it runs from
++// DllMain under the loader lock, or from the host before it starts other threads.
++static int engageReplacement()
++{
++    static bool engaged = false;
++    static int result = 0;
++
++    if (engaged)
++        return result;
++    engaged = true;
++
++    if (tbb::detail::r1::GetBoolEnvironmentVariable("TBB_MALLOC_DISABLE_REPLACEMENT")) {
++        result = -1;
++        return result;
++    }
++
++    doMallocReplacement();
++
++    // SkipReplacement clears doFuncReplacement for a module that did not take the replacement
++    for (size_t i=0; i<arrayLength(modules_to_replace); i++)
++        if (!strcmp(modules_to_replace[i].name, "ucrtbase.dll")) {
++            result = modules_to_replace[i].doFuncReplacement ? 1 : 0;
++            break;
++        }
++    return result;
++}
++
+ #endif // !__TBB_WIN8UI_SUPPORT
+ 
+ #if defined(_MSC_VER) && !defined(__INTEL_COMPILER)
+@@ -822,10 +851,7 @@
+ 
+     if ( callReason==DLL_PROCESS_ATTACH && reserved && hInst ) {
+ #if !__TBB_WIN8UI_SUPPORT
+-        if (!tbb::detail::r1::GetBoolEnvironmentVariable("TBB_MALLOC_DISABLE_REPLACEMENT"))
+-        {
+-            doMallocReplacement();
+-        }
++        engageReplacement();
+ #endif // !__TBB_WIN8UI_SUPPORT
+     }
+ 
+@@ -842,4 +868,17 @@
+ 
+ }
+ 
++// DllMain replaces the allocator only on a static load. A host that loads the proxy with
++// LoadLibrary calls this instead, before it starts other threads. Returns 1 when ucrtbase.dll
++// took the replacement, 0 when it was skipped, -1 when TBB_MALLOC_DISABLE_REPLACEMENT is set.
++// A second call returns the first call's result.
++extern "C" __declspec(dllexport) int TBB_malloc_proxy_engage()
++{
++#if !__TBB_WIN8UI_SUPPORT
++    return engageReplacement();
++#else
++    return 0;
++#endif // !__TBB_WIN8UI_SUPPORT
++}
++
+ #endif //_WIN32

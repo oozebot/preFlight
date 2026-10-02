@@ -506,6 +506,14 @@ void OptionsGroup::activate_line(Line &line)
     }
 
     const std::vector<Option> &option_set = line.get_options();
+    // A widget without options below an option line (a note under a row): the custom control made its line
+    // and places the widget's windows
+    if (option_set.empty() && line.widget != nullptr && custom_ctrl != nullptr)
+    {
+        m_use_custom_ctrl_as_parent = true;
+        line.widget_sizer = line.widget(this->ctrl_parent());
+        return;
+    }
 #ifdef __linux__
     // Safety guard: rapid tab switching on GTK can corrupt Line state,
     // leaving the options vector empty. Skip the line to prevent a crash.

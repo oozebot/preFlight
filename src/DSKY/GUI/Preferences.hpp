@@ -11,6 +11,7 @@
 
 #include "GUI.hpp"
 #include "GUI_Utils.hpp"
+#include "Timer_wx.hpp"
 #include "wxExtensions.hpp"
 
 #include <wx/dialog.h>
@@ -22,6 +23,7 @@ class wxColourPickerCtrl;
 class wxBookCtrlBase;
 class wxSlider;
 class wxRadioButton;
+class wxStaticText;
 
 namespace Luminary
 {
@@ -114,8 +116,8 @@ class Worker;
 class PreferencesDialog : public DPIDialog
 {
     std::map<std::string, std::string> m_values;
-    // Pre-dialog values of restart-bound performance settings (they write through
-    // to AppConfig on change, bypassing m_values).
+    // The Performance tab's values when the dialog opened: its rows write through to AppConfig and apply on
+    // change, bypassing m_values, so Cancel restores these and OK compares against them
     std::map<std::string, std::string> m_perf_restart_originals;
     std::shared_ptr<ConfigOptionsGroup> m_optgroup_general;
     std::shared_ptr<ConfigOptionsGroup> m_optgroup_camera;
@@ -146,6 +148,24 @@ class PreferencesDialog : public DPIDialog
     bool isOSX{false};
     bool m_settings_layout_changed{false};
     bool m_recreate_GUI{false};
+    // A change that needs a new process, not only new windows (the canvas pixel format: MSAA)
+    bool m_restart_required{false};
+
+    // Puts the Performance tab's values back to the snapshot and re-applies what they apply live
+    void restore_performance_snapshot();
+    // Shows the Performance tab's fields as AppConfig holds them
+    void refresh_performance_fields();
+
+    // The "In effect" lines under the Lighting, MSAA and SSAA rows: what the current canvas's last frame used
+    wxStaticText *m_lighting_in_effect{nullptr};
+    wxStaticText *m_msaa_in_effect{nullptr};
+    wxStaticText *m_ssaa_in_effect{nullptr};
+    // Refreshes the lines a few times after a change, so they show the frames rendered with it. Its ticks are not
+    // timer events, which the highlighter's handler on this dialog would take as its own.
+    Timer_wx m_in_effect_timer;
+    int m_in_effect_ticks{0};
+    void refresh_in_effect_lines();
+    void schedule_in_effect_refresh();
 
     int m_custom_toolbar_size{-1};
     bool m_use_custom_toolbar_size{false};
@@ -156,6 +176,7 @@ public:
 
     bool settings_layout_changed() const { return m_settings_layout_changed; }
     bool recreate_GUI() const { return m_recreate_GUI; }
+    bool restart_required() const { return m_restart_required; }
     void build();
     void update_ctrls_alignment();
     void accept(wxEvent &);
@@ -184,4 +205,3 @@ protected:
 };
 
 } // namespace DSKY
-

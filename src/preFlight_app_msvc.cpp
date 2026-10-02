@@ -234,6 +234,59 @@ protected:
 bool OpenGLVersionCheck::message_pump_exit = false;
 #endif /* PREFLIGHT_GUI */
 
+// Route the process allocator through tbbmalloc_proxy.dll and publish the outcome in PREFLIGHT_ALLOCATOR.
+// A statically imported proxy that cannot be mapped stops the process before main; loading it here lets the
+// process continue on the C runtime allocator when the proxy is missing, refused or broken. The variable is
+// set in every build, so a value inherited from a parent process never survives.
+static void engage_allocator()
+{
+    wchar_t token[64] = L"crt:not_built";
+#ifdef PREFLIGHT_TBBMALLOC_PROXY
+    const wchar_t proxy_name[] = L"tbbmalloc_proxy.dll";
+    wchar_t path[MAX_PATH + 1] = {0};
+    const DWORD len = ::GetModuleFileNameW(nullptr, path, MAX_PATH + 1);
+    const DWORD path_error = len == 0 ? ::GetLastError() : (DWORD) ERROR_FILENAME_EXCED_RANGE;
+    wchar_t *slash = (len == 0 || len > MAX_PATH) ? nullptr : wcsrchr(path, L'\\');
+    if (slash == nullptr || size_t(slash + 1 - path) + _countof(proxy_name) > _countof(path))
+    {
+        // The executable path cannot be read or leaves no room for the proxy name.
+        swprintf(token, _countof(token), L"crt:load_failed:%lu", path_error);
+    }
+    else
+    {
+        wcscpy(slash + 1, proxy_name);
+        // An absolute path with the altered search path resolves tbbmalloc.dll next to the proxy. Critical
+        // error dialogs are suppressed so a refused or corrupt image fails the load instead of raising one.
+        const UINT error_mode = ::SetErrorMode(SEM_FAILCRITICALERRORS);
+        ::SetErrorMode(error_mode | SEM_FAILCRITICALERRORS);
+        HMODULE proxy = ::LoadLibraryExW(path, nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+        const DWORD load_error = ::GetLastError();
+        ::SetErrorMode(error_mode);
+
+        if (proxy == nullptr)
+            swprintf(token, _countof(token), L"crt:load_failed:%lu", load_error);
+        else
+        {
+            typedef int (*EngageFunc)();
+            EngageFunc engage = (EngageFunc)::GetProcAddress(proxy, "TBB_malloc_proxy_engage");
+            if (engage == nullptr)
+            {
+                // A proxy without the export replaces nothing on a dynamic load, so unloading it is safe.
+                ::FreeLibrary(proxy);
+                wcscpy(token, L"crt:no_entry");
+            }
+            else
+            {
+                // The proxy stays loaded whatever the result: an engaged C runtime allocator jumps into it.
+                const int result = engage();
+                wcscpy(token, result == 1 ? L"tbbmalloc" : (result == 0 ? L"crt:refused" : L"crt:disabled"));
+            }
+        }
+    }
+#endif /* PREFLIGHT_TBBMALLOC_PROXY */
+    ::SetEnvironmentVariableW(L"PREFLIGHT_ALLOCATOR", token);
+}
+
 extern "C"
 {
     typedef int(__stdcall *PreFlightMainFunc)(int argc, wchar_t **argv);
@@ -246,11 +299,15 @@ extern "C"
     int APIENTRY wWinMain(HINSTANCE /* hInstance */, HINSTANCE /* hPrevInstance */, PWSTR /* lpCmdLine */,
                           int /* nCmdShow */)
     {
+        // Before anything else, so the allocator is settled while the process is single-threaded.
+        engage_allocator();
         int argc;
         wchar_t **argv = ::CommandLineToArgvW(::GetCommandLineW(), &argc);
 #else
     int wmain(int argc, wchar_t **argv)
     {
+        // Before anything else, so the allocator is settled while the process is single-threaded.
+        engage_allocator();
 #endif
         // Allow the asserts to open message box, such message box allows to ignore the assert and continue with the application.
         // Without this call, the seemingly same message box is being opened by the abort() function, but that is too late and

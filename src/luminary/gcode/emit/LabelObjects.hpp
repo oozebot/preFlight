@@ -21,6 +21,9 @@ class GCodeWriter;
 namespace GCode
 {
 
+// The name an object's label lines carry for this label style and firmware flavour
+std::string label_name_for_gcode(std::string name, LabelObjectsStyle style, GCodeFlavor flavor);
+
 class LabelObjects
 {
 public:

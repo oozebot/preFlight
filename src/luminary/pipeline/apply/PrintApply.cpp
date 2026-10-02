@@ -2025,6 +2025,10 @@ Print::ApplyStatus Print::apply_once(const Model &model, DynamicPrintConfig new_
 Print::ApplyStatus Print::apply(const Model &model, DynamicPrintConfig new_full_config,
                                 std::vector<std::string> *warnings)
 {
+    // The plater applies each plate with that plate active; this print's copy of the model keeps
+    // answering for it while other plates are applied
+    m_model.pin_to_active_bed();
+
     // With no print objects yet (the first apply of a print), the shrinkage compensation is
     // read as none, and the transformations built from it would be replaced on the next apply
     // by compensated ones: the first slice would print uncompensated and every later apply

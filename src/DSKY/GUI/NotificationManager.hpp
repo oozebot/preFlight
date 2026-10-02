@@ -140,7 +140,9 @@ enum class NotificationType
     // Failed to download secret repo archive
     FailedSecretVendorUpdateSync,
     // Boolean operation (weld/subtract) failed during align gizmo or CSG preview
-    BooleanOperationFailed
+    BooleanOperationFailed,
+    // A loaded G-code exceeded the Preview Detail limit, so its preview is reduced
+    PreviewDetailReduced
 };
 
 class NotificationManager

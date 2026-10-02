@@ -13,11 +13,7 @@
 #include "BitmapCache.hpp"
 #include "ThemePalette.hpp"
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 #include <wx/image.h>
 

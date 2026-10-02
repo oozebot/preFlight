@@ -7,11 +7,7 @@
 #include "DSKY/GUI/GLCanvas3D.hpp"
 #include "DSKY/GUI/Gizmos/GLGizmosCommon.hpp"
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 #include "DSKY/GUI/Camera.hpp"
 #include "DSKY/GUI/I18N.hpp"
@@ -197,10 +193,8 @@ void GLGizmoPainterBase::render_cursor_circle()
     const float zoom = float(m_parent.get_camera().get_zoom());
     const float radius = m_cursor_radius * zoom;
 
-#if !PREFLIGHT_OPENGL_ES
     if (!OpenGLManager::get_gl_info().is_core_profile())
         glsafe(::glLineWidth(1.5f * m_imgui->get_style_scaling()));
-#endif // !PREFLIGHT_OPENGL_ES
 
     glsafe(::glDisable(GL_DEPTH_TEST));
 
@@ -213,20 +207,16 @@ void GLGizmoPainterBase::render_cursor_circle()
 
         GLModel::Geometry init_data;
         unsigned int steps_count = 0;
-#if !PREFLIGHT_OPENGL_ES
         if (OpenGLManager::get_gl_info().is_core_profile())
         {
-#endif // !PREFLIGHT_OPENGL_ES
             steps_count = (unsigned int) (2 * (4 + int(252 * (zoom - 1.0f) / (250.0f - 1.0f))));
             init_data.format = {GLModel::Geometry::EPrimitiveType::Lines, GLModel::Geometry::EVertexLayout::P2};
-#if !PREFLIGHT_OPENGL_ES
         }
         else
         {
             steps_count = 32;
             init_data.format = {GLModel::Geometry::EPrimitiveType::LineLoop, GLModel::Geometry::EVertexLayout::P2};
         }
-#endif // !PREFLIGHT_OPENGL_ES
         const float step_size = 2.0f * float(PI) / float(steps_count);
         init_data.color = {0.0f, 1.0f, 0.3f, 1.0f};
         init_data.reserve_vertices(steps_count);
@@ -235,10 +225,8 @@ void GLGizmoPainterBase::render_cursor_circle()
         // vertices + indices
         for (unsigned int i = 0; i < steps_count; ++i)
         {
-#if !PREFLIGHT_OPENGL_ES
             if (OpenGLManager::get_gl_info().is_core_profile())
             {
-#endif // !PREFLIGHT_OPENGL_ES
                 if (i % 2 != 0)
                     continue;
 
@@ -251,7 +239,6 @@ void GLGizmoPainterBase::render_cursor_circle()
                 init_data.add_vertex(Vec2f(v_j.x(), v_j.y()));
                 const size_t vcount = init_data.vertices_count();
                 init_data.add_line(vcount - 2, vcount - 1);
-#if !PREFLIGHT_OPENGL_ES
             }
             else
             {
@@ -260,47 +247,34 @@ void GLGizmoPainterBase::render_cursor_circle()
                                            -2.0f * ((center.y() + ::sin(angle) * radius) * cnv_inv_height - 0.5f)));
                 init_data.add_index(i);
             }
-#endif // !PREFLIGHT_OPENGL_ES
         }
 
         m_circle.init_from(std::move(init_data));
     }
 
-#if PREFLIGHT_OPENGL_ES
-    GLShaderProgram *shader = m_parent.get_shader("dashed_lines");
-#else
     GLShaderProgram *shader = OpenGLManager::get_gl_info().is_core_profile() ? m_parent.get_shader("dashed_thick_lines")
                                                                              : m_parent.get_shader("flat");
-#endif // PREFLIGHT_OPENGL_ES
     if (shader != nullptr)
     {
         shader->start_using();
-#if !PREFLIGHT_OPENGL_ES
         if (OpenGLManager::get_gl_info().is_core_profile())
         {
-#endif // !PREFLIGHT_OPENGL_ES
             const Transform3d view_model_matrix =
                 Geometry::translation_transform(Vec3d(2.0f * (center.x() * cnv_inv_width - 0.5f),
                                                       -2.0f * (center.y() * cnv_inv_height - 0.5f), 0.0)) *
                 Geometry::scale_transform(Vec3d(2.0f * radius * cnv_inv_width, 2.0f * radius * cnv_inv_height, 1.0f));
             shader->set_uniform("view_model_matrix", view_model_matrix);
-#if !PREFLIGHT_OPENGL_ES
         }
         else
             shader->set_uniform("view_model_matrix", Transform3d::Identity());
-#endif // !PREFLIGHT_OPENGL_ES
         shader->set_uniform("projection_matrix", Transform3d::Identity());
-#if !PREFLIGHT_OPENGL_ES
         if (OpenGLManager::get_gl_info().is_core_profile())
         {
-#endif // !PREFLIGHT_OPENGL_ES
             const std::array<int, 4> &viewport = m_parent.get_camera().get_viewport();
             shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
             shader->set_uniform("width", 0.25f);
             shader->set_uniform("gap_size", 0.0f);
-#if !PREFLIGHT_OPENGL_ES
         }
-#endif // !PREFLIGHT_OPENGL_ES
         m_circle.render();
         shader->stop_using();
     }

@@ -15,6 +15,8 @@
 #include "Widgets/UIColors.hpp"
 
 #include "luminary/colour/rgb/Color.hpp"
+#include "luminary/config/catalog/PrintConfig.hpp"
+#include "luminary/core/diagnostics/DebugCounters.hpp"
 
 #include <wx/sizer.h>
 
@@ -345,15 +347,24 @@ WipingPanel::WipingPanel(wxWindow *parent, const std::vector<float> &matrix,
                                   {
                                       if (i != j)
                                       {
-                                          double def_val = m_printer_purging_volume *
-                                                           m_filament_purging_multipliers[j] / 100.;
+                                          const double multiplier = j < m_filament_purging_multipliers.size()
+                                                                        ? m_filament_purging_multipliers[j]
+                                                                        : 100.;
+                                          double def_val = m_printer_purging_volume * multiplier / 100.;
                                           edit_boxes[j][i]->SetValue(wxString("") << int(def_val));
                                       }
                                   }
                               }
                           });
 
-    m_number_of_extruders = (int) (sqrt(matrix.size()) + 0.001);
+    // One row per extruder colour: a matrix larger than the printer (a crafted or stale project) shows
+    // and writes back its top-left block
+    const size_t side = size_t(sqrt(matrix.size()) + 0.001);
+    m_number_of_extruders = unsigned(std::min({side, extruder_colours.size(), MAX_EXTRUDERS}));
+    if (m_number_of_extruders < side)
+        DBG_COUNT_LOAD("WIPE_MATRIX_CLAMPED");
+    // The grid has at least the one disabled diagonal cell its layout measures
+    m_number_of_extruders = std::max(m_number_of_extruders, 1u);
 
     for (const std::string &color : extruder_colours)
     {
@@ -361,6 +372,7 @@ WipingPanel::WipingPanel(wxWindow *parent, const std::vector<float> &matrix,
         Luminary::decode_color(color, rgb);
         m_colours.push_back(wxColor(rgb.r_uchar(), rgb.g_uchar(), rgb.b_uchar()));
     }
+    m_colours.resize(std::max(m_colours.size(), size_t(m_number_of_extruders)), *wxLIGHT_GREY);
 
     m_sizer_advanced = new wxBoxSizer(wxVERTICAL);
     m_page_advanced = new wxPanel(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxTAB_TRAVERSAL);
@@ -390,7 +402,7 @@ WipingPanel::WipingPanel(wxWindow *parent, const std::vector<float> &matrix,
             if (i == j)
                 edit_boxes[i][j]->Disable();
             else
-                edit_boxes[i][j]->SetValue(wxString("") << int(matrix[m_number_of_extruders * j + i]));
+                edit_boxes[i][j]->SetValue(wxString("") << int(matrix[side * j + i]));
         }
     }
 

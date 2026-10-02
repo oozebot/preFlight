@@ -22,6 +22,7 @@
 #include "MainFrame.hpp"
 #include "wxExtensions.hpp"
 #include "luminary/platform/host/BlacklistedLibraryCheck.hpp"
+#include "luminary/platform/process/Process.hpp"
 #include "luminary/colour/rgb/Color.hpp"
 #include "format.hpp"
 #include "Widgets/ScrollablePanel.hpp"
@@ -72,8 +73,10 @@ std::string get_main_info(bool format_as_html)
         "System Version:      "
 #endif
         << b_end << wxPlatformInfo::Get().GetOperatingSystemDescription() << line_end;
-    out << b_start << "Total RAM size [MB]: " << b_end
-        << Luminary::format_memsize_MB(Luminary::total_physical_memory());
+    out << b_start << "Total RAM size [MB]: " << b_end << Luminary::format_memsize_MB(Luminary::total_physical_memory())
+        << line_end;
+    // The allocator the process runs on, so a fallback to the C runtime heap shows in reports.
+    out << b_start << "Allocator:           " << b_end << Luminary::process_allocator();
 
     return out.str();
 }
@@ -103,6 +106,13 @@ std::string get_mem_info(bool format_as_html)
         << Luminary::format_memsize_MB(stack.memsize()) << line_end << line_end;
 
     return out.str();
+}
+
+// Sets an HTML block's minimum height to its laid-out page plus the border width above and below.
+static void fit_html_min_height(wxHtmlWindow *html, int border)
+{
+    if (auto *ir = html->GetInternalRepresentation())
+        html->SetMinSize(wxSize(-1, ir->GetHeight() + 2 * border));
 }
 
 SysInfoDialog::SysInfoDialog()
@@ -153,10 +163,13 @@ SysInfoDialog::SysInfoDialog()
     const int fs = font.GetPointSize() - 1;
     int size[] = {static_cast<int>(fs * 1.5), static_cast<int>(fs * 1.4), static_cast<int>(fs * 1.3), fs, fs, fs, fs};
 
-    m_html = new wxHtmlWindow(this, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxHW_SCROLLBAR_NEVER);
+    // Explicit initial width so the page is laid out and measured against a real width; 40 em is narrower than
+    // the block ends up, so the measured height is never too small.
+    m_html = new wxHtmlWindow(this, wxID_ANY, wxDefaultPosition, wxSize(40 * em, 10 * em), wxHW_SCROLLBAR_NEVER);
     {
+        const int html_border = wxGetApp().em_unit() / 5; // DPI-scaled (2px at 100%)
         m_html->SetFonts(font.GetFaceName(), font.GetFaceName(), size);
-        m_html->SetBorders(wxGetApp().em_unit() / 5); // DPI-scaled (2px at 100%)
+        m_html->SetBorders(html_border);
         const auto text = wxString::Format("<html>"
                                            "<body bgcolor= %s link= %s>"
                                            "<font color=%s>"
@@ -166,6 +179,8 @@ SysInfoDialog::SysInfoDialog()
                                            "</html>",
                                            bgr_clr_str, text_clr_str, text_clr_str, get_main_info(true));
         m_html->SetPage(text);
+        // The minimum height fits the page so the sizer cannot clip its last lines.
+        fit_html_min_height(m_html, html_border);
         vsizer->Add(m_html, 1, wxEXPAND | wxBOTTOM, wxGetApp().em_unit());
     }
 
@@ -239,6 +254,9 @@ SysInfoDialog::SysInfoDialog()
 
     SetSizer(main_sizer);
     main_sizer->SetSizeHints(this);
+    // Open at the minimum size the DPI handler also enforces.
+    SetMinSize(wxSize(65 * em, 55 * em));
+    Fit();
 }
 
 void SysInfoDialog::on_dpi_changed(const wxRect &suggested_rect)
@@ -251,6 +269,8 @@ void SysInfoDialog::on_dpi_changed(const wxRect &suggested_rect)
         static_cast<int>(fs * 1.5), static_cast<int>(fs * 1.4), static_cast<int>(fs * 1.3), fs, fs, fs, fs};
 
     m_html->SetFonts(font.GetFaceName(), font.GetFaceName(), font_size);
+    // The font size changes the page height.
+    fit_html_min_height(m_html, em_unit() / 5);
     m_html->Refresh();
 
     const int &em = em_unit();

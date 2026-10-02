@@ -10,6 +10,7 @@
 #include <cassert>
 
 #include "luminary/core/Exception.hpp"
+#include "luminary/core/diagnostics/DebugCounters.hpp"
 #include "Preset.hpp"
 #include "luminary/presets/app_config/AppConfig.hpp"
 #include "luminary/core/I18N.hpp"
@@ -23,6 +24,7 @@
 #endif /* _MSC_VER */
 
 #include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <stdexcept>
 #include <unordered_map>
@@ -280,9 +282,62 @@ std::string Preset::remove_suffix_modified(const std::string &name)
                                                                 : name;
 }
 
-// Update new extruder fields at the printer profile.
-void Preset::normalize(DynamicPrintConfig &config)
+size_t Preset::cap_extruders(DynamicPrintConfig &config)
 {
+    auto *nozzles = config.option<ConfigOptionFloats>("nozzle_diameter");
+    if (nozzles == nullptr || nozzles->values.size() <= MAX_EXTRUDERS)
+        return 0;
+    const size_t original = nozzles->values.size();
+    DBG_COUNT_LOAD("EXTRUDERS_CAPPED");
+    BOOST_LOG_TRIVIAL(warning) << "A printer with " << original << " extruders is loaded with its first "
+                               << MAX_EXTRUDERS << ", the most preFlight supports";
+
+    auto truncate = [&config](const std::string &key, size_t size)
+    {
+        if (auto *opt = config.option(key, false); opt != nullptr && opt->is_vector())
+            if (auto *vec = static_cast<ConfigOptionVectorBase *>(opt); vec->size() > size)
+                vec->resize(size);
+    };
+    // The per-extruder values, the lists set_num_extruders and normalize resize
+    for (const std::string &key : print_config_def.extruder_option_keys())
+        truncate(key, MAX_EXTRUDERS);
+    for (const std::string &key : Preset::filament_options())
+        if (key != "compatible_prints" && key != "compatible_printers" &&
+            !PresetCollection::is_independent_from_extruder_number_option(key))
+            truncate(key, MAX_EXTRUDERS);
+    truncate("filament_settings_id", MAX_EXTRUDERS);
+    truncate("compatible_prints_condition_cummulative", MAX_EXTRUDERS);
+    // A project's [print, filament 0..n-1, printer]: the printer's entry stays last
+    for (const char *key : {"inherits_cummulative", "compatible_printers_condition_cummulative"})
+        if (auto *opt = config.option<ConfigOptionStrings>(key);
+            opt != nullptr && opt->values.size() > MAX_EXTRUDERS + 2)
+        {
+            std::string printer = std::move(opt->values.back());
+            opt->values.resize(MAX_EXTRUDERS + 1);
+            opt->values.push_back(std::move(printer));
+        }
+    // The purge matrix, row-major with one row per extruder: its top-left block
+    if (auto *matrix = config.option<ConfigOptionFloats>("wiping_volumes_matrix"); matrix != nullptr)
+    {
+        const size_t side = size_t(std::sqrt(double(matrix->values.size())) + 0.001);
+        if (side > MAX_EXTRUDERS && side * side == matrix->values.size())
+        {
+            std::vector<double> block;
+            block.reserve(MAX_EXTRUDERS * MAX_EXTRUDERS);
+            for (size_t row = 0; row < MAX_EXTRUDERS; ++row)
+                for (size_t col = 0; col < MAX_EXTRUDERS; ++col)
+                    block.push_back(matrix->values[row * side + col]);
+            matrix->values = std::move(block);
+        }
+    }
+    config.reset_extruders_above(MAX_EXTRUDERS);
+    return original;
+}
+
+// Update new extruder fields at the printer profile.
+size_t Preset::normalize(DynamicPrintConfig &config)
+{
+    const size_t capped = cap_extruders(config);
     auto *nozzle_diameter = dynamic_cast<const ConfigOptionFloats *>(config.option("nozzle_diameter"));
     if (nozzle_diameter != nullptr)
         // Loaded the FFF Printer settings. Verify, that all extruder dependent values have enough values.
@@ -350,6 +405,7 @@ void Preset::normalize(DynamicPrintConfig &config)
             first_layer_height->value = first_layer_height->get_abs_value(layer_height->value);
             first_layer_height->percent = false;
         }
+    return capped;
 }
 
 std::string Preset::remove_invalid_keys(DynamicPrintConfig &config, const DynamicPrintConfig &default_config)
@@ -601,6 +657,13 @@ void PresetCollection::load_presets(const std::string &dir_path, const std::stri
                 auto existing_it = this->find_preset_internal(name);
                 if (existing_it != m_presets.end() && existing_it->name == name)
                 {
+                    // A default preset keeps its place at the head of the list: a file with its name is not loaded
+                    if (existing_it->is_default)
+                    {
+                        errors_cummulative += "The preset file was not loaded: " + dir_entry.path().string() +
+                                              "\n\tReason: its name is a built-in preset's\n";
+                        continue;
+                    }
                     inherited_vendor = existing_it->vendor;
                     m_presets.erase(existing_it);
                 }
@@ -622,7 +685,8 @@ void PresetCollection::load_presets(const std::string &dir_path, const std::stri
                     const Preset &default_preset = this->default_preset_for(config);
                     preset.config = default_preset.config;
                     preset.config.apply(std::move(config));
-                    Preset::normalize(preset.config);
+                    if (Preset::normalize(preset.config) > 0)
+                        this->note_capped_on_load(preset.name);
                     // Report configuration fields, which are misplaced into a wrong group.
                     std::string incorrect_keys = Preset::remove_invalid_keys(preset.config, default_preset.config);
                     if (!incorrect_keys.empty())
@@ -1762,6 +1826,31 @@ std::string PhysicalPrinter::web_interface_host(const DynamicPrintConfig &config
     return config.opt_string("print_host");
 }
 
+DynamicPrintConfig PhysicalPrinter::with_stored_credentials(
+    const DynamicPrintConfig &config, const std::function<bool(std::string &, std::string &)> &load)
+{
+    // The printer's own config keeps "stored", so nothing that saves or exports it writes the password
+    DynamicPrintConfig request = config;
+    if (config.opt_string("printhost_password") != "stored")
+        return request;
+    std::string username;
+    std::string password;
+    if (load(username, password))
+    {
+        if (!username.empty())
+            request.opt_string("printhost_user") = username;
+        if (!password.empty())
+            request.opt_string("printhost_password") = password;
+    }
+    else
+    {
+        // This request goes without credentials; the next one reads the store again
+        request.opt_string("printhost_user") = std::string();
+        request.opt_string("printhost_password") = std::string();
+    }
+    return request;
+}
+
 const std::set<std::string> &PhysicalPrinter::get_preset_names() const
 {
     return preset_names;
@@ -2152,10 +2241,14 @@ void PhysicalPrinterCollection::save_printer(PhysicalPrinter &edited_printer, co
     if (it != m_printers.end() && it->name == name)
     {
         // Printer with the same name found.
-        // Overwriting an existing preset.
-        it->config = std::move(edited_printer.config);
-        it->name = edited_printer.name;
-        it->preset_names = edited_printer.preset_names;
+        // Overwriting an existing preset. A printer of this collection passed as its own edit is
+        // already stored: moving its config onto itself would empty it.
+        if (&*it != &edited_printer)
+        {
+            it->config = std::move(edited_printer.config);
+            it->name = edited_printer.name;
+            it->preset_names = edited_printer.preset_names;
+        }
         // sort printers and get new it
         std::sort(m_printers.begin(), m_printers.end());
         it = this->find_printer_internal(edited_printer.name);
@@ -2219,7 +2312,11 @@ bool PhysicalPrinterCollection::delete_preset_from_printers(const std::string &p
         if (printer.preset_names.size() == 1 && *printer.preset_names.begin() == preset_name)
             printers_for_delete.emplace_back(printer.name);
         else if (printer.delete_preset(preset_name))
-            save_printer(printer);
+        {
+            // Saved where it is: save_printer() stores an edited copy into the collection
+            printer.update_preset_names_in_config();
+            printer.save();
+        }
     }
 
     if (!printers_for_delete.empty())

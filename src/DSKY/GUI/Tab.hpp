@@ -166,8 +166,6 @@ public:
     Line *get_line(const t_config_option_key &opt_key);
     bool set_value(const t_config_option_key &opt_key, const boost::any &value);
     ConfigOptionsGroupShp new_optgroup(const wxString &title, int noncommon_label_width = -1);
-    // Creates an optgroup with sidebar visibility checkbox enabled
-    ConfigOptionsGroupShp new_optgroup_for_sidebar(const wxString &title, int noncommon_label_width = -1);
     const ConfigOptionsGroupShp get_optgroup(const wxString &title) const;
 
     bool set_item_colour(const wxColour *clr)
@@ -446,6 +444,9 @@ public:
     void update_tab_ui();
     void load_config(const DynamicPrintConfig &config);
     virtual void reload_config();
+    // The built role extruders' spinners stop at the printer's extruder count (a page built later
+    // reads the count as it builds)
+    void update_extruder_role_ranges();
     void update_mode();
     void update_mode_markers();
     void update_visibility();
@@ -694,4 +695,3 @@ public:
 };
 
 } // namespace DSKY
-

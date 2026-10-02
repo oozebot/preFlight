@@ -278,4 +278,47 @@ void ColorRange::finalize_fixed_bands(int num_bands, float min, float max)
     m_finalized = true;
 }
 
+// Under this span ten bands are narrower than 0.1, finer than the legend's one-decimal labels can tell apart
+static constexpr float LINEAR_BANDS_MIN_SPAN = 1.0f;
+
+// Create contiguous equal-width bands over the collected [min, max] (used for speed, where a value's color must not
+// depend on how many other moves share it). The first band starts exactly at min and the last ends exactly at max.
+// Each value is counted in the first band whose high it does not exceed, the band get_color_at() picks for it.
+void ColorRange::finalize_linear_bands(int num_bands)
+{
+    m_bands.clear();
+
+    if (m_value_counts.empty())
+    {
+        m_finalized = true;
+        return;
+    }
+
+    const float min = m_range[0];
+    const float max = m_range[1];
+    const int bands = (max - min < LINEAR_BANDS_MIN_SPAN) ? 1 : std::max(num_bands, 1);
+    const float band_width = (max - min) / static_cast<float>(bands);
+
+    for (int i = 0; i < bands; ++i)
+    {
+        ColorBand band;
+        band.low = (i == 0) ? min : min + i * band_width;
+        band.high = (i + 1 == bands) ? max : min + (i + 1) * band_width;
+        band.count = 0;
+        m_bands.push_back(band);
+    }
+
+    // The values ascend, so the band index only moves up
+    size_t band_idx = 0;
+    for (const auto &[val, cnt] : m_value_counts)
+    {
+        while (band_idx + 1 < m_bands.size() && val > m_bands[band_idx].high)
+            ++band_idx;
+        m_bands[band_idx].count += cnt;
+    }
+
+    m_count = m_bands.size();
+    m_finalized = true;
+}
+
 } // namespace libvgcode

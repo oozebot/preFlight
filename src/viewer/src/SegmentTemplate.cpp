@@ -36,12 +36,17 @@ static constexpr const std::array<uint8_t, 36> VERTEX_DATA = {
 };
 // clang-format on
 
+// The body's triangles lead VERTEX_DATA, the cap triangles follow them
+static constexpr const size_t BODY_VERTEX_DATA_COUNT = 24;
+
+// The 16 vertex ids, each stored once: VERTEX_DATA becomes the element list of an indexed draw, which gives every
+// triangle corner the same vertex id as the array draw and lets the GPU reuse the shaded vertices.
+static constexpr const std::array<uint8_t, 16> VERTEX_IDS = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15};
+
 void SegmentTemplate::init()
 {
     if (m_vao_id != 0)
         return;
-
-    m_size_in_bytes_gpu += VERTEX_DATA.size() * sizeof(uint8_t);
 
     int curr_vertex_array;
     glsafe(glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &curr_vertex_array));
@@ -53,13 +58,16 @@ void SegmentTemplate::init()
 
     glsafe(glGenBuffers(1, &m_vbo_id));
     glsafe(glBindBuffer(GL_ARRAY_BUFFER, m_vbo_id));
-    glsafe(glBufferData(GL_ARRAY_BUFFER, VERTEX_DATA.size() * sizeof(uint8_t), VERTEX_DATA.data(), GL_STATIC_DRAW));
+    m_size_in_bytes_gpu += VERTEX_IDS.size() * sizeof(uint8_t) + VERTEX_DATA.size() * sizeof(uint8_t);
+    glsafe(glBufferData(GL_ARRAY_BUFFER, VERTEX_IDS.size() * sizeof(uint8_t), VERTEX_IDS.data(), GL_STATIC_DRAW));
     glsafe(glEnableVertexAttribArray(0));
-#ifdef ENABLE_OPENGL_ES
-    glsafe(glVertexAttribPointer(0, 1, GL_UNSIGNED_BYTE, GL_FALSE, 0, (const void *) 0));
-#else
     glsafe(glVertexAttribIPointer(0, 1, GL_UNSIGNED_BYTE, 0, (const void *) 0));
-#endif // ENABLE_OPENGL_ES
+    // The element buffer binding is state of the bound vertex array: it stays with the template's vertex array, and
+    // restoring the previous vertex array below restores that one's own element buffer
+    glsafe(glGenBuffers(1, &m_ibo_id));
+    glsafe(glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, m_ibo_id));
+    glsafe(glBufferData(GL_ELEMENT_ARRAY_BUFFER, VERTEX_DATA.size() * sizeof(uint8_t), VERTEX_DATA.data(),
+                        GL_STATIC_DRAW));
 
     glsafe(glBindBuffer(GL_ARRAY_BUFFER, curr_array_buffer));
     glsafe(glBindVertexArray(curr_vertex_array));
@@ -67,6 +75,11 @@ void SegmentTemplate::init()
 
 void SegmentTemplate::shutdown()
 {
+    if (m_ibo_id != 0)
+    {
+        glsafe(glDeleteBuffers(1, &m_ibo_id));
+        m_ibo_id = 0;
+    }
     if (m_vbo_id != 0)
     {
         glsafe(glDeleteBuffers(1, &m_vbo_id));
@@ -81,17 +94,20 @@ void SegmentTemplate::shutdown()
     m_size_in_bytes_gpu = 0;
 }
 
-void SegmentTemplate::render(size_t count)
+void SegmentTemplate::render(size_t count, bool with_caps)
 {
     if (m_vao_id == 0 || m_vbo_id == 0 || count == 0)
+        return;
+    if (m_ibo_id == 0)
         return;
 
     int curr_vertex_array;
     glsafe(glGetIntegerv(GL_VERTEX_ARRAY_BINDING, &curr_vertex_array));
 
+    const GLsizei vertices_count = static_cast<GLsizei>(with_caps ? VERTEX_DATA.size() : BODY_VERTEX_DATA_COUNT);
     glsafe(glBindVertexArray(m_vao_id));
-    glsafe(
-        glDrawArraysInstanced(GL_TRIANGLES, 0, static_cast<GLsizei>(VERTEX_DATA.size()), static_cast<GLsizei>(count)));
+    glsafe(glDrawElementsInstanced(GL_TRIANGLES, vertices_count, GL_UNSIGNED_BYTE, (const void *) 0,
+                                   static_cast<GLsizei>(count)));
     glsafe(glBindVertexArray(curr_vertex_array));
 }
 

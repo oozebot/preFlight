@@ -9,6 +9,7 @@
 #include "ConfigManipulation.hpp"
 #include "GUI.hpp"
 #include "GUI_App.hpp"
+#include "GuiBudget.hpp"
 #include "I18N.hpp"
 #include "MainFrame.hpp"
 #include "MsgDialog.hpp"
@@ -17,9 +18,12 @@
 #include "Sidebar.hpp"
 #include "format.hpp"
 #include "wxExtensions.hpp"
+#include "Widgets/CategoryBar.hpp"
 #include "Widgets/CheckBox.hpp"
 #include "Widgets/ComboBox.hpp"
 #include "Widgets/FlatStaticBox.hpp"
+#include "Widgets/RedrawLock.hpp"
+#include "Widgets/RowIcons.hpp"
 #include "Widgets/ScrollablePanel.hpp"
 #include "Widgets/SpinInput.hpp"
 #include "Widgets/TextInput.hpp"
@@ -27,17 +31,17 @@
 #include "luminary/model/scene/Model.hpp"
 #include "luminary/presets/bundle/PresetBundle.hpp"
 #include "luminary/config/catalog/PrintConfig.hpp"
+#include "luminary/core/Raii.hpp"
+#include "luminary/core/diagnostics/DebugCounters.hpp"
 
 #include <boost/algorithm/string.hpp>
 
 #include <wx/button.h>
 #include <wx/dcbuffer.h>
 #include <wx/sizer.h>
-#include <wx/statbmp.h>
 #include <wx/statbox.h>
 #include <wx/stattext.h>
 #include <wx/weakref.h>
-#include <wx/wupdlock.h>
 
 #include <algorithm>
 #include <climits>
@@ -92,16 +96,10 @@ static wxColour panel_foreground()
     return wxGetApp().dark_mode() ? UIColors::PanelForegroundDark() : UIColors::PanelForegroundLight();
 }
 
-// The sidebar's sizes: the input width, the lock icon and its margin
+// The sidebar's sizes: the input width, the icon margin and the checked row's accent edge
 static int input_width()
 {
     return 7 * wxGetApp().em_unit();
-}
-
-static wxSize icon_size()
-{
-    const int size = int(1.6 * wxGetApp().em_unit());
-    return wxSize(size, size);
 }
 
 static int icon_margin()
@@ -109,174 +107,27 @@ static int icon_margin()
     return wxGetApp().em_unit() / 5;
 }
 
+static int accent_width()
+{
+    return std::max(2, wxGetApp().em_unit() / 4);
+}
+
+// A tooltip is set only when it changed: every refresh visits every row, and a tooltip write
+// is not free on Windows
+static void set_tooltip_once(wxWindow *window, wxString &last, const wxString &tooltip)
+{
+    if (window == nullptr || tooltip == last)
+        return;
+    last = tooltip;
+    if (tooltip.IsEmpty())
+        window->UnsetToolTip();
+    else
+        window->SetToolTip(tooltip);
+}
+
 // The extruder pseudo-key: the item's extruder, the value the list's column shows. It is not a
 // member of the object or region config, so the row is built by hand.
 static const char *EXTRUDER_KEY = "extruder";
-
-// ----------------------------------------------------------------------------
-// OverrideCategoryBar: the icon strip that switches the panel's pages
-// ----------------------------------------------------------------------------
-
-class OverrideCategoryBar : public wxPanel
-{
-public:
-    struct Item
-    {
-        wxString title;
-        std::string icon_name;
-        wxBitmapBundle icon;
-    };
-
-    explicit OverrideCategoryBar(wxWindow *parent)
-        : wxPanel(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxNO_BORDER)
-    {
-        SetBackgroundStyle(wxBG_STYLE_PAINT);
-        UpdateAppearance();
-        Bind(wxEVT_PAINT, &OverrideCategoryBar::OnPaint, this);
-        Bind(wxEVT_LEFT_DOWN, &OverrideCategoryBar::OnMouseDown, this);
-        Bind(wxEVT_MOTION, &OverrideCategoryBar::OnMouseMove, this);
-        Bind(wxEVT_LEAVE_WINDOW, &OverrideCategoryBar::OnMouseLeave, this);
-    }
-
-    void SetItems(std::vector<Item> items)
-    {
-        m_items = std::move(items);
-        for (Item &item : m_items)
-            item.icon = *get_bmp_bundle(item.icon_name);
-        m_active = 0;
-        m_hovered = -1;
-        Refresh();
-    }
-
-    void SetActive(int index)
-    {
-        if (index < 0 || index >= int(m_items.size()) || index == m_active)
-            return;
-        m_active = index;
-        Refresh();
-        if (m_on_changed)
-            m_on_changed(index);
-    }
-
-    int GetActive() const { return m_active; }
-    void SetOnChanged(std::function<void(int)> cb) { m_on_changed = std::move(cb); }
-
-    // One count per item, drawn beside the icon while it is above zero
-    void SetCounts(std::vector<int> counts)
-    {
-        m_counts = std::move(counts);
-        Refresh();
-    }
-
-    void UpdateAppearance()
-    {
-        for (Item &item : m_items)
-            item.icon = *get_bmp_bundle(item.icon_name);
-        const int em = wxGetApp().em_unit();
-        SetMinSize(wxSize(-1, em * 26 / 10));
-        Refresh();
-    }
-
-private:
-    void OnPaint(wxPaintEvent &)
-    {
-        wxAutoBufferedPaintDC dc(this);
-        const wxSize size = GetClientSize();
-        const int em = wxGetApp().em_unit();
-        const wxColour bg = panel_background();
-        dc.SetBrush(wxBrush(bg));
-        dc.SetPen(*wxTRANSPARENT_PEN);
-        dc.DrawRectangle(0, 0, size.GetWidth(), size.GetHeight());
-        if (m_items.empty())
-            return;
-
-        const wxColour accent = UIColors::AccentPrimary();
-        const wxColour raised = bg.ChangeLightness(wxGetApp().dark_mode() ? 115 : 94);
-        const int count = int(m_items.size());
-        const int width = size.GetWidth() / count;
-        const int indicator = std::max(2, em * 3 / 10);
-        for (int i = 0; i < count; ++i)
-        {
-            const int x = i * width;
-            const int w = (i == count - 1) ? size.GetWidth() - x : width;
-            if (i == m_active || i == m_hovered)
-            {
-                dc.SetBrush(wxBrush(i == m_active ? raised : raised.ChangeLightness(105)));
-                dc.DrawRectangle(x, 0, w, size.GetHeight());
-            }
-            if (i == m_active)
-            {
-                dc.SetBrush(wxBrush(accent));
-                dc.DrawRectangle(x, size.GetHeight() - indicator, w, indicator);
-            }
-            // The icon, with the page's override count beside it while it has any
-            const wxBitmap icon = m_items[i].icon.GetBitmapFor(this);
-            const int count = i < int(m_counts.size()) ? m_counts[i] : 0;
-            const wxString count_text = count > 0 ? wxString::Format("%d", count) : wxString();
-#ifdef __APPLE__
-            const wxSize icon_size = icon.IsOk() ? icon.GetLogicalSize() : wxSize(0, 0);
-#else
-            const wxSize icon_size = icon.IsOk() ? icon.GetSize() : wxSize(0, 0);
-#endif
-            dc.SetFont(wxGetApp().small_font().Bold());
-            dc.SetTextForeground(accent);
-            const wxSize text_size = count_text.IsEmpty() ? wxSize(0, 0) : dc.GetTextExtent(count_text);
-            const int gap = count_text.IsEmpty() ? 0 : em / 4;
-            const int content_width = icon_size.GetWidth() + gap + text_size.GetWidth();
-            const int content_x = x + (w - content_width) / 2;
-            const int center_y = (size.GetHeight() - indicator) / 2;
-            if (icon.IsOk())
-                dc.DrawBitmap(icon, content_x, center_y - icon_size.GetHeight() / 2, true);
-            if (!count_text.IsEmpty())
-                dc.DrawText(count_text, content_x + icon_size.GetWidth() + gap, center_y - text_size.GetHeight() / 2);
-        }
-        // The bar's bottom edge
-        dc.SetBrush(wxBrush(raised));
-        dc.DrawRectangle(0, size.GetHeight() - 1, size.GetWidth(), 1);
-    }
-
-    int HitTest(const wxPoint &pt) const
-    {
-        if (m_items.empty() || pt.x < 0)
-            return -1;
-        const int width = std::max(1, GetClientSize().GetWidth() / int(m_items.size()));
-        const int idx = pt.x / width;
-        return idx < int(m_items.size()) ? idx : -1;
-    }
-
-    void OnMouseDown(wxMouseEvent &evt)
-    {
-        const int idx = HitTest(evt.GetPosition());
-        if (idx >= 0)
-            SetActive(idx);
-    }
-
-    void OnMouseMove(wxMouseEvent &evt)
-    {
-        const int idx = HitTest(evt.GetPosition());
-        if (idx != m_hovered)
-        {
-            m_hovered = idx;
-            SetToolTip(idx >= 0 ? m_items[idx].title : wxString());
-            Refresh();
-        }
-    }
-
-    void OnMouseLeave(wxMouseEvent &)
-    {
-        if (m_hovered != -1)
-        {
-            m_hovered = -1;
-            Refresh();
-        }
-    }
-
-    std::vector<Item> m_items;
-    std::vector<int> m_counts;
-    int m_active{0};
-    int m_hovered{-1};
-    std::function<void(int)> m_on_changed;
-};
 
 // ----------------------------------------------------------------------------
 // ObjectSettings: the override panel
@@ -314,17 +165,21 @@ ObjectSettings::ObjectSettings(wxWindow *parent) : wxPanel(parent, wxID_ANY)
     header->Add(m_close, 0, wxALIGN_CENTER_VERTICAL | wxLEFT | wxRIGHT, em / 4);
     main->Add(header, 0, wxEXPAND | wxTOP | wxBOTTOM, em / 4);
 
-    m_categories = new OverrideCategoryBar(this);
+    m_categories = new CategoryBar(this, panel_background);
     m_categories->SetOnChanged([this](int index) { show_page(index); });
     main->Add(m_categories, 0, wxEXPAND);
 
     m_scroll = new ScrollablePanel(this, wxID_ANY);
     m_scroll->sys_color_changed();
+    m_scroll->SetBudgetTag("overrides");
     m_scroll->GetContentPanel()->SetSizer(new wxBoxSizer(wxVERTICAL));
     main->Add(m_scroll, 1, wxEXPAND);
 
     SetSizer(main);
     apply_theme();
+
+    m_build_timer.Bind(wxEVT_TIMER, [this](wxTimerEvent &) { on_build_timer(); });
+    m_layout_timer.Bind(wxEVT_TIMER, [this](wxTimerEvent &) { on_layout_timer(); });
 
     m_sizer = new wxBoxSizer(wxVERTICAL);
     m_sizer->Add(this, 1, wxEXPAND);
@@ -547,31 +402,185 @@ bool ObjectSettings::open_for(const wxDataViewItem &item)
         return false;
 
     m_open = true;
-    if (!m_built || m_built_extruders != extruders_count())
-        build_rows();
+    GuiBudget::Span span("overrides.open");
+    if (!is_prebuilt())
+    {
+        // A click that has to build rows: before the start-up prebuild has finished, or after an
+        // extruder count change whose rebuild has not; a build under way is finished, not restarted
+        GuiBudget::overrides_built_on_open();
+        ensure_built();
+    }
     refresh();
     if (!m_open)
         return false;
     Show();
+    // The pages behind the other categories are laid out at this width while hidden, so the first
+    // click on each shows a page that is already laid out. The timer starts after this event: a
+    // running Win32 timer is a USER object, and the open itself creates none.
+    CallAfter([this]() { m_layout_timer.StartOnce(PREBUILD_TICK_MS); });
     return true;
 }
 
 void ObjectSettings::prebuild()
 {
-    if (m_built && m_built_extruders == extruders_count())
+    if (is_prebuilt())
+    {
+        run_prebuilt_callbacks();
         return;
-    wxWindowUpdateLocker no_updates(this);
-    build_rows();
-    // The object scope's visibility pass and the first layout, while nothing is on screen
-    m_scope = OverrideScope::Object;
-    apply_scope();
-    Layout();
+    }
+    if (m_open)
+    {
+        // Rebuilt at once under the open item's scope
+        GuiBudget::snapshot("overrides.prebuild.begin");
+        refresh();
+        GuiBudget::snapshot("overrides.prebuild.end");
+        return;
+    }
+    // A build is already under way
+    if (m_build)
+        return;
+    GuiBudget::snapshot("overrides.prebuild.begin");
+    begin_build(true);
+    m_build_timer.StartOnce(PREBUILD_TICK_MS);
+    if (m_on_prebuild_begin)
+        std::exchange(m_on_prebuild_begin, nullptr)();
+}
+
+// One chunk of the prebuild per timer event, so input and paint are handled between chunks: the
+// rows of a previous build destroyed, then the new rows until the chunk's time is spent, then the
+// object scope's visibility pass on its own
+void ObjectSettings::on_build_timer()
+{
+    // The main window is closing: the plater and the sidebar the build reaches are gone
+    if (wxGetApp().plater() == nullptr)
+        return;
+    const auto started = std::chrono::steady_clock::now();
+    Luminary::ScopeGuard chunk_end([started]()
+                                   { GuiBudget::measure("overrides.prebuild.chunk", GuiBudget::ms_since(started)); });
+    // The old rows go before the new ones come, so the two never add up
+    if (!destroy_old_pages(std::chrono::milliseconds(PREBUILD_CHUNK_MS)))
+    {
+        m_build_timer.StartOnce(PREBUILD_TICK_MS);
+        return;
+    }
+    if (m_build)
+    {
+        if (continue_build(std::chrono::milliseconds(PREBUILD_CHUNK_MS)))
+        {
+            end_build();
+            m_scope_pending = true;
+        }
+        m_build_timer.StartOnce(PREBUILD_TICK_MS);
+        return;
+    }
+    if (m_scope_pending)
+    {
+        m_scope_pending = false;
+        // The object scope's visibility pass and the first layout, while nothing is on screen, at the
+        // width the panel has when open (its column's; the column's height only decides which pages
+        // scroll); then the other pages, one per timer event. An open did all of this itself.
+        if (!m_open && m_built)
+        {
+            if (wxWindow *column = GetParent())
+                SetSize(column->GetClientSize());
+            m_scope = OverrideScope::Object;
+            apply_scope();
+            Layout();
+            // The prebuild ends with the last page laid out (on_layout_timer)
+            m_layout_ends_prebuild = true;
+            m_layout_timer.StartOnce(PREBUILD_TICK_MS);
+            return;
+        }
+        end_prebuild();
+    }
+}
+
+void ObjectSettings::end_prebuild()
+{
+    m_layout_ends_prebuild = false;
+    GuiBudget::snapshot("overrides.prebuild.end");
+    // The prebuild's completion signal, after this event
+    CallAfter([this]() { run_prebuilt_callbacks(); });
+}
+
+bool ObjectSettings::is_prebuilt() const
+{
+    return m_built;
+}
+
+void ObjectSettings::on_prebuilt(std::function<void()> done)
+{
+    if (is_prebuilt())
+        done();
+    else
+        m_prebuilt.emplace_back(std::move(done));
+}
+
+void ObjectSettings::run_prebuilt_callbacks()
+{
+    if (!is_prebuilt())
+        return;
+    std::vector<std::function<void()>> done;
+    done.swap(m_prebuilt);
+    for (auto &fn : done)
+        fn();
+}
+
+void ObjectSettings::on_extruders_changed()
+{
+    // Nothing is rebuilt: the extruder dropdown is the one row the count decides, refilled in place
+    // after the current event, and shown only while there is more than one extruder. A build under
+    // way refills it as it ends.
+    if (!m_built || m_extruders_update_pending)
+        return;
+    m_extruders_update_pending = true;
+    CallAfter(
+        [this]()
+        {
+            m_extruders_update_pending = false;
+            if (!m_built)
+                return;
+            update_extruder_row();
+            apply_scope();
+            if (m_open)
+                refresh();
+        });
+}
+
+void ObjectSettings::update_extruder_row()
+{
+    const int count = int(extruders_count());
+    for (auto &row : m_rows)
+    {
+        // The role extruders' spinners stop at the count
+        if (row->def != nullptr && row->def->type == coInt)
+            if (auto *spin = dynamic_cast<SpinInput *>(row->control))
+            {
+                const int min_val = row->def->min > INT_MIN ? int(row->def->min) : 0;
+                const int max_val = row->def->max < INT_MAX ? int(row->def->max) : 10000;
+                if (const int role_max = wxGetApp().extruder_role_max(row->key, max_val); role_max != max_val)
+                    spin->SetRange(min_val, role_max);
+            }
+        if (row->key == EXTRUDER_KEY)
+            if (auto *combo = dynamic_cast<::ComboBox *>(row->control))
+            {
+                const int selected = combo->GetSelection();
+                combo->Clear();
+                combo->Append(_L("default"));
+                for (int i = 1; i <= count; ++i)
+                    combo->Append(wxString::Format("%d", i));
+                combo->SetSelection(std::clamp(selected, 0, count));
+                // The next refresh writes the row's value against the new entries
+                row->state_known = false;
+            }
+    }
 }
 
 void ObjectSettings::close()
 {
     m_open = false;
     Hide();
+    GuiBudget::snapshot("overrides.close");
 }
 
 void ObjectSettings::refresh()
@@ -583,9 +592,9 @@ void ObjectSettings::refresh()
         close();
         return;
     }
-    if (!m_built || m_built_extruders != extruders_count())
-        build_rows();
-    wxWindowUpdateLocker no_updates(this);
+    if (!is_prebuilt())
+        ensure_built();
+    RedrawLock no_redraw(this);
     apply_scope();
     refresh_header();
     refresh_rows();
@@ -594,88 +603,289 @@ void ObjectSettings::refresh()
 
 // ---- building -------------------------------------------------------------
 
-void ObjectSettings::clear_rows()
+void ObjectSettings::clear_rows(bool later)
 {
+    wxPanel *content = m_scroll->GetContentPanel();
+    // A build under way retires its half-built page with the others: the page's panel is a child of
+    // the content but not yet in its sizer, and its rows are already in m_rows
+    if (m_build && m_build->page)
+    {
+        m_build->page->panel->Hide();
+        m_old_pages.push_back(std::move(m_build->page));
+        DBG_COUNT_LOAD("OVERRIDES_BUILD_RESTARTED");
+        GuiBudget::snapshot("overrides.build.restarted");
+    }
+    if (later)
+    {
+        // Detached and hidden now, destroyed a page per chunk (destroy_old_pages); the row records
+        // stay until then, since the controls' handlers hold them
+        for (auto &page : m_pages)
+            page->panel->Hide();
+        content->GetSizer()->Clear(false);
+        for (auto &page : m_pages)
+            m_old_pages.push_back(std::move(page));
+        for (auto &row : m_rows)
+            m_old_rows.push_back(std::move(row));
+    }
+    else
+    {
+        destroy_old_pages(std::nullopt);
+        content->GetSizer()->Clear(true);
+    }
     m_rows.clear();
     m_pages.clear();
     m_bar_pages.clear();
     m_active_page = -1;
     m_categories->SetItems({});
-    wxPanel *content = m_scroll->GetContentPanel();
-    content->GetSizer()->Clear(true);
     m_built = false;
+}
+
+bool ObjectSettings::destroy_old_pages(std::optional<std::chrono::milliseconds> budget)
+{
+    const auto started = std::chrono::steady_clock::now();
+    auto spent = [&]()
+    {
+        return budget && std::chrono::steady_clock::now() - started >= *budget;
+    };
+    while (!m_old_pages.empty())
+    {
+        Page &page = *m_old_pages.back();
+        // A group at a time: a page is hundreds of windows
+        while (!page.groups.empty())
+        {
+            if (spent())
+                return false;
+            Group &group = *page.groups.back();
+            group.sizer->Clear(true); // the rows' windows
+            if (group.header != nullptr)
+                group.header->Destroy();
+            page.panel->GetSizer()->Detach(group.sizer);
+            delete group.sizer; // and its box
+            page.groups.pop_back();
+        }
+        if (spent())
+            return false;
+        page.panel->Destroy();
+        m_old_pages.pop_back();
+    }
+    m_old_rows.clear();
+    return true;
 }
 
 void ObjectSettings::build_rows()
 {
-    wxWindowUpdateLocker no_updates(this);
-    clear_rows();
+    count_sync_build();
+    RedrawLock no_redraw(this);
+    begin_build(false);
+    continue_build(std::nullopt);
+    end_build();
+    // After the current event, so a caller waiting for the rows never runs inside this one
+    CallAfter([this]() { run_prebuilt_callbacks(); });
+}
+
+void ObjectSettings::ensure_built()
+{
+    if (is_prebuilt())
+        return;
+    count_sync_build();
+    RedrawLock no_redraw(this);
+    destroy_old_pages(std::nullopt);
+    if (!m_build)
+        begin_build(false);
+    continue_build(std::nullopt);
+    end_build();
+    CallAfter([this]() { run_prebuilt_callbacks(); });
+}
+
+// A full build that holds the window until it ends (hundreds of windows): only an open panel
+// whose rows must change at once does it, so each one is counted and traced
+void ObjectSettings::count_sync_build()
+{
+    DBG_COUNT_LOAD("OVERRIDES_SYNC_BUILD");
+    GuiBudget::snapshot("overrides.build.sync");
+}
+
+// The rows are rebuilt for a new theme or scale: closed, in chunks as at start-up, so the next
+// open builds nothing; open, at once, since the panel shows them
+void ObjectSettings::rebuild()
+{
+    if (m_open)
+    {
+        RedrawLock no_redraw(this);
+        clear_rows();
+        build_rows();
+        refresh();
+        return;
+    }
+    GuiBudget::snapshot("overrides.prebuild.begin");
+    begin_build(true);
+    m_build_timer.StartOnce(PREBUILD_TICK_MS);
+}
+
+void ObjectSettings::begin_build(bool chunked)
+{
+    GuiBudget::snapshot("overrides.build.begin");
+    m_build_timer.Stop();
+    m_layout_timer.Stop();
+    m_scope_pending = false;
+    m_layout_ends_prebuild = false;
+    const auto clearing = std::chrono::steady_clock::now();
+    clear_rows(chunked);
+    GuiBudget::measure("overrides.build.cleared", GuiBudget::ms_since(clearing));
 
     // A click on the panel's dead space commits the field being edited, as in the sidebar. The
     // persistent widgets are bound once, while the content is empty; each page's tree when built.
-    Sidebar &sidebar = wxGetApp().sidebar();
     if (!m_dead_space_bound)
     {
-        sidebar.BindDeadSpaceHandlers(this);
+        wxGetApp().sidebar().BindDeadSpaceHandlers(this);
         m_dead_space_bound = true;
     }
+    m_scroll->GetContentPanel()->SetBackgroundColour(panel_background());
 
-    const size_t extruders = extruders_count();
+    m_build.emplace();
+    m_build->extruders = extruders_count();
+    // The project's rules, which each new row starts from
+    m_build->rule_states = apply_toggle_rules(SettingPresetPrint, project_config(), m_build->extruders);
+    for (const ToggleState &state : m_build->rule_states)
+        if (state.extruder < 0)
+            m_build->rules[state.key] = &state;
+}
+
+// Every key an object may carry, page by page and row by row; a sub-item's scope hides what it
+// cannot (apply_scope)
+bool ObjectSettings::continue_build(std::optional<std::chrono::milliseconds> budget)
+{
+    if (!m_build)
+        return true;
+    BuildCursor &build = *m_build;
+    const auto started = std::chrono::steady_clock::now();
+    const std::vector<SettingPage> &pages = setting_pages();
     wxPanel *content = m_scroll->GetContentPanel();
-    content->SetBackgroundColour(panel_background());
-    wxSizer *content_sizer = content->GetSizer();
-
-    // Every key an object may carry; a sub-item's scope hides what it cannot (apply_scope)
-    for (const SettingPage &page_spec : setting_pages())
+    while (build.spec_page < pages.size())
     {
-        if ((page_spec.presets & SettingPresetPrint) == 0)
-            continue;
-        std::vector<const SettingRow *> rows;
-        for (const SettingRow &row : setting_rows())
-            if ((row.presets & SettingPresetPrint) != 0 && row.page != nullptr &&
-                std::string_view(row.page) == page_spec.title && row.widget != SettingWidget::Custom &&
-                overridable_at(OverrideScope::Object, row.key))
-                rows.push_back(&row);
-        std::stable_sort(rows.begin(), rows.end(),
-                         [](const SettingRow *a, const SettingRow *b) { return a->order < b->order; });
-        const bool extruder_row = extruders > 1 && std::string_view(page_spec.title) == "Multiple Extruders";
-        if (rows.empty() && !extruder_row)
-            continue;
-
-        auto page = std::make_unique<Page>();
-        page->title = page_spec.title;
-        page->icon = page_spec.icon;
-        page->panel = new wxPanel(content, wxID_ANY);
-        page->panel->SetBackgroundColour(panel_background());
-        page->panel->SetSizer(new wxBoxSizer(wxVERTICAL));
-
-        Group *group = nullptr;
-        if (extruder_row)
+        if (budget && std::chrono::steady_clock::now() - started >= *budget)
+            return false;
+        const SettingPage &page_spec = pages[build.spec_page];
+        if (!build.page)
         {
-            group = create_group(*page, "Extruders");
-            add_row(*group, page->panel, EXTRUDER_KEY, _L("Extruder"));
+            if ((page_spec.presets & SettingPresetPrint) == 0)
+            {
+                ++build.spec_page;
+                continue;
+            }
+            build.rows.clear();
+            for (const SettingRow &row : setting_rows())
+                if ((row.presets & SettingPresetPrint) != 0 && row.page != nullptr &&
+                    std::string_view(row.page) == page_spec.title && row.widget != SettingWidget::Custom &&
+                    overridable_at(OverrideScope::Object, row.key))
+                    build.rows.push_back(&row);
+            std::stable_sort(build.rows.begin(), build.rows.end(),
+                             [](const SettingRow *a, const SettingRow *b) { return a->order < b->order; });
+            // Built at every extruder count; apply_scope shows it while there is more than one
+            const bool extruder_row = std::string_view(page_spec.title) == "Multiple Extruders";
+            if (build.rows.empty() && !extruder_row)
+            {
+                ++build.spec_page;
+                continue;
+            }
+            build.page = std::make_unique<Page>();
+            build.page->title = page_spec.title;
+            build.page->icon = page_spec.icon;
+            build.page->panel = new wxPanel(content, wxID_ANY);
+            build.page->panel->SetBackgroundColour(panel_background());
+            build.page->panel->SetSizer(new wxBoxSizer(wxVERTICAL));
+            build.page->panel->Hide();
+            build.group = nullptr;
+            build.row = 0;
+            if (extruder_row)
+            {
+                build.group = create_group(*build.page, "Extruders");
+                prime_row(*add_row(*build.group, build.page->panel, EXTRUDER_KEY, _L("Extruder")));
+            }
+            continue;
         }
-        for (const SettingRow *row : rows)
+        if (build.row < build.rows.size())
         {
-            if (group == nullptr || group->title != row->group)
-                group = create_group(*page, row->group);
+            const SettingRow *row = build.rows[build.row++];
+            if (build.group == nullptr || build.group->title != row->group)
+                build.group = create_group(*build.page, row->group);
             const ConfigOptionDef *def = print_config_def.get(row->key);
-            add_row(*group, page->panel, row->key, def != nullptr ? _L(def->label) : wxString(row->key));
+            prime_row(*add_row(*build.group, build.page->panel, row->key,
+                               def != nullptr ? _L(def->label) : wxString(row->key)));
+            continue;
         }
-
-        content_sizer->Add(page->panel, 0, wxEXPAND);
-        page->panel->Hide();
-        sidebar.BindDeadSpaceHandlers(page->panel);
-        m_pages.push_back(std::move(page));
+        // The page is complete
+        content->GetSizer()->Add(build.page->panel, 0, wxEXPAND);
+        wxGetApp().sidebar().BindDeadSpaceHandlers(build.page->panel);
+        GuiBudget::snapshot(std::string("overrides.page.") + build.page->title);
+        m_pages.push_back(std::move(build.page));
+        ++build.spec_page;
     }
+    return true;
+}
 
+void ObjectSettings::end_build()
+{
+    if (!m_build)
+        return;
     m_built = true;
-    m_built_extruders = extruders;
+    m_build.reset();
+    // The extruder count may have changed while the build ran
+    update_extruder_row();
     apply_theme();
+    GuiBudget::snapshot("overrides.build.end");
+}
+
+// A new row shows the project's value with nothing overridden, so the first open for an item
+// writes only what differs from that
+void ObjectSettings::prime_row(Row &row)
+{
+    const DynamicPrintConfig &project = project_config();
+    if (m_build)
+        if (auto it = m_build->rules.find(row.key); it != m_build->rules.end())
+        {
+            row.rule_enabled = it->second->enabled;
+            row.reason = it->second->enabled ? wxString() : _(it->second->reason);
+        }
+    const std::string value = row.key == EXTRUDER_KEY
+                                  ? std::string("0")
+                                  : (project.has(row.key) ? project.opt_serialize(row.key) : std::string());
+    const bool was_updating = m_updating;
+    m_updating = true;
+    set_control_value(row, value);
+    set_row_state(row, false, false, _L("Same as the project value."));
+    m_updating = was_updating;
+}
+
+// One hidden page of the bar's categories per timer event, laid out at the width it will be shown
+// at, so its first click shows it without laying its rows out
+void ObjectSettings::on_layout_timer()
+{
+    if (!m_built || wxGetApp().plater() == nullptr)
+        return;
+    for (int p : m_bar_pages)
+    {
+        if (p == m_active_page)
+            continue;
+        wxPanel *panel = m_pages[p]->panel;
+        const int height = panel->GetSizer()->GetMinSize().y;
+        const wxSize size(m_scroll->ContentWidthFor(height), height);
+        if (panel->GetSize() == size)
+            continue;
+        const auto started = std::chrono::steady_clock::now();
+        // Hidden, it lays its rows out through its size event and paints nothing
+        panel->SetSize(size);
+        GuiBudget::measure("overrides.page_layout", GuiBudget::ms_since(started));
+        m_layout_timer.StartOnce(PREBUILD_TICK_MS);
+        return;
+    }
+    if (m_layout_ends_prebuild)
+        end_prebuild();
 }
 
 void ObjectSettings::apply_scope()
 {
+    const bool several_extruders = extruders_count() > 1;
     std::vector<int> shown_pages;
     for (size_t p = 0; p < m_pages.size(); ++p)
     {
@@ -686,7 +896,7 @@ void ObjectSettings::apply_scope()
             bool group_shown = false;
             for (Row *row : group->rows)
             {
-                const bool shown = row->key == EXTRUDER_KEY || overridable_at(m_scope, row->key);
+                const bool shown = row->key == EXTRUDER_KEY ? several_extruders : overridable_at(m_scope, row->key);
                 group->sizer->Show(row->row_sizer, shown, true);
                 group_shown = group_shown || shown;
             }
@@ -701,7 +911,7 @@ void ObjectSettings::apply_scope()
     if (shown_pages != m_bar_pages)
     {
         m_bar_pages = shown_pages;
-        std::vector<OverrideCategoryBar::Item> items;
+        std::vector<CategoryBar::Item> items;
         for (int p : m_bar_pages)
             items.push_back({_L(m_pages[p]->title.c_str()), m_pages[p]->icon, {}});
         m_categories->SetItems(std::move(items));
@@ -709,7 +919,7 @@ void ObjectSettings::apply_scope()
     }
     for (size_t p = 0; p < m_pages.size(); ++p)
         m_pages[p]->panel->Show(int(p) == m_active_page);
-    m_scroll->GetContentPanel()->Layout();
+    // Lays the content out once, at the width the scrollbar leaves
     m_scroll->UpdateScrollbar();
 }
 
@@ -772,8 +982,13 @@ ObjectSettings::Group *ObjectSettings::create_group(Page &page, const char *titl
     wxWeakRef<wxWindow> weak_header = group->header;
     group->reposition = [weak_header, box, y_pos]()
     {
-        if (!weak_header)
+        // Past the 16-bit window coordinate range, wx moves the header by scrolling the shared parent,
+        // which moves every box and re-enters here through their move events; nested calls are skipped.
+        static bool s_repositioning = false;
+        if (!weak_header || s_repositioning)
             return;
+        s_repositioning = true;
+        Luminary::ScopeGuard repositioning_guard([]() { s_repositioning = false; });
         const wxPoint p = box->GetPosition();
         weak_header->SetPosition(wxPoint(p.x + 8, p.y + y_pos)); // x+8 matches the static-box label inset
         weak_header->Raise();
@@ -814,20 +1029,25 @@ ObjectSettings::Row *ObjectSettings::add_row(Group &group, wxWindow *parent, con
     auto *row_sizer = new wxBoxSizer(wxHORIZONTAL);
     auto *left_sizer = new wxBoxSizer(wxHORIZONTAL);
 
-    row->accent = new wxPanel(parent, wxID_ANY);
-    row->accent->SetMinSize(wxSize(std::max(2, em / 4), -1));
-    row->accent->SetBackgroundColour(bg);
-    left_sizer->Add(row->accent, 0, wxEXPAND);
+    // The accent edge at the row's left and the lock, in one window as tall as the row; the enable
+    // checkbox follows the icons as in the sidebar's nullable rows
+    row->lock = new RowIcons(parent, false, true, false);
+    row->lock->SetBackgroundColour(bg);
+    row->lock->SetAccent(bg, accent_width());
+    row->lock->SetIcon(RowIcons::Lock, *get_bmp_bundle("lock_closed"));
+    left_sizer->Add(row->lock, 0, wxEXPAND);
 
     row->enable = new ::CheckBox(parent);
     row->enable->SetBackgroundColour(bg);
     row->enable->Bind(wxEVT_CHECKBOX, [this, row](wxCommandEvent &) { on_enable_changed(*row); });
+    // Its tooltip names the open item: written as the pointer arrives, not for every row on each open
+    row->enable->Bind(wxEVT_ENTER_WINDOW,
+                      [this, row](wxMouseEvent &evt)
+                      {
+                          set_tooltip_once(row->enable, row->tip_enable, enable_tip(row->enable->GetValue()));
+                          evt.Skip();
+                      });
     left_sizer->Add(row->enable, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, icon_margin());
-
-    row->lock = new wxStaticBitmap(parent, wxID_ANY, *get_bmp_bundle("lock_closed"));
-    row->lock->SetMinSize(icon_size());
-    row->lock->SetBackgroundColour(bg);
-    left_sizer->Add(row->lock, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, icon_margin());
 
     row->label_text = new wxStaticText(parent, wxID_ANY, label + ":", wxDefaultPosition, wxDefaultSize,
                                        wxST_ELLIPSIZE_END);
@@ -892,7 +1112,8 @@ wxWindow *ObjectSettings::create_control(wxWindow *parent, wxSizer *sizer, Row &
     case coInt:
     {
         const int min_val = row.def->min > INT_MIN ? int(row.def->min) : 0;
-        const int max_val = row.def->max < INT_MAX ? int(row.def->max) : 10000;
+        // An option naming an extruder stops at the printer's extruder count (update_extruder_row)
+        const int max_val = wxGetApp().extruder_role_max(row.key, row.def->max < INT_MAX ? int(row.def->max) : 10000);
         auto *spin = new SpinInput(parent, "0", "", wxDefaultPosition, wxSize(input_width(), -1), 0, min_val, max_val,
                                    0);
         if (row.def->step > 1)
@@ -1049,17 +1270,23 @@ std::string ObjectSettings::read_control_value(const Row &row) const
     }
 }
 
+void ObjectSettings::select_category(int index)
+{
+    m_categories->SetActive(index);
+}
+
 // index is the category bar's; the bar lists the pages the open scope shows
 void ObjectSettings::show_page(int index)
 {
     if (index < 0 || index >= int(m_bar_pages.size()))
         return;
-    wxWindowUpdateLocker no_updates(m_scroll);
+    GuiBudget::Span span("overrides.category");
+    RedrawLock no_redraw(m_scroll);
     m_active_page = m_bar_pages[index];
     for (size_t i = 0; i < m_pages.size(); ++i)
         m_pages[i]->panel->Show(int(i) == m_active_page);
-    m_scroll->GetContentPanel()->Layout();
     m_scroll->ScrollToPosition(0);
+    // Lays the content out once, at the width the scrollbar leaves
     m_scroll->UpdateScrollbar();
     Layout();
 }
@@ -1110,17 +1337,10 @@ void ObjectSettings::apply_rules(const DynamicPrintConfig &effective)
     }
 }
 
-// A tooltip is set only when it changed: every refresh visits every row, and a tooltip write
-// is not free on Windows
-static void set_tooltip_once(wxWindow *window, wxString &last, const wxString &tooltip)
+wxString ObjectSettings::enable_tip(bool checked) const
 {
-    if (window == nullptr || tooltip == last)
-        return;
-    last = tooltip;
-    if (tooltip.IsEmpty())
-        window->UnsetToolTip();
-    else
-        window->SetToolTip(tooltip);
+    return checked ? _L("Follow the project (remove the override)")
+                   : format_wxstr(_L("Override this setting for %1%"), item_name());
 }
 
 void ObjectSettings::set_row_state(Row &row, bool checked, bool differs, const wxString &lock_tip)
@@ -1128,17 +1348,19 @@ void ObjectSettings::set_row_state(Row &row, bool checked, bool differs, const w
     if (row.enable->GetValue() != checked)
         row.enable->SetValue(checked);
     row.enable->Enable(row.rule_enabled);
-    set_tooltip_once(row.enable, row.tip_enable,
-                     checked ? _L("Follow the project (remove the override)")
-                             : format_wxstr(_L("Override this setting for %1%"), item_name()));
+    // The checkbox's tooltip names the open item, so it is written when the pointer reaches the
+    // checkbox (add_row), and here only for a row whose check changed while it has one
+    if (row.state_known && row.last_checked != checked && !row.tip_enable.IsEmpty())
+        set_tooltip_once(row.enable, row.tip_enable, enable_tip(checked));
     if (!row.state_known || row.last_checked != checked)
-    {
-        row.accent->SetBackgroundColour(checked ? UIColors::AccentPrimary() : panel_background());
-        row.accent->Refresh();
-    }
+        row.lock->SetAccent(checked ? UIColors::AccentPrimary() : panel_background(), accent_width());
     if (!row.state_known || row.last_differs != differs)
-        row.lock->SetBitmap(*get_bmp_bundle(differs ? "lock_open" : "lock_closed"));
-    set_tooltip_once(row.lock, row.tip_lock, lock_tip);
+        row.lock->SetIcon(RowIcons::Lock, *get_bmp_bundle(differs ? "lock_open" : "lock_closed"));
+    if (lock_tip != row.tip_lock)
+    {
+        row.tip_lock = lock_tip;
+        row.lock->SetTip(RowIcons::Lock, lock_tip);
+    }
     if (row.control != nullptr)
         row.control->Enable(checked && row.rule_enabled);
 
@@ -1231,7 +1453,6 @@ void ObjectSettings::refresh_rows()
     }
     m_categories->SetCounts(std::move(page_counts));
 
-    m_scroll->GetContentPanel()->Layout();
     m_scroll->UpdateScrollbar();
 }
 
@@ -1457,16 +1678,12 @@ void ObjectSettings::on_reset_all()
 
 // ---- theme and scale ------------------------------------------------------
 
-// The rows are rebuilt for the new theme or scale at once, hidden when the panel is closed, so
-// the next open shows them without building
+// A new theme or scale rebuilds the rows (rebuild): every colour and size is the build's, so the
+// rows match a fresh start in the new theme without a second path that recolours them
 void ObjectSettings::sys_color_changed()
 {
     m_close->sys_color_changed();
-    wxWindowUpdateLocker no_updates(this);
-    clear_rows();
-    build_rows();
-    if (m_open)
-        refresh();
+    rebuild();
     apply_theme();
 }
 
@@ -1475,11 +1692,7 @@ void ObjectSettings::msw_rescale()
     m_close->sys_color_changed();
     m_categories->UpdateAppearance();
     m_scroll->msw_rescale();
-    wxWindowUpdateLocker no_updates(this);
-    clear_rows();
-    build_rows();
-    if (m_open)
-        refresh();
+    rebuild();
     Layout();
 }
 

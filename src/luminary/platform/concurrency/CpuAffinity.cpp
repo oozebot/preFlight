@@ -4,6 +4,9 @@
 ///|/
 
 #include "CpuAffinity.hpp"
+#include "WorkerPolicy.hpp"
+
+#include <algorithm>
 
 #if defined(PREFLIGHT_CPU_AFFINITY_SUPPORTED) && defined(_WIN32)
 
@@ -146,6 +149,28 @@ bool restore_full_cpu_affinity()
     return ok != 0;
 }
 
+std::size_t pcore_logical_count()
+{
+    std::vector<BYTE> buffer;
+    if (!query_cpu_sets(buffer))
+        return 0;
+    BYTE max_class = 0;
+    for_each_cpu_set(buffer, [&](const SYSTEM_CPU_SET_INFORMATION &info)
+                     { max_class = std::max(max_class, info.CpuSet.EfficiencyClass); });
+    std::size_t count = 0;
+    bool homogeneous = true;
+    // Counted as apply_pcore_only_affinity() masks them: the logical processors of the first 64
+    for_each_cpu_set(buffer,
+                     [&](const SYSTEM_CPU_SET_INFORMATION &info)
+                     {
+                         if (info.CpuSet.EfficiencyClass != max_class)
+                             homogeneous = false;
+                         else if (info.CpuSet.LogicalProcessorIndex < sizeof(DWORD_PTR) * 8)
+                             ++count;
+                     });
+    return homogeneous ? 0 : count;
+}
+
 } // namespace Luminary
 
 #elif defined(PREFLIGHT_CPU_AFFINITY_SUPPORTED) && defined(__linux__)
@@ -283,6 +308,15 @@ bool restore_full_cpu_affinity()
     return ok;
 }
 
+std::size_t pcore_logical_count()
+{
+    std::vector<int> p, e;
+    if (!read_cpulist_file("/sys/devices/cpu_core/cpus", p) || p.empty() ||
+        !read_cpulist_file("/sys/devices/cpu_atom/cpus", e) || e.empty())
+        return 0;
+    return p.size();
+}
+
 } // namespace Luminary
 
 #else // PREFLIGHT_CPU_AFFINITY_SUPPORTED
@@ -302,7 +336,72 @@ bool restore_full_cpu_affinity()
 {
     return false;
 }
+std::size_t pcore_logical_count()
+{
+    return 0;
+}
 
 } // namespace Luminary
 
 #endif // PREFLIGHT_CPU_AFFINITY_SUPPORTED
+
+namespace Luminary
+{
+
+std::size_t apply_cpu_policy(std::size_t user_cap, bool pcores_only)
+{
+    std::size_t cap = user_cap;
+    if (pcores_only && apply_pcore_only_affinity())
+    {
+        // The pool keeps the size it had when it started; without a cap it would run more workers than the
+        // P-cores it may use
+        const std::size_t pcores = pcore_logical_count();
+        if (pcores > 0)
+            cap = cap > 0 ? std::min(cap, pcores) : pcores;
+    }
+    else if (!pcores_only)
+        restore_full_cpu_affinity();
+    if (cap > 0)
+        thread_count = cap;
+    else
+        thread_count.reset();
+    enforce_thread_count(cap);
+    return cap;
+}
+
+} // namespace Luminary
+
+// The process affinity is read on every platform, with or without P/E core support. Included here, after the
+// Windows block above raised the SDK target for its own windows.h.
+#if defined(_WIN32)
+#include <windows.h>
+#elif defined(__linux__)
+#include <sched.h>
+#else
+#include <thread>
+#endif
+#include <bit>
+
+namespace Luminary
+{
+
+std::size_t process_affinity_popcount()
+{
+#if defined(_WIN32)
+    DWORD_PTR process_mask = 0;
+    DWORD_PTR system_mask = 0;
+    if (GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask))
+        return std::size_t(std::popcount(process_mask));
+    return 0;
+#elif defined(__linux__)
+    cpu_set_t mask;
+    CPU_ZERO(&mask);
+    if (sched_getaffinity(0, sizeof(mask), &mask) == 0)
+        return std::size_t(CPU_COUNT(&mask));
+    return 0;
+#else
+    return std::size_t(std::thread::hardware_concurrency());
+#endif
+}
+
+} // namespace Luminary

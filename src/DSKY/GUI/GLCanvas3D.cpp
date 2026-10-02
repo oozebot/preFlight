@@ -43,6 +43,11 @@
 #include "3DBed.hpp"
 #include "3DScene.hpp"
 #include "ScenePasses.hpp"
+#include "RenderPassTimer.hpp"
+#include "RenderCrashGuard.hpp"
+#include "luminary/core/diagnostics/DebugCounters.hpp"
+
+#include <sstream>
 #include "CSGPreviewManager.hpp"
 #include "BackgroundSlicingProcess.hpp"
 #include "GLShader.hpp"
@@ -71,11 +76,7 @@
 #include "DSKY/Utils/RetinaHelper.hpp"
 #endif
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 #include <wx/glcanvas.h>
 #include <wx/bitmap.h>
@@ -104,6 +105,7 @@
 #include <cmath>
 
 #include <map>
+#include <set>
 
 #ifndef IMGUI_DEFINE_MATH_OPERATORS
 #define IMGUI_DEFINE_MATH_OPERATORS
@@ -669,12 +671,8 @@ void GLCanvas3D::LayersEditing::render_profile(const GLCanvas3D &canvas)
         m_profile.profile.init_from(std::move(init_data));
     }
 
-#if PREFLIGHT_OPENGL_ES
-    GLShaderProgram *shader = canvas.get_shader("dashed_lines");
-#else
     GLShaderProgram *shader = OpenGLManager::get_gl_info().is_core_profile() ? canvas.get_shader("dashed_thick_lines")
                                                                              : canvas.get_shader("flat");
-#endif // PREFLIGHT_OPENGL_ES
     if (shader != nullptr)
     {
         shader->start_using();
@@ -684,17 +682,13 @@ void GLCanvas3D::LayersEditing::render_profile(const GLCanvas3D &canvas)
         shader->set_uniform("view_model_matrix",
                             Geometry::translation_transform(Vec3d(2.0 * bar_shift_px / cnv_width, 0.0, 0.0)));
         shader->set_uniform("projection_matrix", Transform3d::Identity());
-#if !PREFLIGHT_OPENGL_ES
         if (OpenGLManager::get_gl_info().is_core_profile())
         {
-#endif // !PREFLIGHT_OPENGL_ES
             // Line widths are in pixels of the canvas viewport the overlays draw in.
             shader->set_uniform("viewport_size", Vec2d(double(cnv_width), double(cnv_height)));
             shader->set_uniform("width", 0.25f);
             shader->set_uniform("gap_size", 0.0f);
-#if !PREFLIGHT_OPENGL_ES
         }
-#endif // !PREFLIGHT_OPENGL_ES
         m_profile.baseline.render();
         m_profile.profile.render();
         shader->stop_using();
@@ -1379,11 +1373,7 @@ bool GLCanvas3D::init()
         return false;
 
     glsafe(::glClearColor(1.0f, 1.0f, 1.0f, 1.0f));
-#if PREFLIGHT_OPENGL_ES
-    glsafe(::glClearDepthf(1.0f));
-#else
     glsafe(::glClearDepth(1.0f));
-#endif // PREFLIGHT_OPENGL_ES
 
     glsafe(::glDepthFunc(GL_LESS));
 
@@ -2110,6 +2100,75 @@ void render_autoslicing_wait(ImGuiWrapper *imgui, float center_x)
     ImGui::End();
 }
 
+// A requested render feature drawn lower because it failed or the driver cannot do it gets one warning per kind of
+// failure per session. Temporary blocks (a clipping plane, an open painting tool, an empty scene) stay quiet, and so
+// does Auto lighting choosing Basic on a software renderer.
+static void notify_render_fallbacks(const RenderFrameInfo &info)
+{
+    static std::set<std::string> s_notified;
+    // Sizes and counts change between the frames of one failure, so they do not make a new kind
+    auto kind_of = [](const std::string &reason)
+    {
+        std::string kind;
+        for (const char c : reason)
+            if (c < '0' || c > '9')
+                kind += c;
+            else if (kind.empty() || kind.back() != '#')
+                kind += '#';
+        return kind.substr(0, kind.find(", stopped after"));
+    };
+    auto notify = [](const std::string &key, const std::string &text, const std::string &option)
+    {
+        if (!s_notified.insert(key).second)
+            return;
+        BOOST_LOG_TRIVIAL(warning) << "Render fallback shown to the user: " << key;
+        // Pushed outside the frame, which is still drawing the notifications
+        wxGetApp().CallAfter(
+            [text, option]()
+            {
+                if (wxGetApp().plater() == nullptr)
+                    return;
+                wxGetApp().notification_manager()->push_notification(
+                    NotificationType::CustomNotification,
+                    NotificationManager::NotificationLevel::WarningNotificationLevel, text, _u8L("Open Preferences."),
+                    [option](wxEvtHandler *)
+                    {
+                        wxGetApp().CallAfter([option]() { wxGetApp().open_preferences(option, "Performance"); });
+                        return true;
+                    });
+            });
+    };
+
+    const std::string &lighting_reason = info.lighting_reason;
+    if (info.lighting_requested != "basic" && !RenderDiagnostics::is_temporary_reason(lighting_reason) &&
+        lighting_reason != "software renderer")
+    {
+        const bool full = info.lighting_requested == "full";
+        if (info.lighting_effective != (full ? "Full" : "Enhanced"))
+        {
+            const std::string text = format(full ? _u8L("Full lighting is not available: %1%.")
+                                                 : _u8L("Enhanced lighting is not available: %1%."),
+                                            lighting_reason) +
+                                     " " +
+                                     (info.lighting_effective == "Enhanced" ? _u8L("Enhanced lighting is used instead.")
+                                                                            : _u8L("Basic lighting is used instead."));
+            notify(std::string("lighting:") + (full ? "full:" : "enhanced:") + kind_of(lighting_reason), text,
+                   "canvas_lighting_quality");
+        }
+    }
+
+    if (info.ssaa_requested > 1.0 && info.ssaa_effective < info.ssaa_requested &&
+        !RenderDiagnostics::is_temporary_reason(info.ssaa_reason))
+    {
+        const bool off = info.ssaa_effective <= 1.0;
+        const std::string text = format(off ? _u8L("Supersampling is not available: %1%.")
+                                            : _u8L("Supersampling is reduced: %1%."),
+                                        info.ssaa_reason);
+        notify(std::string("ssaa:") + (off ? "off:" : "reduced:") + kind_of(info.ssaa_reason), text,
+               "canvas_ssaa_scale");
+    }
+}
+
 void GLCanvas3D::render()
 {
     if (m_in_render)
@@ -2127,7 +2186,12 @@ void GLCanvas3D::render()
         return;
 
     // ensures this canvas is current and initialized
-    if (!_is_shown_on_screen() || !_set_current() || (m_init_opengl && !m_init_opengl()))
+    if (!_is_shown_on_screen() || !_set_current())
+        return;
+    // Render settings this process has not proven are marked on disk before the GL work that could hang the driver:
+    // the GL setup, the shader compilation and the frame itself
+    RenderCrashGuard::get().before_frame(m_app_config);
+    if (m_init_opengl && !m_init_opengl())
         return;
 
     if (!is_initialized() && !init())
@@ -2144,6 +2208,9 @@ void GLCanvas3D::render()
         m_event_poster->postEvent(CanvasEventType::UpdateBedShape);
         return;
     }
+
+    // Per-pass timing in the capture runner's bench frames; each mark names the work since the previous one
+    RENDER_PASS_BEGIN_FRAME();
 
 #if ENABLE_ENVIRONMENT_MAP
     if (is_editor())
@@ -2193,6 +2260,19 @@ void GLCanvas3D::render()
         glsafe(::glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
         _render_background();
         camera.apply_viewport();
+    }
+
+    m_frame_info = RenderFrameInfo();
+    m_frame_info.canvas_width = cnv_size.get_width();
+    m_frame_info.canvas_height = cnv_size.get_height();
+    for (int i = 0; i < 4; ++i)
+        m_frame_info.viewport[i] = camera.get_viewport()[i];
+    m_frame_info.strip_hidden = strip_hidden;
+    m_frame_info.msaa_requested = OpenGLManager::msaa_requested();
+    {
+        GLint window_samples = 0;
+        glsafe(::glGetIntegerv(GL_SAMPLES, &window_samples));
+        m_frame_info.msaa_window = window_samples;
     }
 
     // Update ImGui display size and font scaling whenever the canvas size changes.
@@ -2272,28 +2352,52 @@ void GLCanvas3D::render()
         m_scene_supersampler = std::make_unique<SceneSupersampler>([this](const std::string &name)
                                                                    { return get_shader(name); });
     const std::array<int, 4> &native_vp = camera.get_viewport();
-    // A viewport smaller than the canvas renders offscreen even without supersampling, so the screen-space
-    // lighting passes keep their origin-based lookups and only the resolve lands in the viewport.
     const bool viewport_inset = native_vp[0] != 0 || native_vp[1] != 0 || native_vp[2] != cnv_size.get_width() ||
                                 native_vp[3] != cnv_size.get_height();
+    // Without supersampling the scene renders straight into the window's multisampled framebuffer, inset
+    // viewport included, so the MSAA setting applies; the offscreen target is single-sampled.
+    const double ssaa_requested = SceneSupersampler::requested_scale(m_app_config);
     const bool ssaa_on = !s_multiple_beds.is_autoslicing() &&
-                         m_scene_supersampler->begin(native_vp[2], native_vp[3],
-                                                     SceneSupersampler::requested_scale(m_app_config), viewport_inset);
+                         m_scene_supersampler->begin(native_vp[2], native_vp[3], ssaa_requested);
+    const int scene_target_x = ssaa_on ? 0 : native_vp[0];
+    const int scene_target_y = ssaa_on ? 0 : native_vp[1];
     const int scene_target_w = ssaa_on ? m_scene_supersampler->width() : native_vp[2];
     const int scene_target_h = ssaa_on ? m_scene_supersampler->height() : native_vp[3];
+    m_frame_info.ssaa_requested = ssaa_requested;
+    m_frame_info.ssaa_effective = ssaa_on ? m_scene_supersampler->effective_scale() : 1.0;
+    m_frame_info.ssaa_reason = s_multiple_beds.is_autoslicing() && ssaa_requested > 1.0
+                                   ? "multiple bed overview"
+                                   : m_scene_supersampler->reason();
+    m_frame_info.scene_width = scene_target_w;
+    m_frame_info.scene_height = scene_target_h;
 
     // Full lighting tier: build the shadow map and ambient-occlusion chain for this
     // frame before the visible pass. Skipped while clipping planes or a painting tool
     // are active; the frame then renders as the Enhanced tier.
     if (m_scene_passes == nullptr)
         m_scene_passes = std::make_unique<ScenePasses>([this](const std::string &name) { return get_shader(name); });
+    // App-config keys, on unless set to "0": the toolpath prefilter (the "Smooth layer lines" preference, applied in
+    // _render_gcode) and the hidden key for the SSAO normal of toolpath pixels rebuilt from depth
+    m_frame_info.prefilter_requested = m_app_config == nullptr || m_app_config->get("toolpath_prefilter") != "0";
+    const bool ao_toolpath_normals = m_app_config == nullptr || m_app_config->get("ao_toolpath_normals") != "0";
+    m_scene_passes->set_ao_toolpath_normals(ao_toolpath_normals);
+    m_frame_info.ao_toolpath_normals = m_scene_passes->ao_toolpath_normal_step();
     const bool preview_toolpaths = !m_main_toolbar.is_enabled() && m_gcode_viewer.has_data();
-    // The Full tier samples its screen-space textures at the fragment's framebuffer position, which only
-    // matches an origin viewport; with an inset viewport it needs the offscreen scene target.
-    const bool wants_full_lighting = ScenePasses::wants_full(m_app_config) && !s_multiple_beds.is_autoslicing() &&
-                                     !m_use_clipping_planes && (!m_volumes.empty() || preview_toolpaths) &&
-                                     (!viewport_inset || ssaa_on) &&
-                                     dynamic_cast<GLGizmoPainterBase *>(m_gizmos.get_current()) == nullptr;
+    const bool full_requested = ScenePasses::wants_full(m_app_config);
+    std::string full_blocked;
+    if (full_requested)
+    {
+        if (s_multiple_beds.is_autoslicing())
+            full_blocked = "multiple bed overview";
+        else if (m_use_clipping_planes)
+            full_blocked = "clipping plane active";
+        else if (m_volumes.empty() && !preview_toolpaths)
+            full_blocked = "nothing to shade";
+        else if (dynamic_cast<GLGizmoPainterBase *>(m_gizmos.get_current()) != nullptr)
+            full_blocked = "painting tool open";
+    }
+    const bool wants_full_lighting = full_requested && full_blocked.empty();
+    RENDER_PASS_MARK("setup");
     if (wants_full_lighting)
     {
         const Vec3d bed_offset = s_multiple_beds.get_bed_translation(s_multiple_beds.get_active_bed());
@@ -2308,19 +2412,32 @@ void GLCanvas3D::render()
             toolpath_casters.bbox = m_gcode_viewer.get_paths_bounding_box();
             toolpath_casters.bbox.translate(bed_offset);
         }
+        // The G-buffer and AO chain render at the native viewport size, also under SSAA
         m_scene_passes->run(
-            m_volumes, camera, bed_offset, [this]() { m_bed.render_shadow_catcher_geometry(); }, scene_target_w,
-            scene_target_h, preview_toolpaths ? &toolpath_casters : nullptr);
+            m_volumes, camera, bed_offset, [this]() { m_bed.render_shadow_catcher_geometry(); }, scene_target_x,
+            scene_target_y, scene_target_w, scene_target_h, native_vp[2], native_vp[3],
+            preview_toolpaths ? &toolpath_casters : nullptr);
         if (ssaa_on)
             m_scene_supersampler->rebind();
         else
             camera.apply_viewport();
     }
     else
-        m_scene_passes->set_inactive();
+    {
+        m_scene_passes->set_inactive(full_blocked);
+        // Turning Full off frees its targets; a temporary block keeps them for when it lifts
+        if (!full_requested)
+            m_scene_passes->release_targets();
+    }
 
     // draw scene
     glsafe(::glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT));
+    {
+        // The samples of the framebuffer the scene draws into: the window's with MSAA, 0 in the offscreen target
+        GLint scene_samples = 0;
+        glsafe(::glGetIntegerv(GL_SAMPLES, &scene_samples));
+        m_frame_info.msaa_scene = scene_samples;
+    }
     if (viewport_inset && !ssaa_on)
     {
         // Rendering straight into the native framebuffer: that clear wiped the strip, so paint it again.
@@ -2329,12 +2446,14 @@ void GLCanvas3D::render()
         camera.apply_viewport();
     }
     _render_background();
+    RENDER_PASS_MARK("clear_bg");
 
     if (!s_multiple_beds.is_autoslicing())
     {
         _render_objects(GLVolumeCollection::ERenderType::Opaque);
         _render_selection();
         _render_bed_axes();
+        RENDER_PASS_MARK("objects_opaque");
         if (is_looking_downward)
         {
             _render_bed(camera.get_view_matrix(), camera.get_projection_matrix(), false);
@@ -2343,9 +2462,12 @@ void GLCanvas3D::render()
                                                    s_multiple_beds.get_bed_translation(
                                                        s_multiple_beds.get_active_bed()));
         }
+        RENDER_PASS_MARK("bed");
         if (!m_main_toolbar.is_enabled())
             _render_gcode();
+        RENDER_PASS_MARK("gcode");
         _render_objects(GLVolumeCollection::ERenderType::Transparent);
+        RENDER_PASS_MARK("transparent");
 
 #if ENABLE_RENDER_SELECTION_CENTER
         _render_selection_center();
@@ -2376,9 +2498,22 @@ void GLCanvas3D::render()
             // The offscreen target starts at the viewport origin, the native framebuffer at the canvas origin.
             const double read_x = ssaa_read ? double(pick.x() - vp[0]) * read_scale : double(pick.x());
             float depth = 1.0f;
-            glsafe(::glReadPixels(int(std::lround(read_x)), read_h - int(std::lround(pick.y() * read_scale)) - 1, 1, 1,
-                                  GL_DEPTH_COMPONENT, GL_FLOAT, &depth));
-            const Vec3d picked = (depth < 1.0f && depth > 0.0f) ? _mouse_to_3d(pick, &depth) : _mouse_to_3d(pick);
+            // Release builds do not check GL errors, so the read checks its own; an error pending from earlier
+            // work would be charged to it, so the queue is drained first.
+            for (int i = 0; i < 16 && ::glGetError() != GL_NO_ERROR; ++i)
+            {
+            }
+            ::glReadPixels(int(std::lround(read_x)), read_h - int(std::lround(pick.y() * read_scale)) - 1, 1, 1,
+                           GL_DEPTH_COMPONENT, GL_FLOAT, &depth);
+            const bool depth_read = ::glGetError() == GL_NO_ERROR;
+            if (!depth_read)
+                DBG_COUNT_LOAD("RENDER_PIVOT_DEPTH_READ_FAILED");
+            // A failed read falls back to the raycaster and the bed plane
+            const Vec3d picked = (depth_read && depth < 1.0f && depth > 0.0f) ? _mouse_to_3d(pick, &depth)
+                                                                              : _mouse_to_3d(pick);
+            BOOST_LOG_TRIVIAL(debug) << "Pivot pick at " << pick.x() << "," << pick.y() << ": depth " << depth
+                                     << (depth_read ? "" : " (read failed)") << ", point " << picked.x() << ","
+                                     << picked.y() << "," << picked.z();
             animate_pivot_to(picked);
         }
 
@@ -2453,8 +2588,29 @@ void GLCanvas3D::render()
 
     // Resolve the supersampled scene to the native framebuffer; overlays render
     // on top at native resolution.
+    RENDER_PASS_MARK("scene_rest");
     if (ssaa_on)
         m_scene_supersampler->end(native_vp[0], native_vp[1], native_vp[2], native_vp[3]);
+    RENDER_PASS_MARK("resolve");
+
+    _update_frame_lighting_info(full_requested);
+
+#ifdef PREFLIGHT_TEST_HOOKS
+    if (m_test_scene_capture)
+    {
+        // The whole canvas, strip included, as the next overlay-free frame shows it
+        const int w = cnv_size.get_width();
+        const int h = cnv_size.get_height();
+        std::vector<uint8_t> rgb(size_t(w) * size_t(h) * 3);
+        glsafe(::glViewport(0, 0, w, h));
+        glsafe(::glPixelStorei(GL_PACK_ALIGNMENT, 1));
+        glsafe(::glReadPixels(0, 0, w, h, GL_RGB, GL_UNSIGNED_BYTE, rgb.data()));
+        camera.apply_viewport();
+        auto capture = std::move(m_test_scene_capture);
+        m_test_scene_capture = nullptr;
+        capture(rgb, w, h);
+    }
+#endif
 
     _render_overlays();
 
@@ -2475,11 +2631,29 @@ void GLCanvas3D::render()
         ImGuiPureWrap::text("Max texture size:");
         ImGui::SameLine();
         ImGuiPureWrap::text(std::to_string(OpenGLManager::get_gl_info().get_max_tex_size()));
-        ImGuiPureWrap::text("SSAA:");
-        ImGui::SameLine();
-        ImGuiPureWrap::text(ssaa_on ? std::to_string(m_scene_supersampler->width()) + "x" +
-                                          std::to_string(m_scene_supersampler->height())
-                                    : std::string("off"));
+        ImGui::Separator();
+        // What this frame rendered with, next to the preferences
+        std::istringstream rows(RenderDiagnostics::to_key_values(m_frame_info) + RenderDiagnostics::counters_text());
+        for (std::string row; std::getline(rows, row);)
+            ImGuiPureWrap::text(row);
+        // The last G-code load's phases in whole milliseconds, its vertices and the bytes it uploaded
+        const libvgcode::LoadPhaseStats &load = m_gcode_viewer.get_load_phase_stats();
+        const auto ms = [](float value)
+        {
+            return std::to_string(std::lround(value));
+        };
+        ImGuiPureWrap::text("load_ms total=" + ms(load.total_ms) + " convert=" + ms(load.convert_ms) +
+                            " viewer_cpu=" + ms(load.viewer_cpu_ms) + " gl_upload=" + ms(load.gl_upload_ms) +
+                            " sealed=" + ms(load.sealed_ms) + " pf_search=" + ms(load.pf_search_ms) + " chunk_build=" +
+                            ms(load.chunk_build_ms) + " cog=" + ms(load.cog_ms) + " bounds=" + ms(load.bounds_ms) +
+                            " gcode_window=" + ms(load.gcode_window_ms) + " vertices=" + std::to_string(load.vertices) +
+                            " upload_bytes=" + std::to_string(load.gl_upload_bytes));
+        // Where the load's preparation ran (and why not off the UI thread), the UI thread's part, the Preview's work
+        // after the load, the first frame, and the longest UI stall from the slice's start to that frame
+        ImGuiPureWrap::text(std::string("load_prepare=") + (load.prepared_off_ui ? "slicing" : "ui") +
+                            (load.prepare_fallback.empty() ? std::string() : " (" + load.prepare_fallback + ")") +
+                            " install=" + ms(load.install_ms) + " post=" + ms(load.post_ms) +
+                            " first_frame=" + ms(load.first_frame_ms) + " ui_max_stall=" + ms(load.ui_max_stall_ms));
         ImGuiPureWrap::end();
     }
 
@@ -2546,9 +2720,53 @@ void GLCanvas3D::render()
         render_sliders();
 
     get_imgui()->render();
+    RENDER_PASS_MARK("overlays");
+
+    RenderDiagnostics::record_frame(m_canvas_role == CanvasRole::Preview ? "Preview" : "Prepare", m_frame_info);
 
     m_surface->swapBuffers();
+    RENDER_PASS_MARK("swap");
+    RENDER_PASS_END_FRAME();
     m_render_stats.increment_fps_counter();
+
+    // A completed frame that ran the armed render settings counts toward proving them; until they are proven the
+    // next frame follows at once instead of waiting for input
+    if (RenderCrashGuard::get().after_frame(RenderDiagnostics::requested_features_settled(m_frame_info)))
+    {
+        m_dirty = true;
+        request_extra_frame();
+    }
+    notify_render_fallbacks(m_frame_info);
+}
+
+#ifdef PREFLIGHT_TEST_HOOKS
+void GLCanvas3D::test_finish_gl()
+{
+    if (_set_current())
+        glsafe(::glFinish());
+}
+#endif
+
+void GLCanvas3D::_update_frame_lighting_info(bool full_requested)
+{
+    const std::string requested = m_app_config != nullptr ? m_app_config->get("canvas_lighting_quality") : "";
+    m_frame_info.lighting_requested = requested.empty() ? "auto" : requested;
+    m_frame_info.lighting_reason.clear();
+    if (m_scene_passes != nullptr && m_scene_passes->active())
+        m_frame_info.lighting_effective = "Full";
+    else
+    {
+        GLShaderProgram *model_shader = get_model_shader();
+        const bool phong = model_shader != nullptr && model_shader->get_name() == "phong";
+        m_frame_info.lighting_effective = phong ? "Enhanced" : "Basic";
+        if (full_requested && m_scene_passes != nullptr)
+            m_frame_info.lighting_reason = m_scene_passes->inactive_reason();
+        else if (!phong && requested != "basic")
+            m_frame_info.lighting_reason = should_use_phong(m_app_config) ? "shader phong failed to compile"
+                                                                          : "software renderer";
+    }
+    m_frame_info.offscreen_bytes = (m_scene_supersampler != nullptr ? m_scene_supersampler->bytes() : 0) +
+                                   (m_scene_passes != nullptr ? m_scene_passes->bytes() : 0);
 }
 
 void GLCanvas3D::render_thumbnail(ThumbnailData &thumbnail_data, unsigned int w, unsigned int h,
@@ -2801,9 +3019,6 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
             // This GLVolume will be released.
             if (volume->is_wipe_tower())
             {
-#if PREFLIGHT_OPENGL_ES
-                m_wipe_tower_meshes.clear();
-#endif // PREFLIGHT_OPENGL_ES
                 volume_idxs_wipe_towers_old.emplace(std::make_pair(volume->geometry_id.second, volume_id));
             }
             if (!m_reload_delayed)
@@ -2937,18 +3152,9 @@ void GLCanvas3D::reload_scene(bool refresh_immediately, bool force_full_scene_re
                 const double height = height_real < 0.f ? std::max(m_model->max_z(), 10.0) : height_real;
                 if (depth != 0.)
                 {
-#if PREFLIGHT_OPENGL_ES
-                    if (bed_idx >= m_wipe_tower_meshes.size())
-                        m_wipe_tower_meshes.resize(bed_idx + 1);
-                    GLVolume *volume = m_volumes.load_wipe_tower_preview(x, y, w, depth, z_and_depth_pairs,
-                                                                         (float) height, ca, a,
-                                                                         !is_wipe_tower_step_done, bw, bed_idx,
-                                                                         &m_wipe_tower_meshes[bed_idx]);
-#else
                     GLVolume *volume = m_volumes.load_wipe_tower_preview(x, y, w, depth, z_and_depth_pairs,
                                                                          (float) height, ca, a,
                                                                          !is_wipe_tower_step_done, bw, bed_idx);
-#endif // PREFLIGHT_OPENGL_ES
                     const BoundingBoxf3 &bb = volume->bounding_box();
                     m_wipe_tower_bounding_boxes[bed_idx] = BoundingBoxf{to_2d(bb.min), to_2d(bb.max)};
                     if (static_cast<int>(bed_idx) < s_multiple_beds.get_number_of_beds())
@@ -3146,7 +3352,8 @@ void GLCanvas3D::load_gcode_shells()
 
 void GLCanvas3D::load_gcode_preview(const GCodeProcessorResult &gcode_result,
                                     const std::vector<std::string> &str_tool_colors,
-                                    const std::vector<std::string> &str_color_print_colors)
+                                    const std::vector<std::string> &str_color_print_colors,
+                                    std::shared_ptr<PreparedPreview> prepared, const std::string &unprepared_reason)
 {
     _set_current();
 
@@ -3155,7 +3362,8 @@ void GLCanvas3D::load_gcode_preview(const GCodeProcessorResult &gcode_result,
     m_gcode_viewer.enable_view_type_cache_write(true);
     m_gcode_viewer.enable_view_type_cache_load(true);
     m_gcode_viewer.set_view_type(m_gcode_viewer.get_view_type());
-    m_gcode_viewer.load_as_gcode(gcode_result, *this->fff_print(), str_tool_colors, str_color_print_colors);
+    m_gcode_viewer.load_as_gcode(gcode_result, *this->fff_print(), str_tool_colors, str_color_print_colors,
+                                 std::move(prepared), unprepared_reason);
     m_gcode_layers_times_cache = m_gcode_viewer.get_layers_times();
     m_gcode_viewer.set_force_shells_visible(false);
     m_gcode_viewer.enable_legend(true);
@@ -6846,12 +7054,25 @@ void GLCanvas3D::_render_bed_axes()
 void GLCanvas3D::_render_gcode()
 {
     if (m_scene_passes != nullptr && m_scene_passes->active())
-        m_gcode_viewer.set_scene_pass_params(true, m_scene_passes->shadow_vp(), m_scene_passes->shadow_texture_id(),
-                                             m_scene_passes->ao_texture_id(), m_scene_passes->viewport_size());
+        m_gcode_viewer.set_scene_pass_params(true, m_scene_passes->shadow_vp(), m_scene_passes->shadow_texel(),
+                                             m_scene_passes->shadow_texture_id(), m_scene_passes->ao_texture_id(),
+                                             m_scene_passes->viewport_size(), m_scene_passes->viewport_origin());
     else
-        m_gcode_viewer.set_scene_pass_params(false, Matrix4d::Identity(), 0, 0, Vec2f(0.0f, 0.0f));
+        m_gcode_viewer.set_scene_pass_params(false, Matrix4d::Identity(), 0.0f, 0, 0, Vec2f(0.0f, 0.0f),
+                                             Vec2f(0.0f, 0.0f));
+
+    // The prefilter's widths are in output pixels: the viewer divides the target's size by the supersampling scale
+    m_gcode_viewer.set_output_pixel_scale(float(m_frame_info.ssaa_effective));
+    m_gcode_viewer.set_toolpath_prefilter(m_frame_info.prefilter_requested);
 
     m_gcode_viewer.render();
+
+    // Without toolpath data the viewer draws no toolpaths, and the frame keeps its "no toolpaths drawn" reason
+    if (m_gcode_viewer.has_data())
+    {
+        m_frame_info.prefilter_active = m_gcode_viewer.is_toolpath_prefilter_active();
+        m_frame_info.prefilter_reason = m_gcode_viewer.get_toolpath_prefilter_reason();
+    }
 
     // Check for scroll requests from the G-code window
     int scroll_request = m_gcode_viewer.get_sequential_view().gcode_window.get_and_clear_scroll_request();
@@ -7831,10 +8052,8 @@ void GLCanvas3D::_render_camera_target()
     static const float half_length = 10.0f;
 
     glsafe(::glDisable(GL_DEPTH_TEST));
-#if !PREFLIGHT_OPENGL_ES
     if (!OpenGLManager::get_gl_info().is_core_profile())
         glsafe(::glLineWidth(2.0f * get_imgui()->get_style_scaling()));
-#endif // !PREFLIGHT_OPENGL_ES
 
     m_camera_target.target = get_camera().get_target();
 
@@ -7874,12 +8093,8 @@ void GLCanvas3D::_render_camera_target()
         }
     }
 
-#if PREFLIGHT_OPENGL_ES
-    GLShaderProgram *shader = get_shader("dashed_lines");
-#else
     GLShaderProgram *shader = OpenGLManager::get_gl_info().is_core_profile() ? get_shader("dashed_thick_lines")
                                                                              : get_shader("flat");
-#endif // PREFLIGHT_OPENGL_ES
     if (shader != nullptr)
     {
         shader->start_using();
@@ -7887,17 +8102,13 @@ void GLCanvas3D::_render_camera_target()
         shader->set_uniform("view_model_matrix",
                             camera.get_view_matrix() * Geometry::translation_transform(m_camera_target.target));
         shader->set_uniform("projection_matrix", camera.get_projection_matrix());
-#if !PREFLIGHT_OPENGL_ES
         if (OpenGLManager::get_gl_info().is_core_profile())
         {
-#endif // !PREFLIGHT_OPENGL_ES
             const std::array<int, 4> &viewport = camera.get_viewport();
             shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
             shader->set_uniform("width", 0.5f);
             shader->set_uniform("gap_size", 0.0f);
-#if !PREFLIGHT_OPENGL_ES
         }
-#endif // !PREFLIGHT_OPENGL_ES
         for (int i = 0; i < 3; ++i)
         {
             m_camera_target.axis[i].render();
@@ -7949,15 +8160,11 @@ void GLCanvas3D::_render_camera_target_validation_box()
 
     glsafe(::glEnable(GL_DEPTH_TEST));
 
-#if PREFLIGHT_OPENGL_ES
-    GLShaderProgram *shader = get_shader("dashed_lines");
-#else
     if (!OpenGLManager::get_gl_info().is_core_profile())
         glsafe(::glLineWidth(2.0f * get_imgui()->get_style_scaling()));
 
     GLShaderProgram *shader = OpenGLManager::get_gl_info().is_core_profile() ? get_shader("dashed_thick_lines")
                                                                              : get_shader("flat");
-#endif // PREFLIGHT_OPENGL_ES
     if (shader == nullptr)
         return;
 
@@ -7965,17 +8172,13 @@ void GLCanvas3D::_render_camera_target_validation_box()
     const Camera &camera = get_camera();
     shader->set_uniform("view_model_matrix", camera.get_view_matrix());
     shader->set_uniform("projection_matrix", camera.get_projection_matrix());
-#if !PREFLIGHT_OPENGL_ES
     if (OpenGLManager::get_gl_info().is_core_profile())
     {
-#endif // !PREFLIGHT_OPENGL_ES
         const std::array<int, 4> &viewport = camera.get_viewport();
         shader->set_uniform("viewport_size", Vec2d(double(viewport[2]), double(viewport[3])));
         shader->set_uniform("width", 1.5f);
         shader->set_uniform("gap_size", 0.0f);
-#if !PREFLIGHT_OPENGL_ES
     }
-#endif // !PREFLIGHT_OPENGL_ES
     m_target_validation_box.set_color(to_rgba(ColorRGB::WHITE()));
     m_target_validation_box.render();
     shader->stop_using();

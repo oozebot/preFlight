@@ -56,6 +56,10 @@ public:
 #endif
 
 #ifdef _WIN32
+    // The sizer asks on every layout, and wx measures the label's font through a new DC each time;
+    // the answer is kept until the label, the font or the DPI changes
+    void GetBordersForSizer(int *borderTop, int *borderOther) const override;
+
 protected:
     virtual WXLRESULT MSWWindowProc(WXUINT nMsg, WXWPARAM wParam, WXLPARAM lParam) override;
 #endif
@@ -71,6 +75,18 @@ private:
     bool m_drawFlatBorder{true};
 #ifdef __WXGTK__
     wxWindow *m_headerPanel{nullptr};
+#endif
+#ifdef _WIN32
+    // GetBordersForSizer's last answer and what it was computed from
+    mutable int m_borderTop{-1};
+    mutable int m_borderOther{0};
+    mutable wxFont m_borderFont;
+    mutable wxString m_borderLabel;
+    mutable double m_borderScale{0.};
+
+    wxColour BandColour() const;
+    // Paints a box with a blank label in one pass; false leaves the paint to wx
+    bool MSWPaintBlank();
 #endif
 
     void UpdateTheme();

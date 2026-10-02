@@ -32,11 +32,7 @@
 #include <igl/per_vertex_normals.h>
 #endif // ENABLE_SMOOTH_NORMALS
 
-#if PREFLIGHT_OPENGL_ES
-#include <glad/gles2.h>
-#else
 #include <glad/gl.h>
-#endif
 
 namespace DSKY
 {
@@ -880,18 +876,14 @@ void GLModel::reset()
         s_statistics.gpu_memory.vertices.current -= vertices_size_bytes();
 #endif // ENABLE_GLMODEL_STATISTICS
     }
-#if !PREFLIGHT_OPENGL_ES
     if (OpenGLManager::get_gl_info().is_core_profile())
     {
-#endif // !PREFLIGHT_OPENGL_ES
         if (m_render_data.vao_id > 0)
         {
             glsafe(::glDeleteVertexArrays(1, &m_render_data.vao_id));
             m_render_data.vao_id = 0;
         }
-#if !PREFLIGHT_OPENGL_ES
     }
-#endif // !PREFLIGHT_OPENGL_ES
 
     m_render_data.vertices_count = 0;
     m_render_data.indices_count = 0;
@@ -992,14 +984,10 @@ void GLModel::render(const std::pair<size_t, size_t> &range)
     const bool tex_coord = Geometry::has_tex_coord(data.format);
     const bool extra = Geometry::has_extra(data.format);
 
-#if !PREFLIGHT_OPENGL_ES
     if (OpenGLManager::get_gl_info().is_core_profile())
     {
-#endif // !PREFLIGHT_OPENGL_ES
         glsafe(::glBindVertexArray(m_render_data.vao_id));
-#if !PREFLIGHT_OPENGL_ES
     }
-#endif // !PREFLIGHT_OPENGL_ES
     // the following binding is needed to set the vertex attributes
     glsafe(::glBindBuffer(GL_ARRAY_BUFFER, m_render_data.vbo_id));
 
@@ -1069,14 +1057,10 @@ void GLModel::render(const std::pair<size_t, size_t> &range)
         glsafe(::glDisableVertexAttribArray(position_id));
 
     glsafe(::glBindBuffer(GL_ARRAY_BUFFER, 0));
-#if !PREFLIGHT_OPENGL_ES
     if (OpenGLManager::get_gl_info().is_core_profile())
     {
-#endif // !PREFLIGHT_OPENGL_ES
         glsafe(::glBindVertexArray(0));
-#if !PREFLIGHT_OPENGL_ES
     }
-#endif // !PREFLIGHT_OPENGL_ES
 
 #if ENABLE_GLMODEL_STATISTICS
     ++s_statistics.render_calls;
@@ -1110,14 +1094,10 @@ void GLModel::render_instanced(unsigned int instances_vbo, unsigned int instance
             return;
     }
 
-#if !PREFLIGHT_OPENGL_ES
     if (OpenGLManager::get_gl_info().is_core_profile())
     {
-#endif // !PREFLIGHT_OPENGL_ES
         glsafe(::glBindVertexArray(m_render_data.vao_id));
-#if !PREFLIGHT_OPENGL_ES
     }
-#endif // !PREFLIGHT_OPENGL_ES
 
     glsafe(::glBindBuffer(GL_ARRAY_BUFFER, instances_vbo));
     const size_t instance_stride = 5 * sizeof(float);
@@ -1170,14 +1150,10 @@ void GLModel::render_instanced(unsigned int instances_vbo, unsigned int instance
     glsafe(::glDisableVertexAttribArray(offset_id));
 
     glsafe(::glBindBuffer(GL_ARRAY_BUFFER, 0));
-#if !PREFLIGHT_OPENGL_ES
     if (OpenGLManager::get_gl_info().is_core_profile())
     {
-#endif // !PREFLIGHT_OPENGL_ES
         glsafe(::glBindVertexArray(0));
-#if !PREFLIGHT_OPENGL_ES
     }
-#endif // !PREFLIGHT_OPENGL_ES
 
 #if ENABLE_GLMODEL_STATISTICS
     ++s_statistics.render_instanced_calls;
@@ -1199,15 +1175,11 @@ bool GLModel::send_to_gpu()
         return false;
     }
 
-#if !PREFLIGHT_OPENGL_ES
     if (OpenGLManager::get_gl_info().is_core_profile())
     {
-#endif // !PREFLIGHT_OPENGL_ES
         glsafe(::glGenVertexArrays(1, &m_render_data.vao_id));
         glsafe(::glBindVertexArray(m_render_data.vao_id));
-#if !PREFLIGHT_OPENGL_ES
     }
-#endif // !PREFLIGHT_OPENGL_ES
 
     // vertices
     glsafe(::glGenBuffers(1, &m_render_data.vbo_id));
@@ -1264,14 +1236,10 @@ bool GLModel::send_to_gpu()
 #endif // ENABLE_GLMODEL_STATISTICS
     data.indices = std::vector<unsigned int>();
 
-#if !PREFLIGHT_OPENGL_ES
     if (OpenGLManager::get_gl_info().is_core_profile())
     {
-#endif // !PREFLIGHT_OPENGL_ES
         glsafe(::glBindVertexArray(0));
-#if !PREFLIGHT_OPENGL_ES
     }
-#endif // !PREFLIGHT_OPENGL_ES
 
     return true;
 }

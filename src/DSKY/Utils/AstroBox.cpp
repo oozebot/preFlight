@@ -19,6 +19,7 @@
 #include <wx/progdlg.h>
 
 #include "luminary/config/catalog/PrintConfig.hpp"
+#include "luminary/core/text/Json.hpp"
 #include "DSKY/GUI/I18N.hpp"
 #include "DSKY/GUI/GUI.hpp"
 #include "DSKY/GUI/format.hpp"
@@ -71,9 +72,8 @@ bool AstroBox::test(wxString &msg) const
 
                 try
                 {
-                    std::stringstream ss(body);
                     pt::ptree ptree;
-                    pt::read_json(ss, ptree);
+                    read_json_bounded(body, ptree);
 
                     if (!ptree.get_optional<std::string>("api"))
                     {

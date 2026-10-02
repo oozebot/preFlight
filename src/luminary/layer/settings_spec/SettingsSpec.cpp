@@ -15,6 +15,7 @@
 #include <map>
 #include <set>
 #include <sstream>
+#include <string_view>
 
 namespace Luminary
 {
@@ -1819,6 +1820,22 @@ int check_settings_spec(std::ostream &report)
     for (const auto &[key, count] : seen)
         if (count > 1)
             fail("key '" + key + "' appears " + std::to_string(count) + " times");
+    // The sidebar's Extruders section builds the extruder page once and stores its rows under bare
+    // keys, the index being the selected extruder's: a row there must be indexed, and a row of the
+    // Settings "Extruder" page the sidebar shows must be there, not on a page that stores it bare
+    for (const SettingRow &row : setting_rows())
+    {
+        if (row.sidebar_page == nullptr)
+            continue;
+        const bool on_extruder_page = std::string_view(row.sidebar_page) == "extruder_0";
+        const bool per_extruder = row.page != nullptr && std::string_view(row.page) == "Extruder" &&
+                                  (row.presets & SettingPresetPrinter) != 0;
+        if (on_extruder_page && !row.extruder_indexed)
+            fail(std::string("row '") + row.key + "' is on the extruder sidebar page but is not indexed");
+        else if (!on_extruder_page && per_extruder)
+            fail(std::string("per-extruder row '") + row.key + "' is on sidebar page '" + row.sidebar_page +
+                 "', not on the extruder page");
+    }
     // Coverage: the preset lists are generated from the rows and the no-ui keys, so every key of
     // the FFF static configs must be in one of them, unless it is a named key no preset carries.
     static const std::set<std::string> preset_free = {

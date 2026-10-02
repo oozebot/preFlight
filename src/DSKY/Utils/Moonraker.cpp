@@ -6,6 +6,7 @@
 ///|/
 #include "Moonraker.hpp"
 #include "luminary/core/diagnostics/DebugCounters.hpp"
+#include "luminary/core/text/Json.hpp"
 
 #include <algorithm>
 #include <sstream>
@@ -133,10 +134,10 @@ bool Moonraker::test(wxString &msg) const
                 {
                     // All successful HTTP requests will return a json encoded object in the form of :
                     // {result: <response data>}
-                    std::stringstream ss(body);
                     pt::ptree ptree;
-                    pt::read_json(ss, ptree);
-                    if (ptree.front().first != "result")
+                    read_json_bounded(body, ptree);
+                    // An empty reply has no first entry to read
+                    if (ptree.empty() || ptree.front().first != "result")
                     {
                         msg = "Could not parse server response";
                         res = false;

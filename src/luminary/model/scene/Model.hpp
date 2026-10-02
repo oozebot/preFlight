@@ -1597,7 +1597,17 @@ public:
     const CustomGCode::Info &custom_gcode_per_print_z() const;
     std::vector<CustomGCode::Info> &get_custom_gcode_per_print_z_vector() { return custom_gcode_per_print_z_vector; }
 
+    // Makes the wipe tower and colour changes read for the active bed from now on, whichever bed is
+    // active later. A print pins its own copy of the model when it is applied: the slicing thread reads
+    // that copy while the plater switches the active bed to apply the other plates. Copies of a model
+    // are not pinned.
+    void pin_to_active_bed();
+
 private:
+    // The bed the accessors above read for: the pinned bed, else the active one
+    int plate_data_bed() const;
+    int m_pinned_bed{-1};
+
     // Wipe tower object.
     std::vector<ModelWipeTower> wipe_tower_vector = std::vector<ModelWipeTower>(MAX_NUMBER_OF_BEDS);
 
@@ -1712,6 +1722,12 @@ public:
     bool is_fuzzy_skin_painted() const;
     // Checks if any of objects is painted using the counterbore bridge gizmo.
     bool is_counterbore_bridge_painted() const;
+
+    // Resets every object, part and layer range assignment of an extruder above extruder_count to
+    // default (ModelConfig::reset_extruders_above). Returns the number of assignments reset.
+    size_t reset_extruders_above(size_t extruder_count);
+    // Whether reset_extruders_above(extruder_count) would reset anything
+    bool has_extruders_above(size_t extruder_count) const;
 
 private:
     explicit Model(int) : ObjectBase(-1) { assert(this->id().invalid()); }

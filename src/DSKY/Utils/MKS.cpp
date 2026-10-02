@@ -27,6 +27,7 @@
 #include <wx/checkbox.h>
 
 #include "luminary/config/catalog/PrintConfig.hpp"
+#include "luminary/core/text/Json.hpp"
 #include "DSKY/GUI/GUI.hpp"
 #include "DSKY/GUI/I18N.hpp"
 #include "DSKY/GUI/MsgDialog.hpp"
@@ -155,8 +156,7 @@ bool MKS::start_print(wxString &msg, const std::string &filename) const
 int MKS::get_err_code_from_body(const std::string &body) const
 {
     pt::ptree root;
-    std::istringstream iss(body); // wrap returned json to istringstream
-    pt::read_json(iss, root);
+    read_json_bounded(body, root);
 
     return root.get<int>("err", 0);
 }

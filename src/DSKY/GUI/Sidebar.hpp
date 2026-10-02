@@ -16,7 +16,10 @@
 #include <functional>
 #include <memory>
 #include <map>
+#include <optional>
+#include <set>
 #include <string>
+#include <vector>
 
 class wxStaticText;
 class wxComboBox;
@@ -24,6 +27,7 @@ class wxButton;
 class wxSplitterWindow;
 class CheckBox;
 class ScrollablePanel;
+class SpinInput;
 class SpinInputDouble;
 class SwitchButton;
 
@@ -50,6 +54,8 @@ enum class ActionButtonType : int
 
 // Forward declarations
 class Plater;
+class CategoryBar;
+class RowIcons;
 class CollapsibleSection;
 class PlaterPresetComboBox;
 class ObjectList;
@@ -104,13 +110,24 @@ public:
     // runs once the rebuild is done.
     void ScheduleRebuild(std::function<void()> after = {});
 
-    // Update visibility of rows, groups, and sections without rebuilding
-    void UpdateSidebarVisibility();
+    // Update visibility of rows, groups, and sections without rebuilding. `freeze` holds the
+    // panel's repaints until the end (an extruder switch passes false: the freeze costs more there);
+    // `only_tab` limits the walk to one category, whose rows alone changed
+    void UpdateSidebarVisibility(bool freeze = true, int only_tab = -1);
 
     // Re-assert accent header colors after an external dark-UI pass reset them (build-time fix)
     void ReapplyTitleAccents();
 
+#ifdef PREFLIGHT_TEST_HOOKS
+    // A group box with its overlay header that no page owns: the panel keeps no record of it, so
+    // the caller may destroy it at will. Used by the GUI probe.
+    wxStaticBoxSizer *CreateDetachedGroupBox(wxWindow *parent, const wxString &label);
+#endif
+
 protected:
+    // The panel's name in the GUI budget trace: print, filament or printer
+    std::string BudgetName() const;
+
     // Tab definition - subclasses return a vector of these
     struct TabDefinition
     {
@@ -156,11 +173,22 @@ protected:
     // Each pair: (row_sizer to show/hide, parent_sizer that also contains setting rows)
     std::vector<std::pair<wxSizer *, wxSizer *>> m_auxiliary_rows;
 
-    // Per-row pin checkboxes, created in CreateRowUIBase, shown only in edit mode. A vector of
-    // (opt_key, checkbox) rather than a map keyed by opt_key: the same opt_key can appear in two
+    // The [sidebar_visibility] key a row's pin reads, and the keys a pin click writes. A row that
+    // stands for one index of a per-extruder option reads its current index and writes all of them.
+    virtual std::string PinReadKey(const std::string &key) const { return key; }
+    virtual std::vector<std::string> PinWriteKeys(const std::string &key) const { return {key}; }
+
+    // The section a category is shown in
+    CollapsibleSection *GetTabSection(int index) const
+    {
+        return index >= 0 && index < static_cast<int>(m_tabs.size()) ? m_tabs[index].section : nullptr;
+    }
+
+    // Per-row pins (the pin slot of each row's icons), shown only in edit mode. A vector of
+    // (opt_key, icons) rather than a map keyed by opt_key: the same opt_key can appear in two
     // groups (e.g. perimeter_generator in both Advanced and Arachne), and a map would drop one
-    // checkbox, leaving an orphan that never gets hidden outside edit mode.
-    std::vector<std::pair<std::string, wxStaticBitmap *>> m_visibility_checkboxes;
+    // pin, leaving an orphan that never gets hidden outside edit mode.
+    std::vector<std::pair<std::string, RowIcons *>> m_visibility_checkboxes;
 
     // Show/hide and refresh the pin checkboxes to match the current edit-mode and pinned state
     void UpdateVisibilityCheckboxes();
@@ -212,18 +240,19 @@ protected:
 
     // Helper for subclasses to update undo/lock icons for a setting
     // Uses virtual GetEditedConfig() and GetSystemPresetParent() for config access
-    void UpdateUndoUICommon(const std::string &opt_key, wxWindow *undo_icon, wxWindow *lock_icon,
+    void UpdateUndoUICommon(const std::string &opt_key, RowIcons *undo_icon, RowIcons *lock_icon,
                             const std::string &original_value);
 
-    // Helper struct for row UI creation context
+    // Helper struct for row UI creation context. The row's pin, lock and undo are the slots of one
+    // RowIcons window: the three pointers name that window by the role the caller uses.
     struct RowUIContext
     {
         wxBoxSizer *row_sizer{nullptr};
         wxBoxSizer *left_sizer{nullptr};
-        wxStaticBitmap *lock_icon{nullptr};
-        wxStaticBitmap *undo_icon{nullptr};
+        RowIcons *lock_icon{nullptr};
+        RowIcons *undo_icon{nullptr};
         wxStaticText *label_text{nullptr};
-        wxStaticBitmap *visibility_checkbox{nullptr}; // Pin checkbox, shown only in Edit Visibility mode
+        RowIcons *visibility_checkbox{nullptr}; // Pin slot, shown only in Edit Visibility mode
         wxString tooltip;
         const ConfigOptionDef *opt_def{nullptr};
     };
@@ -232,9 +261,10 @@ protected:
     // Returns empty context (row_sizer==nullptr) if opt_key not found in config
     RowUIContext CreateRowUIBase(wxWindow *parent, const std::string &opt_key, const wxString &label);
 
-    // Creates the leading pin checkbox (shown only in Edit Visibility mode) and adds it to left_sizer.
-    // Used by CreateRowUIBase and by the special row builders so their rows pin/hide like normal rows.
-    wxStaticBitmap *AddPinCheckbox(wxWindow *parent, wxSizer *left_sizer, const std::string &opt_key);
+    // Creates a row's icons (the pin, shown only in Edit Visibility mode, when `pin_key` is not
+    // empty; the lock; the undo mark) and adds them to left_sizer. Used by CreateRowUIBase and by
+    // the special row builders so their rows pin, lock and undo like normal rows.
+    RowIcons *AddRowIcons(wxWindow *parent, wxSizer *left_sizer, const std::string &pin_key);
 
     // Build a group box (FlatStaticBox) with an overlay header that hosts the section pin checkbox
     // (mirrors the main-settings section checkbox). The checkbox toggles every row in the group.
@@ -287,7 +317,7 @@ protected:
     void SetGroupPinned(wxSizer *group_sizer, bool pinned); // pin/unpin every row in the group
 
     // Binds undo icon click handler to revert the setting value
-    void BindUndoHandler(wxStaticBitmap *undo_icon, const std::string &opt_key,
+    void BindUndoHandler(RowIcons *undo_icon, const std::string &opt_key,
                          std::function<void(const std::string &)> on_setting_changed);
 
     // Called by derived class constructors after vtable is set up
@@ -342,12 +372,18 @@ public:
         std::string reason; // the rule's reason while disabled
     };
     void EnsureAllContentBuilt();
-    void DumpRegistry(const std::string &path) const;
+    void DumpRegistry(const std::string &path);
 
 protected:
     // Called by every subclass right where it inserts into its m_setting_controls.
     void NoteRowPlacement(const std::string &registry_key);
     virtual bool LookupRegistryRow(const std::string &registry_key, RegistryRowInfo &out) const = 0;
+    // The rows the dump writes, in order: the noted placements by default. A panel whose page
+    // stands for several indices expands it back into one block per index.
+    virtual std::vector<RowPlacement> RegistryPlacements() const { return m_row_placements; }
+    // Called before each dumped row and after the last: a panel may bind the row's index first
+    virtual void BeforeRegistryRow(const RowPlacement & /*row*/) {}
+    virtual void AfterRegistryRows() {}
     std::vector<RowPlacement> m_row_placements;
     std::string m_building_group; // the title of the group being built (CreateFlatStaticBoxSizer)
 
@@ -371,6 +407,8 @@ public:
 
     void RefreshFromConfig();
     void ResetOriginalValues();
+    // The role extruders' spinners stop at the printer's extruder count
+    void UpdateExtruderRoleRanges();
 
     // Override base class
     void msw_rescale() override;
@@ -410,8 +448,9 @@ private:
     struct SettingUIElements
     {
         wxWindow *control{nullptr};
-        wxWindow *lock_icon{nullptr};
-        wxWindow *undo_icon{nullptr};
+        // The row's one RowIcons, by the slot each caller uses (its Lock and its Undo)
+        RowIcons *lock_icon{nullptr};
+        RowIcons *undo_icon{nullptr};
         wxWindow *label_text{nullptr};
         std::string original_value;
         wxString disabled_reason;       // the rule's reason while a rule disables the row
@@ -438,7 +477,9 @@ public:
     PrinterSettingsPanel(wxWindow *parent, Plater *plater);
     ~PrinterSettingsPanel();
 
-    void RefreshFromConfig();
+    // Reads every row from the edited config; `extruder_rows_only` limits it to the Extruders page
+    // (an extruder switch)
+    void RefreshFromConfig(bool extruder_rows_only = false);
     void ResetOriginalValues();
 
     // Override base class
@@ -447,6 +488,22 @@ public:
 
     // Called when extruder count changes - rebuilds tabs
     void UpdateExtruderCount(size_t count);
+    // The printer's extruder count set as its spinner sets it (the printer's per-extruder values,
+    // the Printer tab, the plater), the spinner showing the new count
+    void SetExtruderCount(int new_count);
+
+    // Selecting the extruder whose values the Extruders section shows commits the sidebar field
+    // being edited to the current extruder, then reads every row of the page at the new index into
+    // the existing controls: nothing is created or destroyed.
+    size_t GetExtrudersCount() const { return m_extruders_count; }
+    void SelectExtruder(size_t idx);
+    // The selector's colours follow the plater's extruder colours (an extruder or filament colour
+    // changed); the cells, the selection and the rows stay
+    void UpdateExtruderSwatches();
+
+    // The most cells a row of the selector holds: more extruders wrap into a second row, filled
+    // evenly (13: 7 and 6)
+    static constexpr int EXTRUDERS_PER_ROW = 12;
 
 protected:
     // TabbedSettingsPanel interface
@@ -454,9 +511,21 @@ protected:
     wxPanel *BuildTabContent(int tab_index) override;
     void OnSysColorChanged() override;
     bool LookupRegistryRow(const std::string &registry_key, RegistryRowInfo &out) const override;
+    std::vector<RowPlacement> RegistryPlacements() const override;
+    void BeforeRegistryRow(const RowPlacement &row) override;
+    void AfterRegistryRows() override;
+    std::string PinReadKey(const std::string &key) const override { return PinKey(key); }
+    std::vector<std::string> PinWriteKeys(const std::string &key) const override;
+    // The stored pin of a row: Extruder 1's ("key#0") for every row of the Extruders page
+    std::string PinKey(const std::string &key) const;
+    // Deletes the other extruders' stored pins of the Extruders page, once per start
+    void MigrateExtruderPins();
     void ClearSettingControls() override
     {
         m_setting_controls.clear();
+        m_extruder_row_keys.clear();
+        m_extruder_bar = nullptr;
+        m_extruder_tab_index = -1;
         m_marlin_limits_panel = nullptr;
         m_rrf_limits_panel = nullptr;
         m_klipper_limits_panel = nullptr;
@@ -500,6 +569,7 @@ private:
     void OnSettingChanged(const std::string &opt_key);
     void UpdateUndoUI(const std::string &opt_key);
     void ApplyToggleState(const std::string &registry_key, bool enabled, const wxString &reason) override;
+    void ApplyToggleStateIfChanged(const std::string &key, bool enabled, const wxString &reason);
     size_t ToggleExtrudersCount() const override { return m_extruders_count; }
     // The machine-limits-usage choices follow the firmware flavour; refreshed before the rules run
     void BeforeToggleRules() override { UpdateMachineLimitsUsageChoices(); }
@@ -508,6 +578,27 @@ private:
     void CreateExtruderSettingRow(wxWindow *parent, wxSizer *sizer, const std::string &opt_key, const wxString &label,
                                   size_t extruder_idx);
     void OnExtruderSettingChanged(const std::string &opt_key, size_t extruder_idx);
+
+    // The Extruders section: one page whose rows are stored under their bare keys, the index they
+    // stand for being the selected extruder. `key#<selected>` for a row of that page, else key.
+    std::string ExtruderKey(const std::string &key) const;
+    bool IsExtruderRowKey(const std::string &key) const { return m_extruder_row_keys.count(key) != 0; }
+    // Reads the page at `idx`: the undo marks from the saved preset, the values, the rules; the
+    // row visibility follows the pins of the new index
+    void RebindExtruder(size_t idx);
+    void BuildExtruderSelector(wxPanel *content);
+    void UpdateExtruderSelector(); // the cells (labels, colours) and the section's "3 / 8" badge
+    std::vector<wxColour> ExtruderSwatches() const;
+    void UpdateExtruderBadge();
+    void UpdateExtruderMarks(); // the dot on each cell whose values differ from the saved preset
+
+    size_t m_selected_extruder{0};
+    std::set<std::string> m_extruder_row_keys;
+    CategoryBar *m_extruder_bar{nullptr};
+    ::SpinInput *m_extruder_count_spin{nullptr}; // the General page's extruder count
+    int m_extruder_tab_index{-1};
+    // The selection before a registry dump walked the indices, restored after it
+    std::optional<size_t> m_dump_restore_extruder;
 
     // Machine limits sub-panels (show/hide based on gcode_flavor)
     wxPanel *m_marlin_limits_panel{nullptr};
@@ -522,15 +613,25 @@ private:
     struct SettingUIElements
     {
         wxWindow *control{nullptr};
-        wxWindow *lock_icon{nullptr};
-        wxWindow *undo_icon{nullptr};
+        wxWindow *control_y{nullptr}; // the second field of a point row (the extruder offset's Y)
+        // The row's one RowIcons, by the slot each caller uses (its Lock and its Undo)
+        RowIcons *lock_icon{nullptr};
+        RowIcons *undo_icon{nullptr};
         wxWindow *label_text{nullptr};
         std::string original_value;
         wxString disabled_reason;       // the rule's reason while a rule disables the row
         wxSizer *row_sizer{nullptr};    // The row's top-level sizer (for show/hide)
         wxSizer *parent_sizer{nullptr}; // The group sizer containing this row
+        // What the icons and the rule last showed (-1 before the first update), so an update that
+        // changes nothing sets no bitmap and no tooltip
+        int undo_state{-1};
+        int lock_state{-1};
+        int toggle_state{-1};
     };
     std::map<std::string, SettingUIElements> m_setting_controls;
+
+    // The saved preset's value of the row, at the selected extruder for a row of the Extruders page
+    void ComputeOriginalValue(const std::string &key, SettingUIElements &ui, const DynamicPrintConfig &saved) const;
 
     void UpdateRowVisibility() override;
 
@@ -604,8 +705,9 @@ private:
     struct SettingUIElements
     {
         wxWindow *control{nullptr};
-        wxWindow *lock_icon{nullptr};
-        wxWindow *undo_icon{nullptr};
+        // The row's one RowIcons, by the slot each caller uses (its Lock and its Undo)
+        RowIcons *lock_icon{nullptr};
+        RowIcons *undo_icon{nullptr};
         wxWindow *label_text{nullptr};
         ::CheckBox *enable_checkbox{nullptr}; // For nullable options
         std::string original_value;
@@ -678,10 +780,26 @@ public:
     // Accessors for compatibility with existing code
     Plater *plater() const { return m_plater; }
     ObjectList *obj_list() const { return m_object_list; }
+    // Moves the focus off the field being edited, so its value is committed where it belongs
+    void CommitFocusedField();
+    void SetEditVisibilityMode(bool edit);
+
+    // For the test hooks only (GuiTestHooks); each acts as the user's click or edit does.
     // Registry dump (PREFLIGHT_DUMP_SIDEBAR): the three panels in both layouts and both
     // visibility modes, twelve files under dir; the layout and mode in force are restored after.
     void dump_settings_registry(const std::string &dir);
-    void SetEditVisibilityMode(bool edit);
+#ifdef PREFLIGHT_TEST_HOOKS
+    // The group box with its overlay header outside any page, for the GUI probe (PREFLIGHT_GUI_PROBE)
+    wxStaticBoxSizer *create_probe_group_box(wxWindow *parent, const wxString &label);
+#endif
+    // The Printer panel's Extruders section: its extruder count, and a switch to another extruder
+    size_t printer_extruders_count() const;
+    void select_printer_extruder(size_t idx);
+    // The printer's extruder count set as the Printer panel's spinner sets it
+    void set_printer_extruders_count(int count);
+    // Tabbed view: shows the tab at `index` (0 Objects, 1 Print, 2 Filament, 3 Printer)
+    void select_sidebar_tab(int index);
+
     ObjectManipulation *obj_manipul() const { return m_object_manipulation; }
     ObjectSettings *obj_settings() const { return m_object_settings; }
     ObjectLayers *obj_layers() const { return m_object_layers; }
@@ -694,7 +812,11 @@ public:
 
     // Extruder/filament management
     void set_extruders_count(size_t count);
-    void update_objects_list_extruder_column(size_t count);
+    // The extruder count may have changed: everything that follows it is updated from here
+    void extruders_count_changed(size_t count);
+    // The plater's extruder colours changed (an extruder or a filament colour): the object list's
+    // extruder column and the Printer panel's extruder selector follow
+    void update_extruder_colors();
 
     // UI state
     void collapse(bool collapse);
@@ -794,6 +916,9 @@ private:
 
     // Printer section filament combos (for quick extruder filament selection)
     void UpdatePrinterFilamentCombos();
+    // The viewport's height (every row, or MAX_VISIBLE_EXTRUDER_ROWS while collapsed) and the chevrons
+    void UpdateExtruderRowsView();
+    void ToggleExtruderRows();
     void init_printer_filament_combo(PlaterPresetComboBox **combo, int extr_idx);
     void update_nozzle_undo_ui(size_t idx);
     void update_all_nozzle_undo_ui();
@@ -821,7 +946,10 @@ private:
     wxStaticText *m_print_pinned_label{nullptr};
     wxStaticText *m_printer_pinned_label{nullptr};
     wxStaticText *m_nozzle_pinned_label{nullptr};
-    wxStaticText *m_nozzle_unified_label{nullptr}; // Non-bold label in filament sizer (rebuilt dynamically)
+    wxStaticText *m_nozzle_unified_label{nullptr}; // Non-bold label above the nozzle/filament rows
+    // The rows' collapse chevrons beside each label, shown above MAX_VISIBLE_EXTRUDER_ROWS extruders
+    wxStaticBitmap *m_nozzle_pinned_chevron{nullptr};
+    wxStaticBitmap *m_nozzle_unified_chevron{nullptr};
 
     // Section contents
     wxPanel *m_printer_content;
@@ -834,12 +962,20 @@ private:
     // Preset combos
     PlaterPresetComboBox *m_combo_printer;
 
-    // Printer section nozzle diameter spins and filament combos (for quick extruder settings)
-    std::vector<wxStaticBitmap *> m_printer_nozzle_lock_icons;
-    std::vector<wxStaticBitmap *> m_printer_nozzle_undo_icons;
+    // Printer section nozzle diameter spins and filament combos (for quick extruder settings), one
+    // row per extruder in a viewport that shows every row, or MAX_VISIBLE_EXTRUDER_ROWS of them and
+    // scrolls while collapsed
+    static constexpr size_t MAX_VISIBLE_EXTRUDER_ROWS = 3;
+    ScrollablePanel *m_extruder_rows{nullptr};
+    wxBoxSizer *m_extruder_rows_sizer{nullptr};
+    bool m_extruder_rows_expanded{false};
+    std::vector<wxBoxSizer *> m_printer_nozzle_row_sizers;
+    std::vector<RowIcons *> m_printer_nozzle_icons;
+    std::vector<wxStaticText *> m_printer_nozzle_numbers;
     std::vector<double> m_printer_nozzle_original_values;
     std::vector<::SpinInputDouble *> m_printer_nozzle_spins;
     std::vector<PlaterPresetComboBox *> m_printer_filament_combos;
+    std::vector<ScalableButton *> m_printer_filament_save_buttons;
     wxBoxSizer *m_printer_filament_sizer{nullptr};
     PlaterPresetComboBox *m_combo_print;
     std::vector<PlaterPresetComboBox *> m_combos_filament;

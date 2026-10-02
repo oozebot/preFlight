@@ -7,6 +7,8 @@
 #include <wx/panel.h>
 #include <wx/sizer.h>
 
+#include <string>
+
 class ScrollBar;
 
 // A scrollable panel that uses the custom ScrollBar widget instead of native scrollbars.
@@ -43,6 +45,9 @@ public:
     // Update scrollbar after content changes
     void UpdateScrollbar();
 
+    // The width UpdateScrollbar gives content of this height: narrower by the scrollbar when it scrolls
+    int ContentWidthFor(int contentHeight) const;
+
     // Override the scrollbar track background color (default comes from UIColors)
     void SetTrackColour(const wxColour &colour);
 
@@ -55,6 +60,14 @@ public:
     // Get scroll position
     int GetScrollPosition() const;
 
+    // Names the panel in the GUI budget trace, which records its content height under this tag
+    void SetBudgetTag(const std::string &tag) { m_budgetTag = tag; }
+
+    // A wheel turn the panel cannot scroll by (at its top turning up, at its bottom turning down)
+    // goes on to the windows around it, so a small panel inside a scrolled one never stops the
+    // outer scroll. Off by default: the panel keeps every turn over it.
+    void SetWheelPassesAtEnds(bool passes) { m_wheelPassesAtEnds = passes; }
+
 protected:
     // Return a small default so parent sizers constrain our height
     // instead of expanding to fit full content. Without this, DoGetBestSize
@@ -65,6 +78,8 @@ protected:
 
 private:
     void OnSize(wxSizeEvent &event);
+    // One measure and layout; UpdateScrollbar repeats it while the layout asked for another
+    void DoUpdateScrollbar();
     void OnScroll(wxScrollEvent &event);
     void OnMouseWheel(wxMouseEvent &event);
 
@@ -73,6 +88,12 @@ private:
     int m_scrollPosition;      // Current scroll position in pixels
     int m_contentHeight;       // Cached content height
     int m_sumWheelRotation{0}; // Accumulator for partial wheel events (XWayland)
+    std::string m_budgetTag;   // GUI budget trace tag; empty for untraced panels
+    int m_reportedHeight{-1};  // Content height last reported to the GUI budget
+    bool m_contentOverflowing{false};
+    bool m_wheelPassesAtEnds{false};
+    bool m_updating{false};    // an UpdateScrollbar is running
+    bool m_updateAgain{false}; // a child's layout asked for another while it ran
 
     wxDECLARE_EVENT_TABLE();
 };

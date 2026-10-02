@@ -537,11 +537,11 @@ ScalableBitmap::ScalableBitmap(wxWindow *parent, boost::filesystem::path &icon_p
             wxBitmap::Rescale(bmp, icon_size * scale);
             bmps.push_back(bmp);
         }
-        m_bmp = wxBitmapBundle::FromBitmaps(bmps);
+        m_bmp = DSKY::share_bitmap_sizes(wxBitmapBundle::FromBitmaps(bmps));
     }
     else if (ext == ".svg")
     {
-        m_bmp = wxBitmapBundle::FromSVGFile(path, icon_size);
+        m_bmp = DSKY::share_bitmap_sizes(wxBitmapBundle::FromSVGFile(path, icon_size));
     }
 }
 

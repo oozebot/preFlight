@@ -11,7 +11,11 @@
 #include "MainFrame.hpp"
 #include "format.hpp"
 #include "luminary/config/thumbnails/Thumbnails.hpp"
+#ifdef PREFLIGHT_TEST_HOOKS
+#include "GuiBudget.hpp"
+#endif
 
+#include <algorithm>
 #include <chrono>
 #include <wx/app.h>
 #include <wx/panel.h>
@@ -33,10 +37,13 @@
 #include "luminary/gcode/scripting/PreProcessor.hpp"
 #include "luminary/platform/concurrency/Thread.hpp"
 #include "luminary/core/Prelude.hpp"
+#include "luminary/core/diagnostics/DebugCounters.hpp"
 
 #include <cassert>
 #include <stdexcept>
 #include <cctype>
+#include <cerrno>
+#include <cstdlib>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -190,26 +197,6 @@ std::string BackgroundSlicingProcess::output_filepath_for_project(const boost::f
 void BackgroundSlicingProcess::process_fff()
 {
     assert(m_print == m_fff_print);
-    {
-        const AppConfig *app_config = DSKY::wxGetApp().app_config;
-        size_t threshold = 10'000'000;
-        if (app_config)
-        {
-            std::string val = app_config->get("preview_detail");
-            if (!val.empty())
-            {
-                try
-                {
-                    threshold = std::stoull(val);
-                }
-                catch (...)
-                {
-                    threshold = 10'000'000;
-                }
-            }
-        }
-        m_fff_print->set_preview_detail_threshold(threshold);
-    }
     m_print->process();
     m_slicing_event_poster->postSlicingCompleted(
         (int) (m_fff_print->step_state_with_timestamp(PrintStep::psSlicingFinished).timestamp));
@@ -223,9 +210,120 @@ void BackgroundSlicingProcess::process_fff()
             finalize_gcode(m_export_path, m_export_path_on_removable_media);
         }
 
-        // Note: Don't set 100% here - data conversion (85-100%) happens during preview reload
+        // Note: Don't set 100% here - the Preview preparation below fills 85-100%
         this->set_step_done(bspsGCodeFinalize);
     }
+
+    // The CPU part of loading the result into the Preview, done here while this thread owns the result, so the UI
+    // thread's load only installs it
+    this->prepare_preview();
+}
+
+void BackgroundSlicingProcess::prepare_preview()
+{
+    if (!m_preview_preparer)
+        return;
+    if (m_gcode_result == nullptr || m_gcode_result->moves.empty())
+    {
+        m_prepared_preview_missing = "the G-code result holds no moves";
+        return;
+    }
+
+    // The preparation fills the progress from 85 to 100 under the text the export left, one status per percent
+    const std::string preparing = _u8L("Preparing preview data");
+    int reported = -1;
+    const std::function<void(float)> progress = [this, &reported, &preparing](float fraction)
+    {
+        if (fraction >= 1.0f)
+        {
+            m_print->set_status(100, _u8L("Rendering"));
+            return;
+        }
+        const int percent = std::clamp(85 + static_cast<int>(fraction * 15.0f), 85, 99);
+        if (percent != reported)
+        {
+            reported = percent;
+            m_print->set_status(percent, preparing);
+        }
+    };
+    const std::function<bool()> canceled = [this]()
+    {
+        return m_print->canceled();
+    };
+    try
+    {
+        this->throw_if_canceled();
+        m_prepared_preview = m_preview_preparer(*m_gcode_result, progress, canceled);
+        m_prepared_preview_missing = m_prepared_preview != nullptr ? "" : "the preparation made nothing";
+    }
+    catch (const CanceledException &)
+    {
+        // The run ends cancelled; the UI thread's stop() then discards the export, see discard_cancelled_preparation()
+        DBG_COUNT_LOAD("RENDER_PREPARE_CANCELLED");
+        m_prepared_preview.reset();
+        m_prepared_preview_missing = "the preparation was cancelled";
+        m_preview_prepare_cancelled = true;
+        throw;
+    }
+    catch (const std::exception &e)
+    {
+        DBG_COUNT_LOAD("RENDER_PREPARE_FAILED");
+        BOOST_LOG_TRIVIAL(error) << "Preview preparation failed, the Preview prepares on the UI thread: " << e.what();
+        m_prepared_preview.reset();
+        m_prepared_preview_missing = std::string("the preparation failed: ") + e.what();
+    }
+    catch (...)
+    {
+        DBG_COUNT_LOAD("RENDER_PREPARE_FAILED");
+        BOOST_LOG_TRIVIAL(error) << "Preview preparation failed, the Preview prepares on the UI thread";
+        m_prepared_preview.reset();
+        m_prepared_preview_missing = "the preparation failed";
+    }
+}
+
+std::shared_ptr<DSKY::PreparedPreview> BackgroundSlicingProcess::take_prepared_preview(std::string &missing_reason)
+{
+    std::scoped_lock<std::mutex> lock(m_mutex);
+    if (m_state == STATE_STARTED || m_state == STATE_RUNNING)
+    {
+        missing_reason = "a slice is running";
+        return nullptr;
+    }
+    if (m_prepared_preview == nullptr)
+    {
+        missing_reason = m_prepared_preview_missing;
+        return nullptr;
+    }
+    missing_reason.clear();
+    m_prepared_preview_missing = "handed to an earlier load";
+    return std::move(m_prepared_preview);
+}
+
+void BackgroundSlicingProcess::drop_prepared_preview(const char *reason)
+{
+    std::scoped_lock<std::mutex> lock(m_mutex);
+    if (m_state == STATE_STARTED || m_state == STATE_RUNNING)
+        return;
+    m_prepared_preview.reset();
+    m_prepared_preview_missing = reason;
+}
+
+void BackgroundSlicingProcess::discard_cancelled_preparation()
+{
+    if (!m_preview_prepare_cancelled)
+        return;
+    m_preview_prepare_cancelled = false;
+    m_prepared_preview.reset();
+    m_prepared_preview_missing = "the preparation was cancelled";
+    // The next slice exports again, as after a cancel before the export finished. invalidate_gcode_export() expects
+    // the state mutex locked; its cancel callback is the idle one stop() just set.
+    if (m_fff_print != nullptr && m_print == m_fff_print)
+    {
+        std::scoped_lock<std::mutex> lock(m_print->state_mutex());
+        m_fff_print->invalidate_gcode_export();
+    }
+    if (m_gcode_result != nullptr)
+        m_gcode_result->reset();
 }
 
 void BackgroundSlicingProcess::thread_proc()
@@ -459,6 +557,13 @@ bool BackgroundSlicingProcess::start()
         // The print is empty (no object in Model, or all objects are out of the print bed).
         return false;
 
+    // The run's Preview preparer, decided from the UI's state here, on the UI thread, before the lock (the factory
+    // reads GUI objects); it replaces the last run's only if this run starts
+    std::string preview_skip_reason = "no Preview preparation";
+    PreviewPreparer preview_preparer;
+    if (m_preview_preparer_factory)
+        preview_preparer = m_preview_preparer_factory(preview_skip_reason);
+
     std::unique_lock<std::mutex> lck(m_mutex);
     if (m_state == STATE_INITIAL)
     {
@@ -482,11 +587,45 @@ bool BackgroundSlicingProcess::start()
         return false;
     if (!this->idle())
         throw Luminary::RuntimeError("Cannot start a background task, the worker thread is not idle.");
+    // Read on the UI thread while the worker waits: the worker never reads AppConfig, which the Preferences write
+    m_fff_print->set_preview_detail_threshold(preview_detail_threshold(DSKY::wxGetApp().app_config));
+    // This run supersedes the last run's prepared Preview
+    m_preview_preparer = std::move(preview_preparer);
+    m_prepared_preview.reset();
+    m_prepared_preview_missing = m_preview_preparer ? "the slice did not reach its preparation" : preview_skip_reason;
+    m_preview_prepare_cancelled = false;
     m_state = STATE_STARTED;
     m_print->set_cancel_callback([this]() { this->stop_internal(); });
     lck.unlock();
     m_condition.notify_one();
+#ifdef PREFLIGHT_TEST_HOOKS
+    // The UI thread's responsiveness is measured from here to the first frame drawing this slice's toolpaths
+    DSKY::GuiBudget::stall_window_begin();
+#endif
     return true;
+}
+
+size_t BackgroundSlicingProcess::preview_detail_threshold(const AppConfig *config)
+{
+    // AppConfig's default for the key, for a config that lacks it
+#if defined(__linux__) && defined(__aarch64__)
+    constexpr size_t fallback = 1'000'000;
+#else
+    constexpr size_t fallback = 10'000'000;
+#endif
+    const std::string value = config != nullptr ? config->get("preview_detail") : std::string();
+    if (value.empty())
+        return fallback;
+    char *end = nullptr;
+    errno = 0;
+    const unsigned long long threshold = std::strtoull(value.c_str(), &end, 10);
+    if (!std::isdigit(static_cast<unsigned char>(value.front())) || *end != '\0' || errno == ERANGE)
+    {
+        DBG_COUNT_LOAD("PREVIEW_DETAIL_UNKNOWN_VALUE");
+        BOOST_LOG_TRIVIAL(warning) << "Preview Detail: unknown value \"" << value << "\", using " << fallback;
+        return fallback;
+    }
+    return size_t(threshold);
 }
 
 // To be called on the UI thread.
@@ -510,12 +649,14 @@ bool BackgroundSlicingProcess::stop()
         // In the "Canceled" state. Reset the state to "Idle".
         m_state = STATE_IDLE;
         m_print->set_cancel_callback([]() {});
+        this->discard_cancelled_preparation();
     }
     else if (m_state == STATE_FINISHED || m_state == STATE_CANCELED)
     {
         // In the "Finished" or "Canceled" state. Reset the state to "Idle".
         m_state = STATE_IDLE;
         m_print->set_cancel_callback([]() {});
+        this->discard_cancelled_preparation();
     }
     //	m_export_path.clear();
     return true;
@@ -527,6 +668,7 @@ bool BackgroundSlicingProcess::reset()
     this->reset_export();
     m_print->clear();
     this->invalidate_all_steps();
+    this->drop_prepared_preview("the slicing process was reset");
     return stopped;
 }
 
@@ -685,6 +827,8 @@ Print::ApplyStatus BackgroundSlicingProcess::apply(const Model &model, const Dyn
         if (m_gcode_result != nullptr)
         {
             m_gcode_result->reset();
+            // A Preview prepared from the result goes with it
+            this->drop_prepared_preview("the G-code result was reset");
 #ifdef _WIN32
             if (release_memory)
             {
