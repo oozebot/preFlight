@@ -78,6 +78,9 @@ void AppConfig::set_defaults()
         // Enable support issues alerts by default
         if (get("alert_when_supports_needed").empty())
             set("alert_when_supports_needed", "1");
+
+        if (get("send_to_printer_default").empty())
+            set("send_to_printer_default", "0");
         // If set, the "Controller" tab for the control of the printer over serial line and the serial port settings are hidden.
         // By default, the controller is hidden.
         if (get("no_controller").empty())

@@ -946,7 +946,9 @@ void ModernTabBar::AddSliceButton(std::function<void()> slice_callback, std::fun
                              // Draw text
                              dc.SetTextForeground(current_text_color);
                              dc.SetFont(GetFont());
-                             wxString label = m_has_sliced_object ? _L("Export G-code") : _L("Slice Platter");
+                             wxString label = !m_has_sliced_object  ? _L("Slice Platter")
+                                              : SendIsPrimaryAction() ? _L("Send to printer")
+                                                                      : _L("Export G-code");
                              wxSize text_size = dc.GetTextExtent(label);
                              // Center text - if dropdown shown, offset by dropdown width; otherwise center in full button
                              int text_x = m_show_dropdown
@@ -966,7 +968,11 @@ void ModernTabBar::AddSliceButton(std::function<void()> slice_callback, std::fun
                              m_slice_button_pressed = true;
                              m_slice_button->Refresh();
 
-                             if (m_show_dropdown)
+                             // With "Send to printer" as the primary action, only the chevron opens the menu;
+                             // the rest of the button sends directly.
+                             const bool send_primary = SendIsPrimaryAction();
+                             const bool on_chevron = event.GetX() < GetScaledDropdownWidth();
+                             if (m_show_dropdown && (!send_primary || on_chevron))
                              {
                                  // Connected to printer and sliced - show dropdown anywhere on button
                                  // Clicked on dropdown area - show menu
@@ -1055,6 +1061,12 @@ void ModernTabBar::AddSliceButton(std::function<void()> slice_callback, std::fun
                              else
                              {
             // Clicked on main button area
+                                 if (send_primary && m_send_to_printer_callback)
+                                 {
+                                     auto cb = m_send_to_printer_callback;
+                                     wxTheApp->CallAfter([cb]() { cb(); });
+                                     return;
+                                 }
 #ifdef __APPLE__
                                  // Defer the callback to after the mouse event completes.
                                  // Running heavy operations (view switch + reslice) directly from
@@ -1099,8 +1111,9 @@ void ModernTabBar::AddSliceButton(std::function<void()> slice_callback, std::fun
                              }
                              else
                              {
-                                 m_slice_button->SetToolTip(m_has_sliced_object ? _L("Export G-code")
-                                                                                : _L("Slice the plate"));
+                                 m_slice_button->SetToolTip(!m_has_sliced_object ? _L("Slice the plate")
+                                                            : SendIsPrimaryAction() ? _L("Send to printer (click the arrow for more options)")
+                                                                                    : _L("Export G-code"));
                              }
                          });
 
@@ -1118,6 +1131,12 @@ void ModernTabBar::AddSliceButton(std::function<void()> slice_callback, std::fun
     GetSizer()->Add(m_slice_button, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, GetScaledMargin());
 }
 
+bool ModernTabBar::SendIsPrimaryAction() const
+{
+    return m_has_sliced_object && CanSendToPrinter() && wxGetApp().app_config &&
+           wxGetApp().app_config->get_bool("send_to_printer_default");
+}
+
 void ModernTabBar::UpdateSliceButtonState(bool has_sliced_object)
 {
     if (!m_slice_button)
@@ -1133,7 +1152,9 @@ void ModernTabBar::UpdateSliceButtonState(bool has_sliced_object)
     // Update button visibility based on current tab
     UpdateSliceButtonVisibility();
 
-    m_slice_button->SetLabel(has_sliced_object ? _L("Export G-code") : _L("Slice Platter"));
+    m_slice_button->SetLabel(!has_sliced_object  ? _L("Slice Platter")
+                             : SendIsPrimaryAction() ? _L("Send to printer")
+                                                     : _L("Export G-code"));
     m_slice_button->Refresh();
 }
 

@@ -71,6 +71,8 @@ public:
         return IsPrinterConnected() && m_connection_state == PrinterConnectionChecker::State::Online;
     }
     bool CanExportToScript() const { return m_show_export_script; }
+    // True when the user prefers "Send to printer" as the main button action and sending is possible right now.
+    bool SendIsPrimaryAction() const;
     bool HasSlicedObject() const { return m_has_sliced_object; }
     bool IsSliceButtonEnabled() const { return m_slice_button_enabled; }
     // Run the slice-button's slice action (used by the editor right-click "Slice Platter" item).

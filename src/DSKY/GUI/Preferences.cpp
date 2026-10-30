@@ -709,6 +709,12 @@ void PreferencesDialog::build()
               "adhesion, thin fragile parts) are reported as a separate alert, since supports do not fix them."),
             app_config->get_bool("alert_when_supports_needed"));
 
+        append_bool_option(m_optgroup_general, "send_to_printer_default", L("Send to printer by default"),
+                           L("If this is enabled and a physical printer is online, clicking the main button after "
+                             "slicing sends the G-code to the printer. Click the arrow for Save locally and the other "
+                             "export options."),
+                           app_config->get_bool("send_to_printer_default"));
+
         m_optgroup_general->append_separator();
 
         // Please keep in sync with ConfigWizard
